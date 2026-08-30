@@ -128,9 +128,7 @@ class BitableClient:
         page_token: str | None = None
 
         while True:
-            builder = (
-                ListAppTableRequest.builder().app_token(self._app_token).page_size(100)
-            )
+            builder = ListAppTableRequest.builder().app_token(self._app_token).page_size(100)
             if page_token:
                 builder = builder.page_token(page_token)
 
@@ -284,11 +282,7 @@ def _to_plain_dict(obj: Any) -> dict[str, Any]:
     if isinstance(obj, dict):
         return obj
     try:
-        return {
-            k: v
-            for k, v in json.loads(lark.JSON.marshal(obj)).items()
-            if v is not None
-        }
+        return {k: v for k, v in json.loads(lark.JSON.marshal(obj)).items() if v is not None}
     except Exception:  # noqa: BLE001 - property 结构五花八门，拿不到就算了
         return {}
 

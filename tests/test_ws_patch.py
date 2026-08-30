@@ -78,9 +78,7 @@ def test_打补丁后card帧被改写成event帧():
         Client._handle_data_frame = original
         ws_patch.sdk_drops_card_frames = _real_detector  # type: ignore[assignment]
 
-    assert seen == [MessageType.EVENT.value], (
-        "CARD 帧没被改写成 EVENT，卡片提交仍会被 SDK 丢弃"
-    )
+    assert seen == [MessageType.EVENT.value], "CARD 帧没被改写成 EVENT，卡片提交仍会被 SDK 丢弃"
 
 
 def test_event帧不受影响():

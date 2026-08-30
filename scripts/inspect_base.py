@@ -81,8 +81,7 @@ def main() -> int:
                     )
                 else:
                     findings.append(
-                        f"{table.name}.{f.name} 是「{type_name(f.type)}」，"
-                        "不是数字类型，精度安全。"
+                        f"{table.name}.{f.name} 是「{type_name(f.type)}」，不是数字类型，精度安全。"
                     )
 
             if _looks_like(f.name, REFERRAL_NO_HINTS):
@@ -99,9 +98,7 @@ def main() -> int:
                     )
 
             if _looks_like(f.name, PROFIT_HINTS):
-                findings.append(
-                    f"{table.name}.{f.name} 是「{type_name(f.type)}」—— 佣金基数候选。"
-                )
+                findings.append(f"{table.name}.{f.name} 是「{type_name(f.type)}」—— 佣金基数候选。")
 
         print()
 

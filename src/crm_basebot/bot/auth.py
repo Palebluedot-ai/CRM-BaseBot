@@ -62,8 +62,7 @@ class SalesDirectory:
             directory[open_id] = Sales(
                 open_id=open_id,
                 name=extract_text(record.fields.get(schema.SALES_NAME)),
-                role=extract_text(record.fields.get(schema.SALES_ROLE))
-                or schema.ROLE_SALES,
+                role=extract_text(record.fields.get(schema.SALES_ROLE)) or schema.ROLE_SALES,
                 is_active=extract_text(record.fields.get(schema.SALES_STATUS))
                 != schema.SALES_STATUS_DISABLED,
             )
@@ -108,9 +107,7 @@ def require_owner(sales: Sales, record_owner_open_id: str, *, what: str) -> None
 
     if not record_owner_open_id:
         # 归属为空的记录一律不给普通销售碰。历史数据补录归属之前只有管理员能看。
-        logger.warning(
-            "记录 %s 没有归属人，拒绝 %s(%s) 访问", what, sales.name, sales.open_id
-        )
+        logger.warning("记录 %s 没有归属人，拒绝 %s(%s) 访问", what, sales.name, sales.open_id)
         raise AuthError(f"{what} 没有登记归属人，请联系管理员处理。")
 
     if record_owner_open_id != sales.open_id:

@@ -75,9 +75,7 @@ def apply_card_frame_patch() -> bool:
     original = Client._handle_data_frame
 
     if not sdk_drops_card_frames(original):
-        logger.info(
-            "lark-oapi 已自行修复 CARD 帧分发，跳过补丁 —— 可以删掉 ws_patch.py 了"
-        )
+        logger.info("lark-oapi 已自行修复 CARD 帧分发，跳过补丁 —— 可以删掉 ws_patch.py 了")
         return False
 
     @functools.wraps(original)
