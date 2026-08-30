@@ -47,12 +47,18 @@ uv run python -m crm_basebot.app            # 启动机器人
 一张字段一致的模拟交易明细表顶上。它默认只预演，且会先扫一遍目标 Base，发现不是它造的
 数据就拒绝执行。
 
-对账（默认只算不写）。种子数据落在 2026-01 到 2026-03：
+对账（默认只算不写）：
 
 ```bash
-uv run python -m crm_basebot.jobs.reconcile --period 2026-03
+uv run python -m crm_basebot.jobs.reconcile                    # 最新有数据的月份
+uv run python -m crm_basebot.jobs.reconcile --period 2026-03   # 指定月份
+uv run python -m crm_basebot.jobs.reconcile --all-periods      # 全部月份
 uv run python -m crm_basebot.jobs.reconcile --period 2026-03 --write
 ```
+
+不传 `--period` 时结算的是**交易明细里最新有数据的那个月**，不是「上个月」。写死上个月，月初跑的时候会算出一片空白，而它又恰好在「这个月的数据其实已经有了」的时候什么都不说。实际选中的月份一定会打印在输出第一行，不用猜。
+
+**佣金规则**：`应付佣金 = max(0, 当月 Pnl 合计 × 分佣比例)`。整月亏损的渠道佣金按 0 保底，不倒扣、也不结转到下个月 —— 这是业务规则，2026-08-30 明确定的，不是代码漏了处理负数。Pnl 合计仍然如实记录负值，报表上看得见这个渠道当月是亏的，汇总输出也会单独标注一行。细节见 `domain/commission.py` 的 `CommissionRow.payable`。
 
 ## 文档
 

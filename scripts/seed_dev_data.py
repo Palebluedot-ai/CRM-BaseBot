@@ -279,9 +279,9 @@ UNMAPPED_CLIENTS: dict[str, str] = {
 # 2. 有亏损单（负 Pnl），而且分两种情形：
 #    - 北极星资本 2026-02 有一笔 -875.40，但当月合计仍然为正
 #    - 恒星资本 2026-02 合计为 -2935.10，**整月为负**
-#    第二种是关键：现在的 CommissionRow.payable 会算出一个负的应付佣金。
-#    这是不是业务想要的（渠道倒欠我们钱？还是负月份按 0 计？还是跨月冲抵？），
-#    脚本不替业务拍板，只保证这个情形一定会在对账输出里出现，逼它被看见。
+#    第二种是关键：它落在业务规则「整月亏损佣金按 0 保底，不倒扣不结转」上，
+#    对账输出里那个渠道当月应付是 0、Pnl 仍是 -2935.10，并且会被单独标注出来。
+#    这条规则由 CommissionRow.payable 落实，种子数据保证它每次对账都被走到一遍。
 # 3. Pnl 量级是几百到几千 USD 且都带小数，跟真实盘口一致；整数金额会掩盖掉
 #    Decimal 累加和 float 累加的差别。
 _TRANSACTION_ROWS: tuple[tuple[str, str, float], ...] = (
@@ -986,10 +986,11 @@ def main(argv: list[str] | None = None) -> int:
     print("\n下一步，验证对账（只算不写）：")
     for period in periods:
         print(f"  uv run python -m crm_basebot.jobs.reconcile --period {period}")
+    print(f"  uv run python -m crm_basebot.jobs.reconcile   # 不传月份就是最新的 {periods[-1]}")
     print(
         f"\n预期能看到：{len(UNMAPPED_CLIENTS)} 个未登记归属的客户告警；"
-        "以及 2026-02 有一个渠道整月 Pnl 为负、应付佣金算出负数 —— 这是刻意造的，"
-        "用来确认负 Pnl 的业务规则。"
+        "以及 2026-02 有一个渠道整月 Pnl 为负 —— 按业务规则它当月应付佣金是 0"
+        "（保底，不倒扣不结转），汇总里会单独标注一行。"
     )
     return 0
 

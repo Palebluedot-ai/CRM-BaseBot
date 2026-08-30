@@ -83,6 +83,8 @@ Transaction Details ──客户UID──► Referred Client ──关联──�
 | 应付佣金 | 数字 |
 | 计算时间 | 日期 |
 
+`应付佣金 = max(0, Pnl合计 × 分佣比例)`。整月亏损的渠道佣金按 0 保底，不倒扣也不结转到下个月 —— 这是业务规则（2026-08-30 定的），不是代码漏了处理负数。注意 `Pnl合计` **仍然如实记负值**：报表上要看得见这个渠道当月是亏的，把 Pnl 也截成 0 会让对账说不清账。完整说明见 `domain/commission.py` 的 `CommissionRow.payable`。
+
 **为什么不在 Base 里用公式算**：Bitable 的 `FILTER` 上限 2 万条，单表也有行数上限，而交易明细是全量表且只增不减。后端聚合后只写少量汇总行，既避开上限，也让计算逻辑可被单元测试覆盖（见 `tests/test_commission.py`）。
 
 金额在后端用 `Decimal` 累加而不是 float —— 上千行浮点累加的误差会让对账对不上分。

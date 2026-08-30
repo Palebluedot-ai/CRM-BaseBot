@@ -1,10 +1,15 @@
 """按月对账：算佣金并把汇总写回 Base。
 
+    uv run python -m crm_basebot.jobs.reconcile                     # 最新有数据的月份
     uv run python -m crm_basebot.jobs.reconcile --period 2026-03
     uv run python -m crm_basebot.jobs.reconcile --period 2026-03 --write
+    uv run python -m crm_basebot.jobs.reconcile --all-periods
 
 默认**只算不写**。要真的写进 Base 得显式加 ``--write`` —— 这是一次会改动结算
 数据的操作，不应该手滑就发生。
+
+不传 ``--period`` 时结算**交易明细里最新有数据的那个月**，不是「上个月」。理由见
+``CommissionCalculator.compute_latest``。实际选中的月份一定会打印出来，不用猜。
 
 算之前先校验交易明细表的结构。那张表是同事每天手工导入维护的，列名被改过而
 我们浑然不觉地继续算，是这个系统最容易出的事故。
@@ -15,7 +20,6 @@ from __future__ import annotations
 import argparse
 import logging
 import time
-from datetime import UTC, datetime
 
 from ..config import get_settings
 from ..domain import schema
@@ -53,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="按月计算渠道佣金")
     parser.add_argument(
         "--period",
-        help="结算月份 YYYY-MM，默认上个月",
+        help="结算月份 YYYY-MM。不传的话结算交易明细里最新有数据的那个月，实际选中的月份会打印出来",
     )
     parser.add_argument(
         "--all-periods",
@@ -78,8 +82,6 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)-7s %(message)s",
     )
 
-    period = None if args.all_periods else (args.period or _last_month())
-
     bitable = BitableClient(settings.base_app_token)
 
     assert_fields_present(
@@ -89,10 +91,37 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     calculator = CommissionCalculator(bitable, settings=settings)
-    rows, unmapped = calculator.compute(period=period, strict=args.strict)
 
-    print(f"\n结算范围：{period or '全部月份'}\n")
+    if args.all_periods:
+        period = None
+        rows, unmapped = calculator.compute(strict=args.strict)
+        scope = "全部月份"
+    elif args.period:
+        period = args.period
+        rows, unmapped = calculator.compute(period=period, strict=args.strict)
+        scope = f"{period}（你显式指定的）"
+    else:
+        period, rows, unmapped = calculator.compute_latest(strict=args.strict)
+        if not period:
+            # 定不出默认月份就没法往下走。返回非 0 是有意的：交易明细空了，
+            # 或者整列订单时间都解析不出来，都说明上游导入出了问题，该被告警看见。
+            print(
+                "\n定不出要结算哪个月：交易明细是空的，"
+                f"或者没有一行的「{schema.TXN_ORDER_TIME}」能解析出 YYYY-MM。\n"
+                "先确认同事的导入跑过了，或者用 --period YYYY-MM 显式指定。"
+            )
+            return 1
+        scope = f"{period}（自动选定：交易明细里最新有数据的月份）"
+
+    # 把实际结算的月份原原本本打出来。默认值是算出来的而不是写死的，
+    # 不打印的话，看报表的人没法确认这个数对应的是哪个月。
+    print(f"\n结算范围：{scope}\n")
     print(summarize(rows))
+
+    if period and not rows:
+        print(
+            f"\n{period} 有交易数据，但没有任何一笔能归属到已登记的渠道。看下面的未登记客户清单。"
+        )
 
     # UID 体检。算钱之前发现比事后对账发现便宜得多 —— 一旦 UID 被 Excel 改坏，
     # 佣金会静默算到别的渠道头上。这是启发式，会误报，所以只告警不中止。
@@ -103,8 +132,11 @@ def main(argv: list[str] | None = None) -> int:
         print("!" * 60)
 
     if unmapped:
+        # 只有显式 --period 时，未登记清单才是限定在那个月的；另外两种模式下是全表范围。
+        # 未登记归属是数据问题，不该因为这次只结算一个月就被藏起来。
+        scope_note = "" if args.period else "（全表范围，不限本月）"
         print(
-            f"\n注意：{len(unmapped)} 个客户在交易明细里有记录但没登记归属渠道，"
+            f"\n注意：{len(unmapped)} 个客户在交易明细里有记录但没登记归属渠道{scope_note}，"
             "这部分 Pnl 没有计入任何佣金："
         )
         for uid in unmapped[:20]:
@@ -128,6 +160,8 @@ def main(argv: list[str] | None = None) -> int:
         action=ACTION_COMPUTE_COMMISSION,
         target_table=schema.TABLE_COMMISSION_NAME,
         detail={
+            # 记的是实际结算的月份，不是命令行传进来的原始值 —— 默认值是算出来的，
+            # 审计里必须能看出那次跑的到底是哪个月。
             "结算范围": period or "全部月份",
             "写入行数": written,
             "未登记客户数": len(unmapped),
@@ -137,12 +171,6 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"\n已写入 {written} 行汇总。")
     return 0
-
-
-def _last_month() -> str:
-    now = datetime.now(UTC)
-    year, month = (now.year, now.month - 1) if now.month > 1 else (now.year - 1, 12)
-    return f"{year}-{month:02d}"
 
 
 if __name__ == "__main__":

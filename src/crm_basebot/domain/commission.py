@@ -1,6 +1,9 @@
 """佣金计算。
 
-    佣金 = 该渠道名下所有客户在该月的 Pnl(USD) 合计 × 该渠道的分佣比例
+    佣金 = max(0, 该渠道名下所有客户在该月的 Pnl(USD) 合计 × 该渠道的分佣比例)
+
+那个 ``max(0, ...)`` 是业务规则不是技术细节：整月亏损的渠道佣金按 0 保底，不倒扣也
+不结转到下个月。完整说明和拍板时间见 ``CommissionRow.payable``。
 
 三张表的连接链路：
 
@@ -54,10 +57,45 @@ class CommissionRow:
     client_uids: set[str] = field(default_factory=set)
 
     @property
-    def payable(self) -> Decimal:
+    def gross_payable(self) -> Decimal:
+        """按比例直接算出来的金额，**可能是负数**。
+
+        存在的意义只有一个：让「保底 0」这一步是可见的。报表上看到 Pnl 是负的、
+        应付是 0，能对上这里的原始值，而不用去猜中间发生了什么。
+        """
         return (self.pnl_total * self.rate_percent / Decimal(100)).quantize(
             CENTS, rounding=ROUND_HALF_UP
         )
+
+    @property
+    def payable(self) -> Decimal:
+        """应付佣金。整月 Pnl 为负时按 0 保底。
+
+        **这是一条业务规则，不是技术上的取舍。** 不要因为「负数看起来不对」就来改它，
+        也不要因为「max(0, x) 看起来像在掩盖问题」就把它删掉。规则的完整内容是：
+
+            payable = max(0, pnl_total × rate)
+
+          · 亏损月**不倒扣** —— 渠道不会因为客户当月亏钱而倒欠我们佣金
+          · 亏损**不结转** —— 这个月的亏损不会去冲抵下个月的佣金，每个月独立结算
+
+        「不结转」是使用方在 2026-08-30 明确决定的，不是默认行为，也不是漏了没做。
+        如果哪天要改成结转，那是一次业务规则变更，得先有人拍板 —— 因为结转会让
+        「这个月该付多少」依赖于之前所有月份，跨月的账要重算。
+
+        注意 ``pnl_total`` 仍然如实保留负值，只有应付佣金被保底。把 Pnl 也截成 0 会
+        让报表看不出这个渠道当月是亏的，对账时说不清账。
+        """
+        return max(Decimal("0"), self.gross_payable)
+
+    @property
+    def is_loss_month(self) -> bool:
+        """这个渠道这个月整体是亏的。
+
+        判据是严格小于 0：合计恰好为 0 不算亏损月，只是这个月没赚到钱，
+        两者在报表上不该长成一样。
+        """
+        return self.pnl_total < Decimal("0")
 
     @property
     def client_count(self) -> int:
@@ -112,6 +150,10 @@ class CommissionCalculator:
         # compute() 途中顺手攒下来的 UID，用于事后体检。
         # 用 set 而不是 list：唯一 UID 的数量受客户数约束，不会随交易笔数膨胀。
         self._seen_uids: set[str] = set()
+        # 交易明细里出现过的最大月份，同样是 compute() 途中顺手记的。
+        # 「有数据的最新月份」是 reconcile 不传 --period 时的默认结算范围，
+        # 单独再扫一遍表去求它，等于让每次对账的 API 调用量翻倍。
+        self._latest_period = ""
 
     # ---------- 载入维表 ----------
 
@@ -184,6 +226,11 @@ class CommissionCalculator:
             row_period = period_of(record.fields.get(schema.TXN_ORDER_TIME))
             if not row_period:
                 continue
+
+            # 刻意放在 period 过滤**之前**：这个值的语义是「表里最新的月份」，
+            # 跟这次算的是哪个月无关。YYYY-MM 按字典序比就是按时间序比。
+            self._latest_period = max(self._latest_period, row_period)
+
             if period and row_period != period:
                 continue
 
@@ -220,6 +267,31 @@ class CommissionCalculator:
         ordered = sorted(rows.values(), key=lambda r: (r.period, r.referral_no))
         return ordered, sorted(unmapped)
 
+    def compute_latest(self, *, strict: bool = False) -> tuple[str, list[CommissionRow], list[str]]:
+        """只算交易明细里**最新有数据的那个月**，并把月份一起返回。
+
+        为什么默认是这个而不是「上个月」：写死上个月，在月初跑的时候会算出一片空白
+        （上个月的数据还没导完，或者同事本来就是按月末批量导的），而它又恰好在
+        「这个月的数据其实已经有了」的时候什么都不说。跟着数据走，默认行为总是落在
+        真正有东西可看的那批数据上。
+
+        月份取的是**交易明细里的最大月份**，而不是「有佣金可算的最大月份」。差别在于：
+        如果最新那个月的交易全部来自未登记归属的客户，这里会如实返回那个月 + 一个空
+        列表，配合 unmapped 告警就能看出「新数据来了，但客户还没登记」—— 这正是需要
+        被看见的状态。要是退回到上一个算得出钱的月份，这件事就被藏起来了。
+
+        返回的 unmapped 是**全表范围**的，不限于这个月。未登记归属是数据问题，
+        不该因为这次只结算一个月就被藏起来。
+        """
+        rows, unmapped = self.compute(strict=strict)
+        latest = self._latest_period
+        return latest, [row for row in rows if row.period == latest], unmapped
+
+    @property
+    def latest_transaction_period(self) -> str:
+        """交易明细里出现过的最大月份。compute() 跑完才有值，空表返回空串。"""
+        return self._latest_period
+
     def uid_health(self) -> UidHealthReport:
         """体检 compute() 过程中见到的所有 UID，看有没有 Excel 截断痕迹。
 
@@ -255,7 +327,13 @@ def summarize(rows: list[CommissionRow]) -> str:
     for period in sorted(by_period):
         period_rows = by_period[period]
         total = sum((r.payable for r in period_rows), Decimal("0"))
-        lines.append(f"{period}  合计应付 {total:,.2f} USD")
+        loss_rows = [r for r in period_rows if r.is_loss_month]
+
+        header = f"{period}  合计应付 {total:,.2f} USD"
+        if loss_rows:
+            header += f"（其中 {len(loss_rows)} 个渠道整月亏损，本月不付佣金）"
+        lines.append(header)
+
         for row in period_rows:
             lines.append(
                 f"    {row.referral_no} {row.referral_name or '(未命名)':<20} "
@@ -263,4 +341,13 @@ def summarize(rows: list[CommissionRow]) -> str:
                 f"= {row.payable:>10,.2f}   "
                 f"({row.client_count} 客户 / {row.txn_count} 笔)"
             )
+            # 亏损月单独起一行说明，不是挤在上面那行末尾。
+            # 只输出一个 0 的话，读的人分不清「这个月亏了」和「这个月没交易」——
+            # 两种情况在报表上长得一样，但意思完全不同。
+            if row.is_loss_month:
+                lines.append(
+                    f"         └─ 整月亏损 {abs(row.pnl_total):,.2f} USD"
+                    f"（按比例应为 {row.gross_payable:,.2f}），"
+                    "按业务规则佣金保底 0：不倒扣，也不结转到下个月"
+                )
     return "\n".join(lines)
