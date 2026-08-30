@@ -65,6 +65,8 @@ Transaction Details ──客户UID──► Referred Client ──关联──�
 
 算佣金真正依赖的只有三个：订单时间、客户UID、Pnl(USD)。`jobs/reconcile.py` 在计算前会调 `assert_fields_present` 校验这三个还在、类型没变，对不上就中止 —— 这张表不在我们控制下，静默算错比报错危险得多。
 
+阶段 A 的开发租户里读不到这张表（自建应用跨不了租户），所以 `scripts/seed_dev_data.py` 会在那边建一张同名同字段的模拟表顶上，对账代码一行不用改。唯一的偏差是客户UID 建成「文本」而不是真表的「查找引用」—— 两种 `to_uid` 都能安全取值，`TXN_REQUIRED_FIELDS` 对它的期望类型也是 None。`sync_base.py` 永远不建这张表，免得在公司 Base 上盖掉同事的。
+
 ## 表 4：Commission Summary（佣金汇总）
 
 后端按月写入。
@@ -125,3 +127,5 @@ uv run python scripts/sync_base.py --apply # 执行
 ```
 
 `sync_base.py` 只增不改不删：缺的表和字段会补，已存在但类型不符的只报告给你决定，多出来的一概不碰。
+
+结构建好之后，开发租户还需要一套测试数据才能验证对账，见 [LARK_APP_SETUP.md 第 10 步](LARK_APP_SETUP.md#第-10-步造种子数据)。

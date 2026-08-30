@@ -27,6 +27,7 @@ import lark_oapi as lark
 from lark_oapi.api.bitable.v1 import (
     AppTableRecord,
     CreateAppTableRecordRequest,
+    DeleteAppTableRecordRequest,
     GetAppTableRecordRequest,
     ListAppTableFieldRequest,
     ListAppTableRequest,
@@ -249,6 +250,26 @@ class BitableClient:
             created = response.data.record
             # 自动编号等系统字段在 create 响应里不一定回填，回读一次才拿得准
             return self.get_record(table_id, created.record_id)
+
+    def delete_record(self, table_id: str, record_id: str) -> None:
+        """删除一条记录。
+
+        目前只有 ``scripts/seed_dev_data.py --reset`` 用它清理开发租户里的种子
+        数据。机器人和对账任务都不删记录 —— 审计表更是明确只增不改。放在这里而
+        不是让脚本自己调 SDK，是为了让删除也走同一把写锁：删和写并发同样会撞
+        ``1254045 WriteConflict``。
+        """
+        request = (
+            DeleteAppTableRecordRequest.builder()
+            .app_token(self._app_token)
+            .table_id(table_id)
+            .record_id(record_id)
+            .build()
+        )
+
+        with _WRITE_LOCK:
+            response = self._client.bitable.v1.app_table_record.delete(request)
+            _check(response, f"删除记录 record_id={record_id}")
 
     # ---------- schema 快照 ----------
 

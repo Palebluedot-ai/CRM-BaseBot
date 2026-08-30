@@ -30,15 +30,24 @@ uv run pytest
 拿到飞书凭证之后，按这个顺序走：
 
 ```bash
-uv run python scripts/ws_smoke.py           # 验证长连接和卡片回调
+uv run python scripts/ws_smoke.py           # 验证长连接和卡片回调，记下日志里的 open_id
 uv run python scripts/inspect_base.py       # 看现有 Base 有什么
 uv run python scripts/sync_base.py          # 预演要建哪些表和字段
 uv run python scripts/sync_base.py --apply  # 执行
+uv run python scripts/seed_dev_data.py --open-id ou_xxx   # 预演种子数据
+uv run python scripts/seed_dev_data.py --open-id ou_xxx --yes-this-is-a-dev-base
 uv run python scripts/verify_numbering.py --probe   # 实测 R+3 位编号
 uv run python -m crm_basebot.app            # 启动机器人
 ```
 
-对账（默认只算不写）：
+**为什么要造种子数据**：自建应用只能在同一个企业租户内使用，所以阶段 A 那个自建的免费
+组织，读不到公司租户里那张真实的交易明细表。而手工导出 CSV 再导进来是不行的 —— Excel
+只保留 15 位有效数字，18-19 位的客户UID 一过 Excel 就被抹掉低位，测试数据从第一天起就
+是坏的。`scripts/seed_dev_data.py` 走 API 直接写，全程不经过浮点数，顺带在开发租户里造
+一张字段一致的模拟交易明细表顶上。它默认只预演，且会先扫一遍目标 Base，发现不是它造的
+数据就拒绝执行。
+
+对账（默认只算不写）。种子数据落在 2026-01 到 2026-03：
 
 ```bash
 uv run python -m crm_basebot.jobs.reconcile --period 2026-03

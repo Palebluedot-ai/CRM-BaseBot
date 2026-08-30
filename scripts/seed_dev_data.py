@@ -1,0 +1,998 @@
+#!/usr/bin/env python
+"""在开发租户的 Base 里造一套种子数据。
+
+## 为什么需要这个脚本
+
+飞书自建应用「只能在同一企业内发布和使用」。你在自建的 `CRM-Dev` 团队里建的应用，
+没有任何办法被加成公司租户里那张真实交易明细表的协作者 —— 阶段 A 根本读不到真数据。
+
+那手工导出 CSV 再导进来行不行？不行，而且是这个项目里最贵的一个坑：Excel 只保留
+15 位有效数字，18-19 位的客户UID 一过 Excel 就被抹掉低位，
+``577809207768677761`` 变成 ``577809207768678000``。抹完之后它看起来仍然是个合法的
+长数字，join 时静默匹配到别的客户。测试数据从第一天起就是坏的，而且坏得看不出来。
+
+所以种子数据只能走 API 直接写：Python 的 int 和 str 都是任意精度，全程不经过任何
+浮点数环节。
+
+## 怎么用
+
+    # 只预演，不写任何东西（默认）
+    uv run python scripts/seed_dev_data.py --open-id ou_xxxxxxxx
+
+    # 真的写
+    uv run python scripts/seed_dev_data.py --open-id ou_xxxxxxxx --yes-this-is-a-dev-base
+
+    # 换一套种子数据重来（先删旧的，需要交互式敲一遍 app_token 确认）
+    uv run python scripts/seed_dev_data.py --open-id ou_xxxxxxxx --yes-this-is-a-dev-base --reset
+
+open_id 从 ``scripts/ws_smoke.py`` 的日志里拿：给机器人发条消息，它会把发件人的
+open_id 打出来。拿不到就先加 ``--no-open-id``，但归属会挂在占位账号上，机器人查不到
+这些渠道，之后得 ``--reset`` 重来一次。
+
+## 两道安全闸门，为什么两道都要
+
+**闸门一：必须显式传 ``--yes-this-is-a-dev-base``。** 默认只预演。这个 flag 表达的是
+「我知道我在往一个可以随便造假数据的 Base 里写」。
+
+**闸门二：扫一遍目标 Base，发现不是本脚本造的记录就拒绝执行。** 判据不是「数据多」而是
+「有别人的数据」—— 一个刚建好的生产 Base 也是空的，靠行数根本区分不出来。
+
+两道缺一不可，因为它们防的不是同一件事。flag 防的是「不知道这个脚本会写数据」，
+但防不住最常见的那种失误：从文档里复制了完整正确的命令，而 ``.env`` 里的
+``LARK_BASE_APP_TOKEN`` 指着生产 Base —— 这时候 flag 照样传了，人的意图也没错，
+错的是目标。只有真去读一眼目标 Base 里有什么，才拦得住。
+
+反过来只有扫描也不够：扫描对空 Base 无话可说，而 flag 至少保证了这一次执行是有意的。
+
+## 幂等：默认跳过，另给 --reset
+
+默认按自然键跳过已存在的行（渠道按名称、客户按 UID、交易按「日期+UID+Pnl」、
+销售按 OpenID）。重复跑只补缺的，不会堆出重复数据，误跑一次的代价是零。
+
+但只有跳过不够用：种子数据的形状会变（比如以后再加一对相邻 UID），这时表里留着上一版
+的残留，对账结果就说不清是哪一版算出来的。所以另给 ``--reset``。
+
+``--reset`` 的删除面收得很窄：只删标记字段以 ``SEED-`` 开头的记录。就算闸门二被绕过、
+脚本真的指向了生产 Base，它也删不掉任何一行真实数据。在此之上再加一道交互式确认 ——
+要求你手敲一遍 app_token，因为可以整行复制粘贴的确认等于没有确认。
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import sys
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from crm_basebot.config import get_settings  # noqa: E402
+from crm_basebot.domain import schema  # noqa: E402
+from crm_basebot.domain.audit import (  # noqa: E402
+    ACTION_CREATE_CLIENT,
+    ACTION_CREATE_REFERRAL,
+    AuditLog,
+)
+from crm_basebot.lark.bitable import (  # noqa: E402
+    FIELD_TYPE_DATETIME,
+    FIELD_TYPE_NUMBER,
+    FIELD_TYPE_TEXT,
+    BitableClient,
+    Record,
+)
+from crm_basebot.lark.client import get_client  # noqa: E402
+from crm_basebot.lark.values import extract_text, to_number, to_uid  # noqa: E402
+
+# 种子数据的标记。业务代码不认识它，它只服务两件事：
+#   1. 在 Base 里一眼看出哪些行是脚本造的假数据，不会被误当成真实业务数据
+#   2. --reset 只删标记命中的行，把删除面死死收在种子数据里
+SEED_PREFIX = "SEED-"
+
+# 每张表用哪个字段承载标记。挑的都是自由文本字段，不影响任何计算 ——
+# 对账只读订单时间、客户UID、Pnl(USD) 三个字段。
+SEED_MARKER_FIELD: dict[str, str] = {
+    schema.TABLE_REFERRAL_NAME: schema.REFERRAL_NAME,
+    schema.TABLE_CLIENT_NAME: schema.CLIENT_NAME,
+    schema.TABLE_TRANSACTION_NAME: schema.TXN_CLIENT_NAME,
+    schema.TABLE_COMMISSION_NAME: schema.COMM_REFERRAL_NAME,
+    schema.TABLE_AUDIT_NAME: schema.AUDIT_ACTOR_NAME,
+    schema.TABLE_SALES_NAME: schema.SALES_NAME,
+}
+
+# 模拟交易明细表的字段。**刻意不放进 domain/schema.py。**
+# schema.py 里的 TXN_* 描述的是同事那张我们只读的真表，而 sync_base.py 明确不建它 ——
+# 真跑到生产 Base 上建一张同名表，会盖住同事的表，是灾难。这份「要建成什么样」的定义
+# 只对开发租户有意义，所以留在这个只在开发租户跑的脚本里。字段名仍然全部引用 schema.py
+# 的常量，不重复硬编码。
+#
+# 一处刻意的偏差：真表里客户UID 是「查找引用」，这里建成「文本」。
+# schema.TXN_REQUIRED_FIELDS 对这个字段的期望类型是 None（只要求存在），
+# 两种类型 to_uid 都能安全取值，所以对账代码一行不用改。绝不能建成「数字」。
+MOCK_TRANSACTION_FIELDS: dict[str, int] = {
+    schema.TXN_ORDER_TIME: FIELD_TYPE_DATETIME,
+    schema.TXN_ENTITY: FIELD_TYPE_TEXT,
+    schema.TXN_CLIENT_NAME: FIELD_TYPE_TEXT,
+    schema.TXN_CLIENT_UID: FIELD_TYPE_TEXT,
+    schema.TXN_QUANTITY: FIELD_TYPE_NUMBER,
+    schema.TXN_PRICE: FIELD_TYPE_NUMBER,
+    schema.TXN_FEE: FIELD_TYPE_NUMBER,
+    schema.TXN_FEE_CURRENCY: FIELD_TYPE_TEXT,
+    schema.TXN_PNL: FIELD_TYPE_NUMBER,
+}
+
+# 我们自己维护、由 sync_base.py 建好的表
+OWNED_TABLES = (
+    schema.TABLE_REFERRAL_NAME,
+    schema.TABLE_CLIENT_NAME,
+    schema.TABLE_COMMISSION_NAME,
+    schema.TABLE_AUDIT_NAME,
+    schema.TABLE_SALES_NAME,
+)
+
+# 没传 --open-id 时填进「登记人OpenID」的占位值。
+# 刻意不长得像真的 open_id（真的以 ou_ 开头），免得有人以为它能登录。
+PLACEHOLDER_OPEN_ID = "seed-placeholder-open-id"
+
+
+# ---------- 种子数据定义（纯数据，不碰 API，可被单测覆盖） ----------
+
+
+@dataclass(frozen=True)
+class SeedReferral:
+    name: str
+    email: str
+    address: str
+    payment: str
+    rate_percent: float
+    status: str
+
+
+@dataclass(frozen=True)
+class SeedClient:
+    uid: str
+    name: str
+    referral_name: str
+
+
+@dataclass(frozen=True)
+class SeedTransaction:
+    order_date: str
+    uid: str
+    client_name: str
+    pnl: float
+    entity: str
+    quantity: float
+    price: float
+    fee: float
+    fee_currency: str
+
+    @property
+    def period(self) -> str:
+        return self.order_date[:7]
+
+
+@dataclass(frozen=True)
+class SeedSales:
+    open_id: str
+    name: str
+    role: str
+    status: str
+
+
+def build_referrals() -> list[SeedReferral]:
+    """四个渠道，分佣比例刻意各不相同。
+
+    12.5 是故意放的：整数比例掩盖不了的舍入问题，只有带小数的比例才暴露得出来
+    （比如 Pnl 合计 × 12.5% 落在半分上，看 CommissionRow.payable 的 ROUND_HALF_UP
+    是不是真的按预期进位）。
+
+    最后一个渠道留在「待审核」状态，用来看清一件事：现在的佣金计算**不看状态**，
+    待审核和停用的渠道照样会被算进汇总。这是不是想要的行为，得由业务定，不在这里改。
+    """
+    return [
+        SeedReferral(
+            name=f"{SEED_PREFIX}北极星资本",
+            email="ops@polaris-cap.example",
+            address="Hong Kong, Central, Des Voeux Road 100",
+            payment="HSBC 004-123-456789",
+            rate_percent=20,
+            status=schema.STATUS_ACTIVE,
+        ),
+        SeedReferral(
+            name=f"{SEED_PREFIX}鲸落数字",
+            email="finance@whalefall.example",
+            address="Singapore, Raffles Place 8",
+            payment="DBS 072-901234-5",
+            rate_percent=12.5,
+            status=schema.STATUS_ACTIVE,
+        ),
+        SeedReferral(
+            name=f"{SEED_PREFIX}恒星资本",
+            email="bd@stellar-cap.example",
+            address="Hong Kong, Wan Chai, Gloucester Road 28",
+            payment="USDT-TRC20 TQn9Y2khEsLJW1ChVWFMSMeRDow5KcbLSE",
+            rate_percent=15,
+            status=schema.STATUS_ACTIVE,
+        ),
+        SeedReferral(
+            name=f"{SEED_PREFIX}灰岩科技",
+            email="contact@greyrock.example",
+            address="Dubai, DIFC, Gate Village 4",
+            payment="Emirates NBD 1012345678901",
+            rate_percent=8,
+            status=schema.STATUS_PENDING,
+        ),
+    ]
+
+
+def build_clients() -> list[SeedClient]:
+    """七个客户，UID 全部是 18-19 位的真实形态。
+
+    最要紧的是两对**只差最后一位**、且分属不同渠道的 UID：
+
+        577809207768677761  ->  北极星资本
+        577809207768677762  ->  鲸落数字
+        2141293991366272768 ->  恒星资本
+        2141293991366272769 ->  北极星资本
+
+    这是给未来的自己埋的探针。只要哪天有人在链路上任何一处对 UID 做了 int()/float()，
+    或者数据过了一手 Excel，这两对就会塌成同一个值，佣金立刻算到隔壁渠道头上 ——
+    而且是**看得见**的错：对账结果里两个渠道的金额会明显对不上。
+    如果 UID 都长得八竿子打不着，精度丢了也只是匹配不上，很容易被当成「数据还没导全」。
+
+    另一件刻意的事：没有任何一个 UID 以连续 0 结尾。
+    lark/values.py 的 looks_excel_truncated 会把「18 位且末尾 3 个 0」判为疑似 Excel
+    截断，种子数据要是撞上这个形态，inspect_base 和 reconcile 每次都会报一次假警。
+    """
+    rows = (
+        ("577809207768677761", "普罗米修斯资本", "北极星资本"),
+        ("2141293991366272769", "青柠数科", "北极星资本"),
+        ("577809207768677762", "普罗米修斯投资", "鲸落数字"),
+        ("577809207768681473", "长夜资本", "鲸落数字"),
+        ("2141293991366272768", "青柠科技", "恒星资本"),
+        ("2141293991366298113", "潮汐资本", "恒星资本"),
+        ("577809207768692231", "磐石家族办公室", "灰岩科技"),
+    )
+    return [
+        SeedClient(uid, f"{SEED_PREFIX}{name}", f"{SEED_PREFIX}{referral}")
+        for uid, name, referral in rows
+    ]
+
+
+# 只在交易明细里出现、没登记归属渠道的客户。
+# 真实场景每天都在发生：同事导入的交易里冒出一个新客户，销售还没来得及登记。
+# 这几行是用来验证 reconcile 的 unmapped 告警真的会响的。
+UNMAPPED_CLIENTS: dict[str, str] = {
+    "577809207768703914": f"{SEED_PREFIX}未登记的星辰投资",
+    "2141293991366311457": f"{SEED_PREFIX}未登记的沧海资管",
+    "577809207768715026": f"{SEED_PREFIX}未登记的南山家办",
+}
+
+# (订单日期, 客户UID, Pnl(USD))
+#
+# 三件事是刻意设计出来的，不是随手编的：
+#
+# 1. 跨 2026-01 / 02 / 03 三个月，用来验证按月汇总没有把月份串了。
+# 2. 有亏损单（负 Pnl），而且分两种情形：
+#    - 北极星资本 2026-02 有一笔 -875.40，但当月合计仍然为正
+#    - 恒星资本 2026-02 合计为 -2935.10，**整月为负**
+#    第二种是关键：现在的 CommissionRow.payable 会算出一个负的应付佣金。
+#    这是不是业务想要的（渠道倒欠我们钱？还是负月份按 0 计？还是跨月冲抵？），
+#    脚本不替业务拍板，只保证这个情形一定会在对账输出里出现，逼它被看见。
+# 3. Pnl 量级是几百到几千 USD 且都带小数，跟真实盘口一致；整数金额会掩盖掉
+#    Decimal 累加和 float 累加的差别。
+_TRANSACTION_ROWS: tuple[tuple[str, str, float], ...] = (
+    # ---- 2026-01 ----
+    ("2026-01-06", "577809207768677761", 1240.55),
+    ("2026-01-14", "577809207768677761", 862.30),
+    ("2026-01-21", "2141293991366272769", 2105.75),
+    ("2026-01-09", "577809207768677762", 640.20),
+    ("2026-01-23", "577809207768681473", 1580.65),
+    ("2026-01-12", "2141293991366272768", 3120.45),
+    ("2026-01-27", "2141293991366298113", -415.60),
+    ("2026-01-18", "577809207768692231", 980.15),
+    ("2026-01-29", "577809207768703914", 1450.35),
+    # ---- 2026-02 ----
+    ("2026-02-03", "577809207768677761", -875.40),
+    ("2026-02-11", "577809207768677761", 430.85),
+    ("2026-02-19", "2141293991366272769", 1290.60),
+    ("2026-02-05", "577809207768677762", 2240.90),
+    ("2026-02-17", "577809207768681473", -320.75),
+    ("2026-02-08", "2141293991366272768", -2680.30),
+    ("2026-02-22", "2141293991366272768", -1145.20),
+    ("2026-02-26", "2141293991366298113", 890.40),
+    ("2026-02-14", "577809207768692231", 1560.05),
+    ("2026-02-21", "2141293991366311457", 2310.55),
+    # ---- 2026-03 ----
+    ("2026-03-04", "577809207768677761", 1975.25),
+    ("2026-03-16", "2141293991366272769", 3410.80),
+    ("2026-03-25", "2141293991366272769", -560.15),
+    ("2026-03-06", "577809207768677762", 1120.35),
+    ("2026-03-13", "577809207768681473", 2050.70),
+    ("2026-03-20", "577809207768681473", 745.90),
+    ("2026-03-09", "2141293991366272768", 4230.15),
+    ("2026-03-28", "2141293991366298113", 1680.55),
+    ("2026-03-11", "577809207768692231", 2140.25),
+    ("2026-03-18", "577809207768715026", 995.45),
+    ("2026-03-30", "577809207768703914", 1875.80),
+)
+
+# 佣金不看这几个字段，但真表里有，就得填上 —— 空着的话，
+# 哪天有人写了个依赖它们的报表，会以为线上数据也长这样。
+_PRICES = (0.1875, 0.2032, 0.1946, 0.2210)
+_ENTITIES = ("HashKey SG", "HashKey HK")
+_FEE_CURRENCIES = ("USDT", "USD")
+
+
+def build_transactions() -> list[SeedTransaction]:
+    names = {c.uid: c.name for c in build_clients()} | UNMAPPED_CLIENTS
+
+    rows: list[SeedTransaction] = []
+    for index, (order_date, uid, pnl) in enumerate(_TRANSACTION_ROWS):
+        price = _PRICES[index % len(_PRICES)]
+        rows.append(
+            SeedTransaction(
+                order_date=order_date,
+                uid=uid,
+                client_name=names[uid],
+                pnl=pnl,
+                entity=_ENTITIES[index % len(_ENTITIES)],
+                quantity=round(abs(pnl) / price, 2),
+                price=price,
+                fee=round(abs(pnl) * 0.0008, 4),
+                fee_currency=_FEE_CURRENCIES[index % len(_FEE_CURRENCIES)],
+            )
+        )
+    return rows
+
+
+def build_sales(open_id: str | None, admin_name: str) -> list[SeedSales]:
+    """销售名册。
+
+    第一行是你自己，角色给管理员 —— 管理员不受归属限制，能看全部数据，方便调试。
+    后面两行是假账号，其中一个「停用」，用来验证名册里有人但被停用时会被拒。
+    假账号的 open_id 不长得像真的，谁也登不进来。
+    """
+    rows: list[SeedSales] = []
+
+    if open_id:
+        rows.append(
+            SeedSales(
+                open_id=open_id,
+                name=f"{SEED_PREFIX}{admin_name}",
+                role=schema.ROLE_ADMIN,
+                status=schema.SALES_STATUS_ACTIVE,
+            )
+        )
+
+    rows.extend(
+        [
+            SeedSales(
+                open_id="seed-fake-sales-a",
+                name=f"{SEED_PREFIX}林晓",
+                role=schema.ROLE_SALES,
+                status=schema.SALES_STATUS_ACTIVE,
+            ),
+            SeedSales(
+                open_id="seed-fake-sales-b",
+                name=f"{SEED_PREFIX}周然",
+                role=schema.ROLE_SALES,
+                status=schema.SALES_STATUS_DISABLED,
+            ),
+        ]
+    )
+    return rows
+
+
+def to_timestamp_ms(order_date: str) -> int:
+    """'2026-01-06' -> Bitable 日期字段要的毫秒时间戳。
+
+    按 UTC 零点算。所有日期都避开了月初月末，时区偏移不会把它们挪到隔壁月份。
+    """
+    return int(datetime.strptime(order_date, "%Y-%m-%d").replace(tzinfo=UTC).timestamp() * 1000)
+
+
+def is_seed_value(value: Any) -> bool:
+    """这条记录的标记字段是不是本脚本写的。"""
+    return extract_text(value).startswith(SEED_PREFIX)
+
+
+def transaction_key(order_ms: int, uid: str, pnl: float) -> tuple[int, str, float]:
+    """交易行的自然键。同一天同一个客户可能有多笔，所以要带上 Pnl。"""
+    return (order_ms, uid, round(pnl, 4))
+
+
+# ---------- 以下开始碰真实 API ----------
+
+
+def _load_sync_base():
+    """复用 sync_base.py 的建表/建字段实现，不复制一份。"""
+    spec = importlib.util.spec_from_file_location(
+        "sync_base", Path(__file__).resolve().parent / "sync_base.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# 发现几条外来记录就够下结论了。生产 Base 的交易明细是几万行的全量表，
+# 没必要为了确认「这里不能碰」把它整张拉下来。
+FOREIGN_SAMPLE_LIMIT = 5
+
+
+@dataclass
+class TableScan:
+    table_id: str
+    seed_records: list[Record]
+    foreign_samples: list[str]
+
+
+def _scan(bitable: BitableClient, table_id: str, marker_field: str) -> TableScan:
+    """一次遍历同时干两件事：找外来数据（安全检查）、收集种子记录（幂等和 --reset）。
+
+    一旦攒够 FOREIGN_SAMPLE_LIMIT 条外来记录就提前停 —— 这时候执行必然被拒，
+    seed_records 收不全也无所谓。
+    """
+    seed_records: list[Record] = []
+    foreign_samples: list[str] = []
+
+    for record in bitable.iter_records(table_id):
+        value = record.fields.get(marker_field)
+        if is_seed_value(value):
+            seed_records.append(record)
+            continue
+
+        foreign_samples.append(extract_text(value) or "(该字段为空)")
+        if len(foreign_samples) >= FOREIGN_SAMPLE_LIMIT:
+            break
+
+    return TableScan(table_id=table_id, seed_records=seed_records, foreign_samples=foreign_samples)
+
+
+def _describe_foreign(scans: dict[str, TableScan]) -> list[str]:
+    problems: list[str] = []
+    for table_name, scan in scans.items():
+        if scan.foreign_samples:
+            marker_field = SEED_MARKER_FIELD[table_name]
+            count = len(scan.foreign_samples)
+            # 攒够上限就提前停了，所以这时候只知道「至少这么多」
+            count_text = f"至少 {count}" if count >= FOREIGN_SAMPLE_LIMIT else str(count)
+            problems.append(
+                f"「{table_name}」有 {count_text} 条不是本脚本造的记录，"
+                f"例如 {marker_field}={scan.foreign_samples[0]}"
+            )
+    return problems
+
+
+def _confirm_reset(app_token: str) -> bool:
+    """--reset 的第二道确认：手敲一遍 app_token。
+
+    刻意做成交互式而不是再加一个 flag。整行命令是可以复制粘贴的，多加一个 flag 只是
+    让那一行更长；而 app_token 要从 .env 里翻出来对着敲，敲的过程本身就是一次核对
+    「我到底在删哪个 Base」。
+    """
+    if not sys.stdin.isatty():
+        print("--reset 只能在交互式终端里跑，需要你手敲一遍 app_token 确认。", file=sys.stderr)
+        return False
+
+    print(f"\n--reset 会删除这个 Base 里所有 {SEED_PREFIX} 开头的记录：{app_token}")
+    print("（只删种子数据，不碰任何其他行。）")
+    typed = input("确认请完整输入上面的 app_token：").strip()
+
+    if typed != app_token:
+        print("输入不匹配，已取消。", file=sys.stderr)
+        return False
+    return True
+
+
+def _resolve_tables(bitable: BitableClient) -> tuple[dict[str, str], list[str]]:
+    """按表名解析 table_id。
+
+    刻意按名字找而不是读 .env 里的 TABLE_*：种子数据是紧跟在 sync_base.py --apply
+    之后跑的，那时候 .env 里的 table_id 多半还没回填。表名是 sync_base 建表时用的，
+    是这个阶段唯一可靠的锚点。跑完会把 table_id 打出来给你回填。
+    """
+    existing = {t.name: t.table_id for t in bitable.list_tables()}
+    found = {name: existing[name] for name in OWNED_TABLES if name in existing}
+    missing = [name for name in OWNED_TABLES if name not in existing]
+
+    if schema.TABLE_TRANSACTION_NAME in existing:
+        found[schema.TABLE_TRANSACTION_NAME] = existing[schema.TABLE_TRANSACTION_NAME]
+
+    return found, missing
+
+
+def _create_mock_transaction_table(app_token: str) -> str:
+    sync_base = _load_sync_base()
+    client = get_client()
+
+    table_id = sync_base._create_table(client, app_token, schema.TABLE_TRANSACTION_NAME)
+    print(f"  已建表「{schema.TABLE_TRANSACTION_NAME}」-> {table_id}")
+    for field_name, type_code in MOCK_TRANSACTION_FIELDS.items():
+        sync_base._create_field(client, app_token, table_id, field_name, type_code)
+        print(f"    + {field_name}")
+    return table_id
+
+
+def _check_mock_transaction_fields(
+    bitable: BitableClient, app_token: str, table_id: str, *, apply: bool
+) -> list[str]:
+    """模拟交易明细表已经在了，确认它的字段能用，缺的补上。
+
+    单独拎出「客户UID 是不是数字类型」这一条硬拦：往数字字段里写 18 位 UID，
+    精度在 Bitable 服务端就丢了，客户端无论怎么写都救不回来 —— 那就等于从第一天
+    起就在错的数据上做对账，正是这个脚本要避免的事。
+    """
+    current = {f.name: f for f in bitable.list_fields(table_id)}
+    uid_field = current.get(schema.TXN_CLIENT_UID)
+
+    if uid_field is not None and uid_field.type == FIELD_TYPE_NUMBER:
+        raise SystemExit(
+            f"「{schema.TABLE_TRANSACTION_NAME}」的 {schema.TXN_CLIENT_UID} 是「数字」类型。"
+            "18-19 位 UID 存进数字字段会在服务端就被抹掉低位，请先在 Base 里把它改成「文本」。"
+        )
+
+    notes: list[str] = []
+    sync_base = _load_sync_base() if apply else None
+
+    for field_name, type_code in MOCK_TRANSACTION_FIELDS.items():
+        if field_name in current:
+            continue
+        notes.append(f"「{schema.TABLE_TRANSACTION_NAME}」补字段 {field_name}")
+        if apply and sync_base is not None:
+            sync_base._create_field(get_client(), app_token, table_id, field_name, type_code)
+
+    return notes
+
+
+def _owner_fields(open_id: str | None, user_field: str, text_field: str) -> dict[str, Any]:
+    """归属字段。
+
+    人员字段只在拿到真 open_id 时才填 —— 写一个不存在的 open_id 进去，API 会直接
+    报错，整个播种就断在这里。占位的情况下只写文本那一份，Base 里照样看得出归属，
+    只是机器人查不到（open_id 对不上），这也正是应该被看见的后果。
+    """
+    fields: dict[str, Any] = {text_field: open_id or PLACEHOLDER_OPEN_ID}
+    if open_id:
+        fields[user_field] = [{"id": open_id}]
+    return fields
+
+
+def _seed_referrals(
+    bitable: BitableClient,
+    scan: TableScan,
+    open_id: str | None,
+    *,
+    apply: bool,
+) -> tuple[int, int]:
+    existing = {extract_text(r.fields.get(schema.REFERRAL_NAME)) for r in scan.seed_records}
+    created = skipped = 0
+
+    for referral in build_referrals():
+        if referral.name in existing:
+            skipped += 1
+            continue
+
+        created += 1
+        if not apply:
+            continue
+
+        fields: dict[str, Any] = {
+            schema.REFERRAL_NAME: referral.name,
+            schema.REFERRAL_EMAIL: referral.email,
+            schema.REFERRAL_ADDRESS: referral.address,
+            schema.REFERRAL_PAYMENT: referral.payment,
+            schema.REFERRAL_RATE: referral.rate_percent,
+            schema.REFERRAL_STATUS: referral.status,
+        }
+        # 渠道编号是自动编号字段，服务端生成，写进去会被拒
+        fields.update(_owner_fields(open_id, schema.REFERRAL_OWNER, schema.REFERRAL_OWNER_OPEN_ID))
+        bitable.create_record(scan.table_id, fields)
+
+    return created, skipped
+
+
+def _referral_record_ids(bitable: BitableClient, table_id: str) -> dict[str, str]:
+    return {
+        extract_text(r.fields.get(schema.REFERRAL_NAME)): r.record_id
+        for r in bitable.iter_records(table_id)
+    }
+
+
+def _seed_clients(
+    bitable: BitableClient,
+    scan: TableScan,
+    referral_ids: dict[str, str],
+    open_id: str | None,
+    *,
+    apply: bool,
+) -> tuple[int, int]:
+    existing = {to_uid(r.fields.get(schema.CLIENT_UID)) for r in scan.seed_records}
+    created = skipped = 0
+
+    for client in build_clients():
+        if client.uid in existing:
+            skipped += 1
+            continue
+
+        created += 1
+        if not apply:
+            continue
+
+        referral_record_id = referral_ids.get(client.referral_name)
+        if referral_record_id is None:
+            raise SystemExit(
+                f"客户 {client.uid} 要挂到渠道「{client.referral_name}」，但渠道表里找不到它。"
+            )
+
+        fields: dict[str, Any] = {
+            # 字符串，不是 int。这是整套种子数据存在的理由。
+            schema.CLIENT_UID: client.uid,
+            schema.CLIENT_NAME: client.name,
+            schema.CLIENT_REFERRAL_LINK: [referral_record_id],
+        }
+        fields.update(_owner_fields(open_id, schema.CLIENT_OWNER, schema.CLIENT_OWNER_OPEN_ID))
+        bitable.create_record(scan.table_id, fields)
+
+    return created, skipped
+
+
+def _seed_transactions(
+    bitable: BitableClient,
+    scan: TableScan,
+    *,
+    apply: bool,
+) -> tuple[int, int]:
+    existing = {
+        transaction_key(
+            int(to_number(r.fields.get(schema.TXN_ORDER_TIME)) or 0),
+            to_uid(r.fields.get(schema.TXN_CLIENT_UID)),
+            to_number(r.fields.get(schema.TXN_PNL)) or 0.0,
+        )
+        for r in scan.seed_records
+    }
+    created = skipped = 0
+
+    for txn in build_transactions():
+        order_ms = to_timestamp_ms(txn.order_date)
+        if transaction_key(order_ms, txn.uid, txn.pnl) in existing:
+            skipped += 1
+            continue
+
+        created += 1
+        if not apply:
+            continue
+
+        bitable.create_record(
+            scan.table_id,
+            {
+                schema.TXN_ORDER_TIME: order_ms,
+                schema.TXN_ENTITY: txn.entity,
+                schema.TXN_CLIENT_NAME: txn.client_name,
+                schema.TXN_CLIENT_UID: txn.uid,
+                schema.TXN_QUANTITY: txn.quantity,
+                schema.TXN_PRICE: txn.price,
+                schema.TXN_FEE: txn.fee,
+                schema.TXN_FEE_CURRENCY: txn.fee_currency,
+                schema.TXN_PNL: txn.pnl,
+            },
+        )
+
+    return created, skipped
+
+
+def _seed_sales(
+    bitable: BitableClient,
+    scan: TableScan,
+    open_id: str | None,
+    admin_name: str,
+    *,
+    apply: bool,
+) -> tuple[int, int]:
+    existing = {extract_text(r.fields.get(schema.SALES_OPEN_ID)) for r in scan.seed_records}
+    created = skipped = 0
+
+    for sales in build_sales(open_id, admin_name):
+        if sales.open_id in existing:
+            skipped += 1
+            continue
+
+        created += 1
+        if not apply:
+            continue
+
+        bitable.create_record(
+            scan.table_id,
+            {
+                schema.SALES_OPEN_ID: sales.open_id,
+                schema.SALES_NAME: sales.name,
+                schema.SALES_ROLE: sales.role,
+                schema.SALES_STATUS: sales.status,
+            },
+        )
+
+    return created, skipped
+
+
+def _seed_audit(
+    bitable: BitableClient,
+    scan: TableScan,
+    open_id: str | None,
+    *,
+    apply: bool,
+) -> tuple[int, int]:
+    """补几条审计记录，让审计表不是空的。
+
+    审计表按设计只增不改，没有自然键可比。所以幂等策略退化成「已经有种子记录就整体
+    跳过」—— 审计行本来就该长成一条一条的流水，这里不追求逐条比对。
+    """
+    planned = len(build_referrals()) + len(build_clients())
+
+    if scan.seed_records:
+        return 0, planned
+
+    if not apply:
+        return planned, 0
+
+    audit = AuditLog(bitable, scan.table_id)
+    actor_open_id = open_id or PLACEHOLDER_OPEN_ID
+    actor_name = f"{SEED_PREFIX}播种脚本"
+
+    for referral in build_referrals():
+        audit.record(
+            actor_open_id=actor_open_id,
+            actor_name=actor_name,
+            action=ACTION_CREATE_REFERRAL,
+            target_table=schema.TABLE_REFERRAL_NAME,
+            detail={"渠道名称": referral.name, "分佣比例": referral.rate_percent},
+        )
+
+    for client in build_clients():
+        audit.record(
+            actor_open_id=actor_open_id,
+            actor_name=actor_name,
+            action=ACTION_CREATE_CLIENT,
+            target_table=schema.TABLE_CLIENT_NAME,
+            detail={"客户UID": client.uid, "所属渠道": client.referral_name},
+        )
+
+    return planned, 0
+
+
+def _reset(bitable: BitableClient, scans: dict[str, TableScan]) -> int:
+    deleted = 0
+    for table_name, scan in scans.items():
+        if not scan.seed_records:
+            continue
+        print(f"  删除「{table_name}」里的 {len(scan.seed_records)} 条种子记录…")
+        for record in scan.seed_records:
+            bitable.delete_record(scan.table_id, record.record_id)
+            deleted += 1
+    return deleted
+
+
+def _load_settings():
+    """读凭证。读不到就给一句人话，而不是甩一段 pydantic 的栈回溯。"""
+    try:
+        return get_settings()
+    except Exception as exc:  # noqa: BLE001 - 缺环境变量时 pydantic 抛的是 ValidationError
+        print(
+            "读不到飞书凭证。请在项目根目录建好 .env 并填上 LARK_APP_ID / LARK_APP_SECRET，"
+            "见 docs/LARK_APP_SETUP.md 第 2 步。\n"
+            f"（底层报错：{type(exc).__name__}）",
+            file=sys.stderr,
+        )
+        return None
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="在开发租户的 Base 里造种子数据（默认只预演）",
+    )
+    parser.add_argument(
+        "--open-id",
+        help="你自己的 open_id（ou_ 开头），从 scripts/ws_smoke.py 的日志里拿。"
+        "渠道和客户会挂在这个人名下，机器人才查得到",
+    )
+    parser.add_argument(
+        "--no-open-id",
+        action="store_true",
+        help="暂时没有 open_id 也要播种。归属会挂在占位账号上，机器人查不到这些数据，"
+        "拿到 open_id 后需要 --reset 重来",
+    )
+    parser.add_argument(
+        "--admin-name",
+        default="开发管理员",
+        help="你在销售名册里显示的姓名，默认「开发管理员」",
+    )
+    parser.add_argument(
+        "--yes-this-is-a-dev-base",
+        action="store_true",
+        dest="confirmed",
+        help="真的写入。不加这个就只预演",
+    )
+    parser.add_argument(
+        "--reset",
+        action="store_true",
+        help="先删掉所有 SEED- 开头的记录再重新播种（会再要一道交互式确认）",
+    )
+    args = parser.parse_args(argv)
+
+    if not args.open_id and not args.no_open_id:
+        print(
+            "需要 --open-id。给机器人发条消息，scripts/ws_smoke.py 会把你的 open_id 打到日志里。\n"
+            "确实拿不到就加 --no-open-id：数据照样造，但归属挂在占位账号上，"
+            "机器人查不到这些渠道，之后得 --reset 重来一次。",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.open_id and not args.open_id.startswith("ou_"):
+        print(
+            f"open_id 应该以 ou_ 开头，你给的是「{args.open_id}」。"
+            "别把 user_id 或 union_id 填进来了。",
+            file=sys.stderr,
+        )
+        return 1
+
+    settings = _load_settings()
+    if settings is None:
+        return 1
+
+    if not settings.base_app_token:
+        print("LARK_BASE_APP_TOKEN 没填，见 docs/LARK_APP_SETUP.md 第 7 步。", file=sys.stderr)
+        return 1
+
+    bitable = BitableClient(settings.base_app_token)
+    apply = args.confirmed
+
+    print(f"目标 Base: {settings.base_app_token}")
+    print("模式：真正写入" if apply else "模式：预演（不写任何东西）")
+    print()
+
+    tables, missing = _resolve_tables(bitable)
+    if missing:
+        print(
+            "这些表还不存在：" + "、".join(missing) + "\n"
+            "先跑 `uv run python scripts/sync_base.py --apply` 把结构建好。",
+            file=sys.stderr,
+        )
+        return 1
+
+    # ---------- 闸门二：目标 Base 里有没有别人的数据 ----------
+    scans = {
+        name: _scan(bitable, table_id, SEED_MARKER_FIELD[name]) for name, table_id in tables.items()
+    }
+
+    problems = _describe_foreign(scans)
+    if problems:
+        print("拒绝执行 —— 这个 Base 里有不是本脚本造的数据：", file=sys.stderr)
+        for item in problems:
+            print(f"  ! {item}", file=sys.stderr)
+        print(
+            "\n这个脚本只能在开发租户里空的（或只有种子数据的）Base 上跑。\n"
+            "如果你确认这是开发租户、上面这些是你手动造的，先自己删掉它们，"
+            "或者换一个干净的 Base。\n"
+            "没有跳过这道检查的开关 —— 有开关就一定会有人在生产上用它。",
+            file=sys.stderr,
+        )
+        return 1
+
+    # 交易明细表在开发租户里不存在（那是公司租户里同事维护的表，跨租户读不到），
+    # 得我们自己造一张同名同字段的顶上，对账代码才不用改。
+    if schema.TABLE_TRANSACTION_NAME not in tables:
+        if not apply:
+            print(
+                f"将新建模拟交易明细表「{schema.TABLE_TRANSACTION_NAME}」"
+                f"及 {len(MOCK_TRANSACTION_FIELDS)} 个字段"
+            )
+            table_id = ""
+        else:
+            table_id = _create_mock_transaction_table(settings.base_app_token)
+            tables[schema.TABLE_TRANSACTION_NAME] = table_id
+        scans[schema.TABLE_TRANSACTION_NAME] = TableScan(
+            table_id=table_id, seed_records=[], foreign_samples=[]
+        )
+    else:
+        for note in _check_mock_transaction_fields(
+            bitable,
+            settings.base_app_token,
+            tables[schema.TABLE_TRANSACTION_NAME],
+            apply=apply,
+        ):
+            print(note)
+
+    if args.reset:
+        if not apply:
+            total = sum(len(s.seed_records) for s in scans.values())
+            print(f"--reset 将删除 {total} 条种子记录（加 --yes-this-is-a-dev-base 才会真删）")
+        else:
+            if not _confirm_reset(settings.base_app_token):
+                return 1
+            deleted = _reset(bitable, scans)
+            print(f"已删除 {deleted} 条种子记录。\n")
+
+        # 预演时也要把种子记录当成已删除，否则下面会报「跳过已存在 N 条」，
+        # 和 --reset 之后的真实结果对不上，预演就失去意义了。
+        scans = {
+            name: TableScan(table_id=scan.table_id, seed_records=[], foreign_samples=[])
+            for name, scan in scans.items()
+        }
+
+    open_id = args.open_id
+    results: list[tuple[str, int, int]] = []
+
+    created, skipped = _seed_referrals(
+        bitable, scans[schema.TABLE_REFERRAL_NAME], open_id, apply=apply
+    )
+    results.append((schema.TABLE_REFERRAL_NAME, created, skipped))
+
+    referral_ids = (
+        _referral_record_ids(bitable, tables[schema.TABLE_REFERRAL_NAME]) if apply else {}
+    )
+    created, skipped = _seed_clients(
+        bitable, scans[schema.TABLE_CLIENT_NAME], referral_ids, open_id, apply=apply
+    )
+    results.append((schema.TABLE_CLIENT_NAME, created, skipped))
+
+    created, skipped = _seed_transactions(
+        bitable, scans[schema.TABLE_TRANSACTION_NAME], apply=apply
+    )
+    results.append((schema.TABLE_TRANSACTION_NAME, created, skipped))
+
+    created, skipped = _seed_sales(
+        bitable, scans[schema.TABLE_SALES_NAME], open_id, args.admin_name, apply=apply
+    )
+    results.append((schema.TABLE_SALES_NAME, created, skipped))
+
+    created, skipped = _seed_audit(bitable, scans[schema.TABLE_AUDIT_NAME], open_id, apply=apply)
+    results.append((schema.TABLE_AUDIT_NAME, created, skipped))
+
+    verb = "已写入" if apply else "将写入"
+    print(f"\n{'=' * 60}")
+    for table_name, created, skipped in results:
+        print(f"  {table_name:<22} {verb} {created:>3} 条，跳过已存在 {skipped:>3} 条")
+    print(f"  {schema.TABLE_COMMISSION_NAME:<22} 刻意留空 —— 由 reconcile --write 填")
+    print("=" * 60)
+
+    if not apply:
+        print("\n确认无误后加 --yes-this-is-a-dev-base 真正执行。")
+        return 0
+
+    print("\n各表的 table_id，回填到 .env：")
+    env_keys = {
+        schema.TABLE_REFERRAL_NAME: "TABLE_REFERRAL",
+        schema.TABLE_CLIENT_NAME: "TABLE_CLIENT",
+        schema.TABLE_TRANSACTION_NAME: "TABLE_TRANSACTION",
+        schema.TABLE_COMMISSION_NAME: "TABLE_COMMISSION",
+        schema.TABLE_AUDIT_NAME: "TABLE_AUDIT",
+        schema.TABLE_SALES_NAME: "TABLE_SALES",
+    }
+    for table_name, env_key in env_keys.items():
+        table_id = tables.get(table_name, "")
+        print(f"  {env_key}={table_id}")
+
+    if not open_id:
+        print(
+            f"\n注意：没给 --open-id，渠道和客户的归属挂在占位值 {PLACEHOLDER_OPEN_ID} 上。\n"
+            "机器人按 open_id 过滤归属，所以你现在用机器人查「我的渠道」会是空的。\n"
+            "拿到 open_id 后重跑一次：--open-id ou_xxx --yes-this-is-a-dev-base --reset"
+        )
+
+    periods = sorted({t.period for t in build_transactions()})
+    print("\n下一步，验证对账（只算不写）：")
+    for period in periods:
+        print(f"  uv run python -m crm_basebot.jobs.reconcile --period {period}")
+    print(
+        f"\n预期能看到：{len(UNMAPPED_CLIENTS)} 个未登记归属的客户告警；"
+        "以及 2026-02 有一个渠道整月 Pnl 为负、应付佣金算出负数 —— 这是刻意造的，"
+        "用来确认负 Pnl 的业务规则。"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
