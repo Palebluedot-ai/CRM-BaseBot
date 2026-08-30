@@ -22,10 +22,27 @@
 ## 快速开始
 
 ```bash
-uv sync                      # 装依赖
+uv sync
 cp .env.example .env         # 填凭证，见 docs/LARK_APP_SETUP.md
-uv run python scripts/inspect_base.py    # 探查现有 Base 结构
-uv run pytest                # 跑测试
+uv run pytest
+```
+
+拿到飞书凭证之后，按这个顺序走：
+
+```bash
+uv run python scripts/ws_smoke.py           # 验证长连接和卡片回调
+uv run python scripts/inspect_base.py       # 看现有 Base 有什么
+uv run python scripts/sync_base.py          # 预演要建哪些表和字段
+uv run python scripts/sync_base.py --apply  # 执行
+uv run python scripts/verify_numbering.py --probe   # 实测 R+3 位编号
+uv run python -m crm_basebot.app            # 启动机器人
+```
+
+对账（默认只算不写）：
+
+```bash
+uv run python -m crm_basebot.jobs.reconcile --period 2026-03
+uv run python -m crm_basebot.jobs.reconcile --period 2026-03 --write
 ```
 
 ## 文档
@@ -34,7 +51,7 @@ uv run pytest                # 跑测试
 | --- | --- |
 | [docs/LARK_APP_SETUP.md](docs/LARK_APP_SETUP.md) | 自建免费飞书组织、创建应用、开权限、开长连接 |
 | [docs/IT_APPROVAL.md](docs/IT_APPROVAL.md) | 向公司 IT 申请时的完整材料，力求一次过审 |
-| [docs/SCHEMA.md](docs/SCHEMA.md) | 表结构定义与字段约定 |
+| [docs/SCHEMA.md](docs/SCHEMA.md) | 表结构定义，以及每个设计选择的理由 |
 
 ## 三个必须知道的坑
 

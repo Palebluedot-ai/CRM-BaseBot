@@ -124,12 +124,12 @@ def probe(bitable: BitableClient, app_token: str) -> None:
     if produced == expected and tenth == "R010":
         print("结论：自动编号按写入顺序产出 R001–R009，新增落在 R010。")
         print("      所以把历史数据按时间顺序导入，编号会自然对齐。")
-        print("      渠道表可以用自动编号字段，不需要后端递增。")
+        print("      .env 里保持 REFERRAL_AUTO_NUMBER=true 即可。")
     else:
         print("结论：行为和预期不符。")
         print(f"      前 9 行拿到 {produced}")
         print(f"      第 10 行拿到 {tenth}")
-        print("      走回退方案：ReferralService(auto_number=False)，后端串行递增。")
+        print("      在 .env 里设 REFERRAL_AUTO_NUMBER=false，走后端串行递增。")
     print("=" * 56)
     print("\n实测完了记得清理：uv run python scripts/verify_numbering.py --cleanup")
 

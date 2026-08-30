@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     domain: str = Field(default="https://open.feishu.cn", alias="LARK_DOMAIN")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
+    # 渠道编号是否交给 Bitable 的自动编号字段生成。
+    # 关掉就走后端串行递增（读最大号 +1，在写锁的临界区内）。
+    # 用 scripts/verify_numbering.py --probe 实测后决定，改这里不用改代码。
+    referral_auto_number: bool = Field(default=True, alias="REFERRAL_AUTO_NUMBER")
+
 
 @lru_cache
 def get_settings() -> Settings:

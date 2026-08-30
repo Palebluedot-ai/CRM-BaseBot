@@ -55,7 +55,12 @@ def build_handlers() -> BotHandlers:
     return BotHandlers(
         client=get_client(),
         directory=SalesDirectory(bitable, settings.table_sales),
-        referrals=ReferralService(bitable, settings.table_referral, audit),
+        referrals=ReferralService(
+            bitable,
+            settings.table_referral,
+            audit,
+            auto_number=settings.referral_auto_number,
+        ),
         clients=ReferredClientService(
             bitable, settings.table_client, settings.table_referral, audit
         ),
