@@ -72,7 +72,6 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from crm_basebot.config import get_settings  # noqa: E402
 from crm_basebot.domain import schema  # noqa: E402
 from crm_basebot.domain.audit import (  # noqa: E402
     ACTION_CREATE_CLIENT,
@@ -88,6 +87,7 @@ from crm_basebot.lark.bitable import (  # noqa: E402
 )
 from crm_basebot.lark.client import get_client  # noqa: E402
 from crm_basebot.lark.values import extract_text, to_number, to_uid  # noqa: E402
+from crm_basebot.startup import load_settings, require_settings  # noqa: E402
 
 # 种子数据的标记。业务代码不认识它，它只服务两件事：
 #   1. 在 Base 里一眼看出哪些行是脚本造的假数据，不会被误当成真实业务数据
@@ -824,20 +824,6 @@ def _reset(bitable: BitableClient, scans: dict[str, TableScan]) -> int:
     return deleted
 
 
-def _load_settings():
-    """读凭证。读不到就给一句人话，而不是甩一段 pydantic 的栈回溯。"""
-    try:
-        return get_settings()
-    except Exception as exc:  # noqa: BLE001 - 缺环境变量时 pydantic 抛的是 ValidationError
-        print(
-            "读不到飞书凭证。请在项目根目录建好 .env 并填上 LARK_APP_ID / LARK_APP_SECRET，"
-            "见 docs/LARK_APP_SETUP.md 第 2 步。\n"
-            f"（底层报错：{type(exc).__name__}）",
-            file=sys.stderr,
-        )
-        return None
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="在开发租户的 Base 里造种子数据（默认只预演）",
@@ -894,13 +880,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    settings = _load_settings()
-    if settings is None:
-        return 1
-
-    if not settings.base_app_token:
-        print("LARK_BASE_APP_TOKEN 没填，见 docs/LARK_APP_SETUP.md 第 7 步。", file=sys.stderr)
-        return 1
+    settings = load_settings()
+    require_settings(settings, "LARK_BASE_APP_TOKEN")
 
     bitable = BitableClient(settings.base_app_token)
     apply = args.confirmed

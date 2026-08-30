@@ -21,14 +21,26 @@ import argparse
 import logging
 import time
 
-from ..config import get_settings
 from ..domain import schema
 from ..domain.audit import ACTION_COMPUTE_COMMISSION, AuditLog
 from ..domain.commission import CommissionCalculator, CommissionRow, summarize
 from ..lark.bitable import BitableClient, assert_fields_present
 from ..lark.values import uid_health_advice
+from ..startup import load_settings, require_settings
 
 logger = logging.getLogger(__name__)
+
+# 算一次佣金要读的三张表：交易明细出 Pnl，客户表把 UID 归到渠道，渠道表给分佣比例。
+REQUIRED_KEYS = (
+    "LARK_BASE_APP_TOKEN",
+    "TABLE_TRANSACTION",
+    "TABLE_CLIENT",
+    "TABLE_REFERRAL",
+)
+
+# --write 才需要的两张。刻意在开算之前就查：全量拉一遍表要花掉不少 API 额度，
+# 算完了才发现写不进去，那次调用就白费了。
+WRITE_KEYS = ("TABLE_COMMISSION", "TABLE_AUDIT")
 
 
 def _write_rows(bitable: BitableClient, table_id: str, rows: list[CommissionRow]) -> int:
@@ -78,7 +90,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    settings = get_settings()
+    settings = load_settings()
+    require_settings(settings, *REQUIRED_KEYS)
+    if args.write:
+        require_settings(settings, *WRITE_KEYS)
+
     logging.basicConfig(
         level=settings.log_level.upper(),
         format="%(asctime)s %(levelname)-7s %(message)s",
@@ -149,10 +165,6 @@ def main(argv: list[str] | None = None) -> int:
     if not args.write:
         print("\n（只算没写。确认无误后加 --write 写进 Base）")
         return 0
-
-    if not settings.table_commission:
-        print("\nTABLE_COMMISSION 没配，写不了。", flush=True)
-        return 1
 
     written = _write_rows(bitable, settings.table_commission, rows)
 

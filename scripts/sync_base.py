@@ -37,7 +37,6 @@ from lark_oapi.api.bitable.v1 import (  # noqa: E402
     ReqTable,
 )
 
-from crm_basebot.config import get_settings  # noqa: E402
 from crm_basebot.domain import schema  # noqa: E402
 from crm_basebot.lark.bitable import (  # noqa: E402
     FIELD_TYPE_AUTO_NUMBER,
@@ -46,6 +45,7 @@ from crm_basebot.lark.bitable import (  # noqa: E402
 )
 from crm_basebot.lark.client import get_client  # noqa: E402
 from crm_basebot.lark.field_types import type_name  # noqa: E402
+from crm_basebot.startup import load_settings, require_settings  # noqa: E402
 
 # 我们负责维护的表。交易明细不在其中 —— 那是同事的表，我们只读。
 TARGET_TABLES: dict[str, dict[str, int]] = {
@@ -153,10 +153,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--apply", action="store_true", help="真的执行，默认只预演")
     args = parser.parse_args(argv)
 
-    settings = get_settings()
-    if not settings.base_app_token:
-        print("LARK_BASE_APP_TOKEN 没填，见 docs/LARK_APP_SETUP.md 第 7 步。")
-        return 1
+    settings = load_settings()
+    require_settings(settings, "LARK_BASE_APP_TOKEN")
 
     bitable = BitableClient(settings.base_app_token)
     client = get_client()

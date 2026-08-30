@@ -18,7 +18,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from crm_basebot.config import get_settings  # noqa: E402
 from crm_basebot.lark.bitable import (  # noqa: E402
     FIELD_TYPE_AUTO_NUMBER,
     FIELD_TYPE_NUMBER,
@@ -31,6 +30,7 @@ from crm_basebot.lark.values import (  # noqa: E402
     extract_text,
     uid_health_advice,
 )
+from crm_basebot.startup import load_settings, require_settings  # noqa: E402
 
 SNAPSHOT_PATH = Path(__file__).resolve().parent.parent / "schema_snapshot.json"
 
@@ -63,16 +63,8 @@ def _sample_field(client: BitableClient, table_id: str, field_name: str) -> list
 
 
 def main() -> int:
-    settings = get_settings()
-
-    if not settings.base_app_token:
-        print(
-            "LARK_BASE_APP_TOKEN 没填。\n"
-            "从多维表格地址栏取：https://xxx.feishu.cn/base/<这一段>?table=...\n"
-            "详见 docs/LARK_APP_SETUP.md 第 7 步。",
-            file=sys.stderr,
-        )
-        return 1
+    settings = load_settings()
+    require_settings(settings, "LARK_BASE_APP_TOKEN")
 
     client = BitableClient(settings.base_app_token)
 

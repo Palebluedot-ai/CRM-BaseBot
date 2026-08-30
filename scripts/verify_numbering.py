@@ -26,7 +26,6 @@ import importlib.util  # noqa: E402
 
 from lark_oapi.api.bitable.v1 import DeleteAppTableRequest  # noqa: E402
 
-from crm_basebot.config import get_settings  # noqa: E402
 from crm_basebot.domain import schema  # noqa: E402
 from crm_basebot.domain.referral import parse_referral_no  # noqa: E402
 from crm_basebot.lark.bitable import (  # noqa: E402
@@ -37,6 +36,7 @@ from crm_basebot.lark.bitable import (  # noqa: E402
 from crm_basebot.lark.client import get_client  # noqa: E402
 from crm_basebot.lark.field_types import type_name  # noqa: E402
 from crm_basebot.lark.values import extract_text  # noqa: E402
+from crm_basebot.startup import load_settings, require_settings  # noqa: E402
 
 PROBE_TABLE_NAME = "ZZ 编号实测（可删）"
 
@@ -155,10 +155,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cleanup", action="store_true", help="删掉临时表")
     args = parser.parse_args(argv)
 
-    settings = get_settings()
-    if not settings.base_app_token:
-        print("LARK_BASE_APP_TOKEN 没填，见 docs/LARK_APP_SETUP.md 第 7 步。")
-        return 1
+    settings = load_settings()
+    require_settings(settings, "LARK_BASE_APP_TOKEN")
 
     bitable = BitableClient(settings.base_app_token)
 
@@ -169,7 +167,12 @@ def main(argv: list[str] | None = None) -> int:
     if settings.table_referral:
         check_existing(bitable, settings.table_referral)
     else:
-        print("TABLE_REFERRAL 没配，跳过现状检查。")
+        # 这一项缺了不影响 --probe（实测建的是临时表），所以只跳过现状检查，不中止。
+        print(
+            "TABLE_REFERRAL 没配，跳过现状检查。\n"
+            "  要看现有渠道表的编号情况，先跑 `uv run python scripts/inspect_base.py`，"
+            "把渠道表的 table_id 回填到 .env 的 TABLE_REFERRAL（docs/LARK_APP_SETUP.md 第 8 步）。"
+        )
 
     if args.probe:
         print()

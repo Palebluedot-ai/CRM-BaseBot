@@ -14,40 +14,30 @@ import lark_oapi as lark
 
 from .bot.auth import SalesDirectory
 from .bot.handlers import BotHandlers
-from .config import get_settings
 from .domain.audit import AuditLog
 from .domain.referral import ReferralService
 from .domain.referred_client import ReferredClientService
 from .lark.bitable import BitableClient
 from .lark.client import get_client
 from .lark.ws_patch import apply_card_frame_patch
+from .startup import load_settings, require_settings
 
 logger = logging.getLogger(__name__)
 
-
-def _require_tables(settings) -> None:
-    missing = [
-        name
-        for name, value in {
-            "LARK_BASE_APP_TOKEN": settings.base_app_token,
-            "TABLE_REFERRAL": settings.table_referral,
-            "TABLE_CLIENT": settings.table_client,
-            "TABLE_AUDIT": settings.table_audit,
-            "TABLE_SALES": settings.table_sales,
-        }.items()
-        if not value
-    ]
-    if missing:
-        raise SystemExit(
-            "以下环境变量还没填：\n  "
-            + "\n  ".join(missing)
-            + "\n\n先跑 `uv run python scripts/inspect_base.py` 拿到各表的 table_id。"
-        )
+# 机器人跑起来至少要能读写这几张表：鉴权查名册、登记写渠道和客户、每一次写都记审计。
+# 交易明细和佣金汇总只有对账任务用得着，不在这里拦。
+REQUIRED_KEYS = (
+    "LARK_BASE_APP_TOKEN",
+    "TABLE_REFERRAL",
+    "TABLE_CLIENT",
+    "TABLE_AUDIT",
+    "TABLE_SALES",
+)
 
 
 def build_handlers() -> BotHandlers:
-    settings = get_settings()
-    _require_tables(settings)
+    settings = load_settings()
+    require_settings(settings, *REQUIRED_KEYS)
 
     bitable = BitableClient(settings.base_app_token)
     audit = AuditLog(bitable, settings.table_audit)
@@ -68,7 +58,7 @@ def build_handlers() -> BotHandlers:
 
 
 def main() -> None:
-    settings = get_settings()
+    settings = load_settings()
     logging.basicConfig(
         level=settings.log_level.upper(),
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",

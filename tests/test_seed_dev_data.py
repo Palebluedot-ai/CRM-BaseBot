@@ -386,11 +386,20 @@ def test_non_open_id_identifier_is_rejected(capsys):
     assert "ou_" in capsys.readouterr().err
 
 
-def test_missing_credentials_reports_plainly_instead_of_a_traceback(monkeypatch, capsys):
+def test_missing_credentials_is_not_swallowed(monkeypatch):
+    """缺凭证的那段人话必须原样浮到进程外面，不能被这里改写成一句更含糊的话。
+
+    文案本身在 tests/test_startup.py 里测；这里只钉住 seed 没有把它 catch 掉。
+    """
+    from crm_basebot.startup import MissingConfigError
+
     def boom():
-        raise RuntimeError("LARK_APP_ID field required")
+        raise MissingConfigError("缺 LARK_APP_ID，见 docs/LARK_APP_SETUP.md 第 2 步")
 
-    monkeypatch.setattr(seed, "get_settings", boom)
+    monkeypatch.setattr(seed, "load_settings", boom)
 
-    assert seed.main(["--open-id", "ou_abc123"]) == 1
-    assert "docs/LARK_APP_SETUP.md" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as excinfo:
+        seed.main(["--open-id", "ou_abc123"])
+
+    assert excinfo.value.code != 0
+    assert "docs/LARK_APP_SETUP.md" in str(excinfo.value)

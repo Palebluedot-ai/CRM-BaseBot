@@ -35,12 +35,12 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (  # noqa: E40
     P2CardActionTriggerResponse,
 )
 
-from crm_basebot.config import get_settings  # noqa: E402
 from crm_basebot.lark.client import get_client  # noqa: E402
 from crm_basebot.lark.ws_patch import (  # noqa: E402
     apply_card_frame_patch,
     sdk_drops_card_frames,
 )
+from crm_basebot.startup import load_settings  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(message)s")
 logger = logging.getLogger("ws_smoke")
@@ -129,7 +129,7 @@ def on_card_action(data: P2CardActionTrigger) -> P2CardActionTriggerResponse:
 
 
 def main() -> int:
-    settings = get_settings()
+    settings = load_settings()
 
     if sdk_drops_card_frames():
         logger.info("检测到 SDK 仍会丢弃 CARD 帧，正在打补丁")
