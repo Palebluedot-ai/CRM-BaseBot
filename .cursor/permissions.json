@@ -1,0 +1,21 @@
+{
+  "autoRun": {
+    "allow_instructions": [
+      "Running uv commands such as uv sync, uv run, uv pip list, and uv add is routine development work and can run without asking.",
+      "Running the test suite and linters (pytest, ruff check, ruff format) can run without asking.",
+      "Read-only git commands such as git status, git diff, git log, git show, and git branch can run without asking.",
+      "Staging and committing to a local feature branch can run without asking, as long as no credential files are being staged.",
+      "Read-only inspection of the Lark Base structure, such as running scripts/inspect_base.py, can run without asking. It only lists tables and field types.",
+      "Reading source files, listing directories, and searching the codebase can run without asking."
+    ],
+    "block_instructions": [
+      "Any command that reads, prints, copies, or otherwise exposes the contents of .env must go through approval first. It holds the Lark app secret. Reading .env.example is fine.",
+      "Any command that stages, commits, or pushes a .env file, a private key, or anything else holding credentials must go through approval first.",
+      "Any git push must go through approval first, and a force push to main or master must always be refused rather than approved.",
+      "Any command that deletes files or directories must go through approval first.",
+      "Any gh command that changes repository settings, visibility, collaborators, or deletes a repository must go through approval first.",
+      "Any script that writes to, updates, or deletes records in Lark Base must go through approval first. Reading is fine, but writes touch real commission data.",
+      "Any command that modifies shell startup files, SSH keys, or global git config must go through approval first."
+    ]
+  }
+}

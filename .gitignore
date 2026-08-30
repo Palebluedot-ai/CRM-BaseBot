@@ -1,0 +1,23 @@
+# 凭证 — 绝不入库
+.env
+*.pem
+*.key
+
+# Base 探查产物可能含真实客户数据
+schema_snapshot*.json
+!schema_snapshot.example.json
+out/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+
+# macOS
+.DS_Store
