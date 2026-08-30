@@ -25,6 +25,9 @@
     # 换一套种子数据重来（先删旧的，需要交互式敲一遍 app_token 确认）
     uv run python scripts/seed_dev_data.py --open-id ou_xxxxxxxx --yes-this-is-a-dev-base --reset
 
+另有一个一次性的自检开关 ``--with-damaged-uid``，专门用来让 UID 损伤检测响一次，
+见文件中段 ``DAMAGED_UIDS`` 上面的说明。默认不开，用完记得 ``--reset``。
+
 open_id 从 ``scripts/ws_smoke.py`` 的日志里拿：给机器人发条消息，它会把发件人的
 open_id 打出来。拿不到就先加 ``--no-open-id``，但归属会挂在占位账号上，机器人查不到
 这些渠道，之后得 ``--reset`` 重来一次。
@@ -189,8 +192,14 @@ def build_referrals() -> list[SeedReferral]:
     （比如 Pnl 合计 × 12.5% 落在半分上，看 CommissionRow.payable 的 ROUND_HALF_UP
     是不是真的按预期进位）。
 
-    最后一个渠道留在「待审核」状态，用来看清一件事：现在的佣金计算**不看状态**，
-    待审核和停用的渠道照样会被算进汇总。这是不是想要的行为，得由业务定，不在这里改。
+    状态**全部是「生效」**。真实数据里不存在待审核或停用的渠道 —— 使用方确认过：
+    参与计算的都是生效的，停掉的渠道根本不在数据里。而佣金计算目前不看状态，所以
+    只要种子里放一个「待审核」的渠道，它就会照样算出佣金，每次对账都让人怀疑是 bug。
+    那个疑惑完全是种子数据自己造出来的，现实中不会发生。种子数据不该造出现实里不
+    存在的状态。
+
+    （销售名册里那个「停用」的假账号是另一回事，保留 —— 它验证的是 auth 拒绝停用
+    账号这条真实路径，见 build_sales。）
     """
     return [
         SeedReferral(
@@ -223,7 +232,7 @@ def build_referrals() -> list[SeedReferral]:
             address="Dubai, DIFC, Gate Village 4",
             payment="Emirates NBD 1012345678901",
             rate_percent=8,
-            status=schema.STATUS_PENDING,
+            status=schema.STATUS_ACTIVE,
         ),
     ]
 
@@ -320,6 +329,44 @@ _TRANSACTION_ROWS: tuple[tuple[str, str, float], ...] = (
     ("2026-03-30", "577809207768703914", 1875.80),
 )
 
+# ---------- 可选：被 Excel 改坏的 UID（--with-damaged-uid） ----------
+#
+# 默认不灌。种子数据平时刻意避开「末尾连续 0」这个形态，否则 inspect_base 和
+# reconcile 每次都要报一次假警，真出事的时候反而没人信。
+#
+# 但副作用是：第一次跑只会看到一句「没有发现 Excel 截断特征」，没法确认那个检测到底
+# 在干活还是压根没跑起来。这个开关就是为了让它响一次，看完用 --reset 换回干净数据。
+#
+# 下面三个值不是随手编的，是种子里三个真实客户UID 被 Excel 抹到 15 位有效数字之后的
+# 样子。其中两个还顺带演示了那对「只差最后一位」的 UID 会塌成同一个值：
+#
+#   577809207768677761  ┐
+#   577809207768677762  ┴─► 577809207768678000
+#   2141293991366272768 ┐
+#   2141293991366272769 ┴─► 2141293991366270000
+#
+# 刻意**只灌进交易明细，不写客户表**。真实的损伤来源就是交易明细那条导入链路
+# （同事从内部系统导出、过一手 Excel、再导进 Base），客户表是机器人走 API 写的，
+# 不会经过 Excel。所以这几个 UID 会 join 不上客户表、落进 unmapped —— 那正是真实
+# 的失败形态。把它们也写进客户表反而会凭空多出一个拿佣金的幽灵渠道，把对账搅浑。
+DAMAGED_UIDS: dict[str, str] = {
+    "577809207768678000": f"{SEED_PREFIX}Excel损伤-普罗米修斯",
+    "2141293991366270000": f"{SEED_PREFIX}Excel损伤-青柠",
+    "577809207768681000": f"{SEED_PREFIX}Excel损伤-长夜",
+}
+
+# 每个损伤 UID 两笔，一共 6 行。够触发 assess_uid_health 的聚合判定：
+# 它要求命中数至少 2 个、且超过「纯属巧合」期望值的 3 倍，而这批 UID 的巧合期望
+# 加起来不到 0.05 个。数量再多没有额外信息，只是让表更脏。
+_DAMAGED_TRANSACTION_ROWS: tuple[tuple[str, str, float], ...] = (
+    ("2026-03-05", "577809207768678000", 1820.40),
+    ("2026-03-19", "577809207768678000", 640.75),
+    ("2026-03-12", "2141293991366270000", 2450.85),
+    ("2026-03-26", "2141293991366270000", -380.20),
+    ("2026-02-13", "577809207768681000", 1150.30),
+    ("2026-01-22", "577809207768681000", 905.60),
+)
+
 # 佣金不看这几个字段，但真表里有，就得填上 —— 空着的话，
 # 哪天有人写了个依赖它们的报表，会以为线上数据也长这样。
 _PRICES = (0.1875, 0.2032, 0.1946, 0.2210)
@@ -327,11 +374,13 @@ _ENTITIES = ("HashKey SG", "HashKey HK")
 _FEE_CURRENCIES = ("USDT", "USD")
 
 
-def build_transactions() -> list[SeedTransaction]:
-    names = {c.uid: c.name for c in build_clients()} | UNMAPPED_CLIENTS
+def build_transactions(*, with_damaged_uid: bool = False) -> list[SeedTransaction]:
+    names = {c.uid: c.name for c in build_clients()} | UNMAPPED_CLIENTS | DAMAGED_UIDS
+
+    source = _TRANSACTION_ROWS + (_DAMAGED_TRANSACTION_ROWS if with_damaged_uid else ())
 
     rows: list[SeedTransaction] = []
-    for index, (order_date, uid, pnl) in enumerate(_TRANSACTION_ROWS):
+    for index, (order_date, uid, pnl) in enumerate(source):
         price = _PRICES[index % len(_PRICES)]
         rows.append(
             SeedTransaction(
@@ -645,6 +694,7 @@ def _seed_transactions(
     scan: TableScan,
     *,
     apply: bool,
+    with_damaged_uid: bool = False,
 ) -> tuple[int, int]:
     existing = {
         transaction_key(
@@ -656,7 +706,7 @@ def _seed_transactions(
     }
     created = skipped = 0
 
-    for txn in build_transactions():
+    for txn in build_transactions(with_damaged_uid=with_damaged_uid):
         order_ms = to_timestamp_ms(txn.order_date)
         if transaction_key(order_ms, txn.uid, txn.pnl) in existing:
             skipped += 1
@@ -819,6 +869,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="先删掉所有 SEED- 开头的记录再重新播种（会再要一道交互式确认）",
     )
+    parser.add_argument(
+        "--with-damaged-uid",
+        action="store_true",
+        help="额外灌 6 笔客户UID 被 Excel 抹掉低位的交易，用来看一眼 UID 损伤检测确实会"
+        "报警。不是常规步骤：确认完就用 --reset 换回干净数据",
+    )
     args = parser.parse_args(argv)
 
     if not args.open_id and not args.no_open_id:
@@ -851,6 +907,12 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"目标 Base: {settings.base_app_token}")
     print("模式：真正写入" if apply else "模式：预演（不写任何东西）")
+    if args.with_damaged_uid:
+        print(
+            f"--with-damaged-uid：额外灌 {len(_DAMAGED_TRANSACTION_ROWS)} 笔"
+            f"被 Excel 抹掉低位的 UID（{len(DAMAGED_UIDS)} 个客户），只进交易明细。\n"
+            "                    这是一次性的检测自检，确认告警会响之后请用 --reset 换回干净数据。"
+        )
     print()
 
     tables, missing = _resolve_tables(bitable)
@@ -939,7 +1001,10 @@ def main(argv: list[str] | None = None) -> int:
     results.append((schema.TABLE_CLIENT_NAME, created, skipped))
 
     created, skipped = _seed_transactions(
-        bitable, scans[schema.TABLE_TRANSACTION_NAME], apply=apply
+        bitable,
+        scans[schema.TABLE_TRANSACTION_NAME],
+        apply=apply,
+        with_damaged_uid=args.with_damaged_uid,
     )
     results.append((schema.TABLE_TRANSACTION_NAME, created, skipped))
 
@@ -982,16 +1047,29 @@ def main(argv: list[str] | None = None) -> int:
             "拿到 open_id 后重跑一次：--open-id ou_xxx --yes-this-is-a-dev-base --reset"
         )
 
-    periods = sorted({t.period for t in build_transactions()})
+    transactions = build_transactions(with_damaged_uid=args.with_damaged_uid)
+    periods = sorted({t.period for t in transactions})
     print("\n下一步，验证对账（只算不写）：")
     for period in periods:
         print(f"  uv run python -m crm_basebot.jobs.reconcile --period {period}")
     print(f"  uv run python -m crm_basebot.jobs.reconcile   # 不传月份就是最新的 {periods[-1]}")
+
+    unmapped_count = len(UNMAPPED_CLIENTS) + (len(DAMAGED_UIDS) if args.with_damaged_uid else 0)
     print(
-        f"\n预期能看到：{len(UNMAPPED_CLIENTS)} 个未登记归属的客户告警；"
+        f"\n预期能看到：{unmapped_count} 个未登记归属的客户告警；"
         "以及 2026-02 有一个渠道整月 Pnl 为负 —— 按业务规则它当月应付佣金是 0"
         "（保底，不倒扣不结转），汇总里会单独标注一行。"
     )
+
+    if args.with_damaged_uid:
+        print(
+            f"\n另外 inspect_base.py 和 reconcile 都会对「{schema.TABLE_TRANSACTION_NAME}"
+            f".{schema.TXN_CLIENT_UID}」报 UID 损伤告警（判定 likely_damaged），"
+            f"点名那 {len(DAMAGED_UIDS)} 个以连续 0 结尾的值。看到告警就说明检测在工作。\n"
+            "确认完请换回干净数据，别顶着这条告警继续跑：\n"
+            "  uv run python scripts/seed_dev_data.py --open-id ou_xxx "
+            "--yes-this-is-a-dev-base --reset"
+        )
     return 0
 
 

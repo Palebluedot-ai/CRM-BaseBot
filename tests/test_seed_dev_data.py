@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from decimal import ROUND_HALF_UP, Context
 from pathlib import Path
 
 import pytest
 
 from crm_basebot.domain import schema
 from crm_basebot.domain.commission import period_of
+from crm_basebot.lark.values import assess_uid_health, looks_excel_truncated
 
 
 def _load_seed_module():
@@ -68,17 +70,22 @@ def test_uids_cover_both_18_and_19_digits():
 
 
 def test_no_uid_looks_excel_truncated():
-    """种子 UID 不能长得像被 Excel 抹过低位的样子。
+    """默认种子 UID 不能长得像被 Excel 抹过低位的样子。
 
     lark/values.py 把「长度超过 15 位、且尾部有 (长度-15) 个连续 0」判为疑似截断。
     种子数据要是撞上这个形态，inspect_base 和 reconcile 每次都要报一次假警，
     真出事的时候反而没人信了。
+
+    唯一的例外是 --with-damaged-uid 那批，它们存在的意义正是触发告警。
     """
-    all_uids = [c.uid for c in seed.build_clients()] + list(seed.UNMAPPED_CLIENTS)
+    all_uids = (
+        [c.uid for c in seed.build_clients()]
+        + list(seed.UNMAPPED_CLIENTS)
+        + [t.uid for t in seed.build_transactions()]
+    )
 
     for uid in all_uids:
-        excess = len(uid) - 15
-        assert not uid.endswith("0" * excess), f"{uid} 看起来像被 Excel 截断过"
+        assert not looks_excel_truncated(uid), f"{uid} 看起来像被 Excel 截断过"
 
 
 def test_unmapped_clients_are_not_registered():
@@ -100,6 +107,16 @@ def test_referral_rates_differ_and_include_a_fractional_one():
 
     assert len(set(rates)) >= 3, "分佣比例至少要有三个不同的值"
     assert any(rate != int(rate) for rate in rates), "至少要有一个带小数的比例"
+
+
+def test_all_referrals_are_active():
+    """真实数据里不存在待审核或停用的渠道，种子不该造出现实中不存在的状态。
+
+    佣金计算目前不看状态，所以种子里放一个「待审核」的渠道，它会照样算出佣金，
+    每次对账都让人怀疑是 bug —— 而那个疑惑纯粹是种子数据自己造出来的。
+    """
+    statuses = {r.status for r in seed.build_referrals()}
+    assert statuses == {schema.STATUS_ACTIVE}, f"渠道状态必须全是生效，实际有 {statuses}"
 
 
 def test_every_client_points_at_an_existing_referral():
@@ -155,6 +172,97 @@ def test_transaction_client_names_match_the_client_table():
     known = {c.uid: c.name for c in seed.build_clients()} | dict(seed.UNMAPPED_CLIENTS)
     for txn in seed.build_transactions():
         assert txn.client_name == known[txn.uid]
+
+
+# ---------- --with-damaged-uid：让 Excel 损伤检测响一次 ----------
+
+
+def test_damaged_uids_are_off_by_default():
+    default_uids = {t.uid for t in seed.build_transactions()}
+    assert not (default_uids & set(seed.DAMAGED_UIDS)), "默认不该灌损伤 UID"
+
+
+def test_damaged_uids_are_added_only_to_transactions():
+    """损伤只发生在交易明细那条导入链路上。客户表是机器人走 API 写的，不过 Excel。
+
+    也因此这几个 UID 必然 join 不上客户表 —— 那正是真实的失败形态。写进客户表反而会
+    凭空多出一个拿佣金的幽灵渠道。
+    """
+    registered = {c.uid for c in seed.build_clients()}
+    for uid in seed.DAMAGED_UIDS:
+        assert uid not in registered
+
+    damaged_txns = [
+        t for t in seed.build_transactions(with_damaged_uid=True) if t.uid in seed.DAMAGED_UIDS
+    ]
+    assert len(damaged_txns) == len(seed._DAMAGED_TRANSACTION_ROWS)
+
+
+def test_every_damaged_uid_actually_trips_the_detector():
+    for uid in seed.DAMAGED_UIDS:
+        assert looks_excel_truncated(uid), f"{uid} 不会被检测到，这批数据就白灌了"
+
+
+def _as_excel_would_store_it(uid: str) -> str:
+    """Excel 只保留 15 位有效数字，多出来的低位按四舍五入抹成 0。
+
+    注意是四舍五入而不是直接截断：577809207768677761 的第 16 位是 7，
+    所以第 15 位会被进位，结果是 ...678000 而不是 ...677000。
+    """
+    return str(int(Context(prec=15, rounding=ROUND_HALF_UP).create_decimal(uid)))
+
+
+def test_damaged_uids_are_the_excel_form_of_real_seed_uids():
+    """损伤值必须真的是种子里某个 UID 过一遍 Excel 之后的样子，不是随手编的。
+
+    顺带锁住那对「只差最后一位」的 UID 会塌成同一个损伤值 —— 这是整套种子数据里
+    最有说服力的一个例子。
+    """
+    excel_forms = {_as_excel_would_store_it(c.uid) for c in seed.build_clients()}
+
+    for damaged in seed.DAMAGED_UIDS:
+        assert damaged in excel_forms, f"{damaged} 不是任何种子 UID 的 Excel 形态"
+
+    assert _as_excel_would_store_it("577809207768677761") == "577809207768678000"
+    assert _as_excel_would_store_it("577809207768677762") == "577809207768678000"
+    assert "577809207768678000" in seed.DAMAGED_UIDS
+
+
+def test_damaged_batch_is_enough_to_reach_a_verdict():
+    """数量必须够触发聚合判定：命中至少 2 个，且超过巧合期望的 3 倍。
+
+    低于这个门槛的话，检测只会说「在巧合范围内，暂不能判定」，自检就失败了。
+    """
+    uids = (
+        [c.uid for c in seed.build_clients()]
+        + list(seed.UNMAPPED_CLIENTS)
+        + list(seed.DAMAGED_UIDS)
+    )
+
+    report = assess_uid_health(uids)
+
+    assert report.verdict == "likely_damaged"
+    assert len(report.truncated) == len(seed.DAMAGED_UIDS)
+
+
+def test_clean_seed_data_gets_a_clean_verdict():
+    """反过来也要成立：不开开关时检测必须是 clean，否则平时全是假警。"""
+    uids = [t.uid for t in seed.build_transactions()] + [c.uid for c in seed.build_clients()]
+
+    assert assess_uid_health(uids).verdict == "clean"
+
+
+def test_damaged_rows_carry_the_seed_marker_so_reset_can_remove_them():
+    for name in seed.DAMAGED_UIDS.values():
+        assert seed.is_seed_value(name), "损伤行也必须能被 --reset 清掉"
+
+
+def test_damaged_rows_do_not_change_the_period_range():
+    """损伤数据只是加噪，不该把结算月份范围也改了。"""
+    clean = {t.period for t in seed.build_transactions()}
+    damaged = {t.period for t in seed.build_transactions(with_damaged_uid=True)}
+
+    assert clean == damaged
 
 
 def test_transaction_natural_key_separates_same_day_same_client_rows():
