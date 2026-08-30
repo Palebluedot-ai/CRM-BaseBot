@@ -80,6 +80,8 @@ uv run python -m crm_basebot.jobs.reconcile --period 2026-03 --write
 
 `lark-oapi` 的 WebSocket 客户端把 CARD 帧直接 return 掉了（[issue #126](https://github.com/larksuite/oapi-sdk-python/issues/126)，已关闭但至今未修）。后果是销售点提交按钮报 `200340`，服务端没有任何日志。`lark/ws_patch.py` 打了补丁，`tests/test_ws_patch.py` 会在 SDK 官方修复后提醒可以删掉它。
 
+补丁把 CARD 帧的 `type` 头改写成 `event`，副作用是回写给平台的响应帧 `type` 也变成 `event`。这个副作用**已经真机验证过不影响交互**：2026-08-31 在自建的免费团队租户上（lark-oapi 1.7.3，长连接模式）跑通完整链路，点卡片表单的提交按钮后正常弹出 toast，没有 `200340`。结论只对 1.7.x 有效，升级 SDK 后用 `scripts/ws_smoke.py` 重验一次。
+
 生产环境绕不开长连接：公司内网服务器没有公网入口，webhook 打不进来，长连接只需要出网。
 
 **3. Bitable 写接口不支持并发**

@@ -13,6 +13,10 @@
     uv run python scripts/ws_smoke.py
 
 然后在飞书里给机器人发任意一条消息，点它回复的卡片上的按钮。
+
+2026-08-31 在 lark-oapi 1.7.3 上跑通过一次（自建免费团队租户，长连接模式）：
+点按钮正常弹 toast。所以现在再跑它是回归检查 —— 升级 SDK 或换租户之后跑一遍，
+确认补丁在新版本上依然成立。
 """
 
 from __future__ import annotations
