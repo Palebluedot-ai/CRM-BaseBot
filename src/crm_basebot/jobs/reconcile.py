@@ -48,6 +48,8 @@ def _write_rows(bitable: BitableClient, table_id: str, rows: list[CommissionRow]
                 schema.COMM_PAYABLE: float(row.payable),
                 schema.COMM_COMPUTED_AT: now_ms,
             },
+            # 汇总表没有要读回来的系统字段，一行一个往返就够了
+            reread=False,
         )
         written += 1
     return written

@@ -72,7 +72,7 @@ uv run python -m crm_basebot.jobs.reconcile --period 2026-03 --write
 
 **1. 客户UID 会丢精度**
 
-客户UID 是 18–19 位数字，超过 float64 的安全整数上限（2^53，16 位）。全链路必须当字符串处理，任何一处 `int()` 或 `float()` 都会让 join key 静默错配，佣金算到别人头上。`bitable.py` 的读取层强制转字符串，`tests/test_bitable.py` 用真实 UID 值锁住这个行为。
+客户UID 是 18–19 位数字，超过 float64 的安全整数上限（2^53，16 位）。全链路必须当字符串处理，任何一处 `int()` 或 `float()` 都会让 join key 静默错配，佣金算到别人头上。`values.py` 的读取层强制转字符串（拿到浮点数直接报错而不是凑合），`tests/test_values.py` 用真实 UID 值锁住这个行为，`tests/test_write_payloads.py` 盯住写回去的那一侧。
 
 字符串化只能保证 UID 在我们手里不坏。交易明细是同事从内部系统导出再导入的，只要中间过了一手 Excel（只保留 15 位有效数字），UID 的低位在进 Base 之前就已经被抹成 0 了 —— 这种损伤下游修不了。`values.py` 的 `assess_uid_health()` 用尾零特征做事后诊断，`scripts/inspect_base.py` 和对账流程都会跑一遍并告警。它是启发式，只提示不拦截，判据和误报权衡写在 `looks_excel_truncated()` 的 docstring 里。
 
@@ -84,7 +84,7 @@ uv run python -m crm_basebot.jobs.reconcile --period 2026-03 --write
 
 **3. Bitable 写接口不支持并发**
 
-并发写同一个 Base 会返回 `1254045 WriteConflict`。所有写操作都过 `bitable.py` 里单 worker 的队列串行化。这个队列顺带给了编号递增一个安全的临界区。
+并发写同一张表会返回 `1254291 Write conflict`。所有写操作都在 `bitable.py` 的进程级写锁里串行执行。这把锁顺带给了编号递增一个安全的临界区。
 
 ## 状态
 

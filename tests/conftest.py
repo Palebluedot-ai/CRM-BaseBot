@@ -39,6 +39,12 @@ class FakeBitable:
     def __init__(self) -> None:
         self.tables: dict[str, FakeTable] = {}
         self.write_count = 0
+        # 每次 create_record 拿到的**原始** fields，写入格式的断言靠它。
+        # 存 (table_id, fields)，因为「哪张表收到什么」本身就是要钉住的事。
+        self.writes: list[tuple[str, dict[str, Any]]] = []
+        # 真实 API 下 reread=True 会多一个 get_record 往返，这里如实计数，
+        # 让「别在 3 秒回调里白白多读一次」这条约束能被测到。
+        self.read_back_count = 0
 
     def table(self, table_id: str) -> FakeTable:
         return self.tables.setdefault(table_id, FakeTable())
@@ -52,8 +58,11 @@ class FakeBitable:
     def get_record(self, table_id: str, record_id: str) -> Record:
         return Record(record_id=record_id, fields=dict(self.table(table_id).records[record_id]))
 
-    def create_record(self, table_id: str, fields: dict[str, Any]) -> Record:
+    def create_record(
+        self, table_id: str, fields: dict[str, Any], *, reread: bool = True
+    ) -> Record:
         self.write_count += 1
+        self.writes.append((table_id, dict(fields)))
         table = self.table(table_id)
 
         stored = dict(fields)
@@ -62,6 +71,12 @@ class FakeBitable:
             stored[table.auto_number_field] = f"R{next(table._serial):03d}"
 
         record_id = table.add_existing(stored)
+
+        if not reread:
+            # 真实接口的 create 响应只回显你写进去的字段，自动编号不保证在里面
+            return Record(record_id=record_id, fields=dict(fields))
+
+        self.read_back_count += 1
         return self.get_record(table_id, record_id)
 
 

@@ -48,5 +48,7 @@ class AuditLog:
             schema.AUDIT_TARGET_RECORD: target_record,
             schema.AUDIT_DETAIL: json.dumps(detail or {}, ensure_ascii=False),
         }
-        created = self._bitable.create_record(self._table_id, fields)
+        # 审计表没有自动编号之类要读回来的字段，所以不回读 —— 这一步在卡片回调的
+        # 3 秒预算里，每省一个往返都是实的。
+        created = self._bitable.create_record(self._table_id, fields, reread=False)
         return created.record_id

@@ -73,7 +73,8 @@ SMOKE_CARD = {
                         "name": "smoke_submit",
                         "text": {"tag": "plain_text", "content": "提交测试"},
                         "type": "primary",
-                        "action_type": "form_submit",
+                        # JSON 2.0 里表单内按钮用 form_action_type，不是 1.0 的 action_type
+                        "form_action_type": "submit",
                         "behaviors": [{"type": "callback", "value": {"action": "smoke_test"}}],
                     },
                 ],
@@ -151,6 +152,8 @@ def main() -> int:
         settings.app_id,
         settings.app_secret,
         event_handler=event_handler,
+        # 和 REST 客户端保持同一个 domain，见 app.py 里的说明
+        domain=settings.domain,
         log_level=lark.LogLevel.INFO,
     ).start()
 

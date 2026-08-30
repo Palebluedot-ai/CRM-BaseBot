@@ -45,12 +45,18 @@ def _input(name: str, label: str, placeholder: str, *, required: bool = True) ->
 
 
 def _submit(name: str, action: str, text: str = "提交") -> dict[str, Any]:
+    """表单容器里的提交按钮。
+
+    ``form_action_type`` 不能写成 1.0 时代的 ``action_type: "form_submit"`` ——
+    在 JSON 2.0 里 ``form_action_type`` 是表单内按钮的必填属性，``action_type``
+    已经标记为废弃。``name`` 同样必填且要在整张卡片内唯一，否则平台回 200530。
+    """
     return {
         "tag": "button",
         "name": name,
         "text": {"tag": "plain_text", "content": text},
         "type": "primary",
-        "action_type": "form_submit",
+        "form_action_type": "submit",
         "behaviors": [{"type": "callback", "value": {"action": action}}],
     }
 
@@ -200,15 +206,18 @@ def client_form_card(referral_options: list[tuple[str, str]]) -> dict[str, Any]:
                     "tag": "form",
                     "name": "client_form",
                     "elements": [
+                        # 下拉选择组件没有 label 属性（只有输入框有），标题只能单独用
+                        # 一个富文本组件顶上，官方示例也是这么做的。
+                        _text("**所属渠道**"),
                         {
                             "tag": "select_static",
                             "name": F_CLIENT_REFERRAL,
-                            "label": {"tag": "plain_text", "content": "所属渠道"},
                             "placeholder": {
                                 "tag": "plain_text",
                                 "content": "选择一个你名下的渠道",
                             },
                             "required": True,
+                            "width": "fill",
                             "options": options,
                             "margin": "0px 0px 8px 0px",
                         },

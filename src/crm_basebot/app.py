@@ -91,6 +91,10 @@ def main() -> None:
         settings.app_id,
         settings.app_secret,
         event_handler=event_handler,
+        # 必须和 REST 客户端用同一个 domain。不传的话 SDK 默认走 open.feishu.cn，
+        # 而 LARK_DOMAIN 指向 Lark（larksuite.com）时 REST 走 Lark、长连接走飞书，
+        # 表现是「连上了但一条事件都收不到」，极难看出原因。
+        domain=settings.domain,
         log_level=lark.LogLevel.DEBUG
         if settings.log_level.upper() == "DEBUG"
         else lark.LogLevel.INFO,

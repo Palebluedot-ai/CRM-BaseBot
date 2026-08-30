@@ -69,8 +69,10 @@ class BotHandlers:
     # ---------- 卡片回调 ----------
 
     def on_card_action(self, data: P2CardActionTrigger) -> P2CardActionTriggerResponse:
-        action_value = data.event.action.value or {}
-        action = action_value.get("action", "")
+        # value 在平台侧允许是 object 也允许是裸字符串，SDK 把它声明成 Dict[str, Any]
+        # 但不做校验。非 dict 的情况按「认不出的动作」处理，别让 .get 抛 AttributeError。
+        action_value = data.event.action.value
+        action = action_value.get("action", "") if isinstance(action_value, dict) else ""
         form = data.event.action.form_value or {}
         open_id = data.event.operator.open_id
 
@@ -110,17 +112,20 @@ class BotHandlers:
         return _card_response(cards.error_card("这个操作我不认识，请重新开始。"))
 
     def _submit_referral(self, sales, form) -> P2CardActionTriggerResponse:
-        rate = to_number(form.get(cards.F_REFERRAL_RATE))
+        # 输入框的标签就写着「分佣比例 (%)」，照着填「20%」是很自然的事。
+        # 不去掉这个百分号，to_number 会返回 None，人看到的是「要填数字」——
+        # 而他明明填的就是数字。
+        rate = to_number(_form_text(form, cards.F_REFERRAL_RATE).rstrip("%").strip())
         if rate is None:
             raise ValidationError("分佣比例要填数字，例如 20")
 
         referral_no, _ = self._referrals.create(
             sales,
             ReferralInput(
-                name=form.get(cards.F_REFERRAL_NAME, ""),
-                email=form.get(cards.F_REFERRAL_EMAIL, ""),
-                address=form.get(cards.F_REFERRAL_ADDRESS, ""),
-                payment_info=form.get(cards.F_REFERRAL_PAYMENT, ""),
+                name=_form_text(form, cards.F_REFERRAL_NAME),
+                email=_form_text(form, cards.F_REFERRAL_EMAIL),
+                address=_form_text(form, cards.F_REFERRAL_ADDRESS),
+                payment_info=_form_text(form, cards.F_REFERRAL_PAYMENT),
                 commission_rate=rate,
             ),
         )
@@ -135,11 +140,16 @@ class BotHandlers:
         )
 
     def _submit_client(self, sales, form) -> P2CardActionTriggerResponse:
+        # 待真机验证：这条路径是全项目串行请求最多的一条 —— 扫渠道表确认归属、
+        # 扫客户表查 UID 重复、写审计、写客户，一共 4 个来回。3 秒预算够不够，
+        # 取决于两张表有多少行和网络往返有多久，本地测不出来。
+        # 第一次真跑时盯客户端有没有 200341（回调超时）。真超了，第一刀砍
+        # find_by_uid 的全表扫描（改成带 filter 的 search），别动审计。
         self._clients.create(
             sales,
             ClientInput(
-                uid=form.get(cards.F_CLIENT_UID, ""),
-                name=form.get(cards.F_CLIENT_NAME, ""),
+                uid=_form_text(form, cards.F_CLIENT_UID),
+                name=_form_text(form, cards.F_CLIENT_NAME),
                 referral_no=_select_value(form.get(cards.F_CLIENT_REFERRAL)),
             ),
         )
@@ -172,6 +182,17 @@ class BotHandlers:
             logger.error("发送卡片失败: %s %s", response.code, response.msg)
 
 
+def _form_text(form: dict[str, Any], key: str) -> str:
+    """从 form_value 里取一个文本项。
+
+    ``dict.get(key, "")`` 不够：选填项没填时平台可能不给这个 key，也可能给
+    ``null``。后者会让默认值失效，一路 None 传到 ``.strip()`` 才炸，而且是在
+    3 秒回调里炸成一句「系统出错了」，看不出是哪个字段。
+    """
+    value = form.get(key)
+    return "" if value is None else str(value)
+
+
 def _select_value(raw: Any) -> str:
     """下拉组件的回传值可能是裸字符串，也可能包成 {"value": ...}。"""
     if isinstance(raw, dict):
@@ -182,6 +203,13 @@ def _select_value(raw: Any) -> str:
 def _card_response(
     card: dict[str, Any], *, toast: str | None = None
 ) -> P2CardActionTriggerResponse:
+    """按平台要求的回调响应体构造返回值。
+
+    结构是 ``{"toast": {...}, "card": {"type": "raw", "data": <卡片 JSON>}}``。
+    SDK 拿到这个对象后直接 ``JSON.marshal``，所以这里的 key 名就是最终上线的
+    字段名。另外平台规定：交互前是 2.0 结构的卡片，交互后必须仍然是 2.0，
+    否则报 200830 —— cards.py 里每张卡都带 ``"schema": "2.0"``。
+    """
     payload: dict[str, Any] = {"card": {"type": "raw", "data": card}}
     if toast:
         payload["toast"] = {"type": "success", "content": toast}

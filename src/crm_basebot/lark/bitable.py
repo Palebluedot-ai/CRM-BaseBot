@@ -2,8 +2,8 @@
 
 三件事在这里集中处理，别处不要绕过：
 
-1. **写操作串行化。** Bitable 的写接口不支持并发，同一个 Base 上并发写会返回
-   ``1254045 WriteConflict``。所有写都要拿 ``_WRITE_LOCK``。用锁而不是异步队列，
+1. **写操作串行化。** Bitable 的写接口不支持并发，同一张表上并发写会返回
+   ``1254291 Write conflict``。所有写都要拿 ``_WRITE_LOCK``。用锁而不是异步队列，
    是因为 SDK 的卡片回调处理器是同步调用的（且必须 3 秒内返回），同步锁能同时
    适配机器人回调和批处理脚本两种场景。这把锁顺带给编号递增提供了临界区。
 
@@ -41,6 +41,12 @@ logger = logging.getLogger(__name__)
 
 # 同一进程内所有 Bitable 写操作的串行化闸门
 _WRITE_LOCK = threading.RLock()
+
+# 「查询记录」接口单次最多 500 行（默认只有 20，所以必须显式传）
+MAX_SEARCH_PAGE_SIZE = 500
+
+# 「列出数据表」「列出字段」两个接口的分页上限
+MAX_LIST_PAGE_SIZE = 100
 
 # Bitable 字段类型码，只列我们会碰到的
 FIELD_TYPE_TEXT = 1
@@ -105,12 +111,49 @@ class Record:
     fields: dict[str, Any]
 
 
-def _check(response: Any, what: str) -> None:
+def _check(response: Any, what: str, *, require_data: bool = True) -> Any:
+    """确认调用成功并把 ``response.data`` 返回出来。
+
+    两道检查缺一不可。``success()`` 只看业务码，而 ``data`` 在少数情况下会是
+    None —— 网关层返回非 JSON 体、或者响应体没有 data 字段时，SDK 反序列化出来
+    就是 None。直接 ``response.data.items`` 会抛 AttributeError，报错里既没有
+    错误码也没有 log_id，等于把一次可诊断的接口失败变成一句无头的异常。
+
+    ``require_data=False`` 留给不看返回内容的调用（比如删除）—— 那种情况下
+    data 是不是 None 无所谓，不该因此把一次成功的操作判成失败。
+    """
     if not response.success():
         raise BitableError(
             f"{what} 失败: code={response.code} msg={response.msg} "
             f"log_id={getattr(response, 'get_log_id', lambda: '')()}"
         )
+
+    if require_data and response.data is None:
+        raise BitableError(
+            f"{what} 返回 code=0 但没有 data 体，无法继续。"
+            f"log_id={getattr(response, 'get_log_id', lambda: '')()}"
+        )
+
+    return response.data
+
+
+def _next_page_token(data: Any, what: str) -> str | None:
+    """算出下一页的 page_token，没有下一页返回 None。
+
+    平台的约定是「``has_more`` 为 true 时才返回 ``page_token``」。真出现
+    has_more=true 但 token 为空的情况，照原样把空 token 传回去等于从头再查一遍
+    第一页 —— 死循环，而且是那种一边刷接口一边不停 yield 重复记录的死循环。
+    这里宁可提前结束并留一条 error 日志。
+    """
+    if not data.has_more:
+        return None
+
+    token = data.page_token
+    if not token:
+        logger.error("%s：has_more=true 但没拿到 page_token，只能按已读到的部分继续", what)
+        return None
+
+    return token
 
 
 class BitableClient:
@@ -129,19 +172,23 @@ class BitableClient:
         page_token: str | None = None
 
         while True:
-            builder = ListAppTableRequest.builder().app_token(self._app_token).page_size(100)
+            builder = (
+                ListAppTableRequest.builder()
+                .app_token(self._app_token)
+                .page_size(MAX_LIST_PAGE_SIZE)
+            )
             if page_token:
                 builder = builder.page_token(page_token)
 
             response = self._client.bitable.v1.app_table.list(builder.build())
-            _check(response, "列出数据表")
+            data = _check(response, "列出数据表")
 
-            for item in response.data.items or []:
+            for item in data.items or []:
                 tables.append(TableInfo(table_id=item.table_id, name=item.name))
 
-            if not response.data.has_more:
+            page_token = _next_page_token(data, "列出数据表")
+            if page_token is None:
                 break
-            page_token = response.data.page_token
 
         return tables
 
@@ -154,15 +201,15 @@ class BitableClient:
                 ListAppTableFieldRequest.builder()
                 .app_token(self._app_token)
                 .table_id(table_id)
-                .page_size(100)
+                .page_size(MAX_LIST_PAGE_SIZE)
             )
             if page_token:
                 builder = builder.page_token(page_token)
 
             response = self._client.bitable.v1.app_table_field.list(builder.build())
-            _check(response, f"列出字段 table_id={table_id}")
+            data = _check(response, f"列出字段 table_id={table_id}")
 
-            for item in response.data.items or []:
+            for item in data.items or []:
                 fields.append(
                     FieldInfo(
                         field_id=item.field_id,
@@ -174,9 +221,9 @@ class BitableClient:
                     )
                 )
 
-            if not response.data.has_more:
+            page_token = _next_page_token(data, f"列出字段 table_id={table_id}")
+            if page_token is None:
                 break
-            page_token = response.data.page_token
 
         return fields
 
@@ -184,10 +231,17 @@ class BitableClient:
         self,
         table_id: str,
         *,
-        page_size: int = 500,
+        page_size: int = MAX_SEARCH_PAGE_SIZE,
         field_names: list[str] | None = None,
     ) -> Iterator[Record]:
-        """遍历全表记录，自动翻页。"""
+        """遍历全表记录，自动翻页。
+
+        ``field_names`` 里的名字必须和 Base 里的字段名**逐字符**一致，差一个空格
+        就是 1254024 InvalidFieldNames，不会退化成「返回全部字段」。
+        """
+        if not 0 < page_size <= MAX_SEARCH_PAGE_SIZE:
+            raise ValueError(f"page_size 要在 1 到 {MAX_SEARCH_PAGE_SIZE} 之间，给的是 {page_size}")
+
         page_token: str | None = None
 
         while True:
@@ -206,14 +260,14 @@ class BitableClient:
                 builder = builder.page_token(page_token)
 
             response = self._client.bitable.v1.app_table_record.search(builder.build())
-            _check(response, f"查询记录 table_id={table_id}")
+            data = _check(response, f"查询记录 table_id={table_id}")
 
-            for item in response.data.items or []:
+            for item in data.items or []:
                 yield Record(record_id=item.record_id, fields=item.fields or {})
 
-            if not response.data.has_more:
+            page_token = _next_page_token(data, f"查询记录 table_id={table_id}")
+            if page_token is None:
                 break
-            page_token = response.data.page_token
 
     def get_record(self, table_id: str, record_id: str) -> Record:
         request = (
@@ -224,16 +278,24 @@ class BitableClient:
             .build()
         )
         response = self._client.bitable.v1.app_table_record.get(request)
-        _check(response, f"读取记录 record_id={record_id}")
-        item = response.data.record
+        data = _check(response, f"读取记录 record_id={record_id}")
+        item = data.record
+        if item is None:
+            raise BitableError(f"读取记录 record_id={record_id} 返回的 data 里没有 record")
         return Record(record_id=item.record_id, fields=item.fields or {})
 
     # ---------- 写 ----------
 
-    def create_record(self, table_id: str, fields: dict[str, Any]) -> Record:
+    def create_record(
+        self, table_id: str, fields: dict[str, Any], *, reread: bool = True
+    ) -> Record:
         """新增一条记录，返回写入后的完整记录。
 
-        返回值包含系统生成的字段（比如自动编号），因为调用方需要把编号回显给销售。
+        ``reread=True`` 时会额外读一次刚写的记录，为的是拿到系统生成的字段（自动
+        编号），因为调用方要把编号回显给销售。代价是每次写变成两个串行请求。
+
+        不需要读回编号的调用方应该传 ``reread=False``：卡片回调只有 3 秒预算，
+        而审计写入是每一次业务操作的前置步骤，白白多一个往返直接吃掉预算。
         """
         record = AppTableRecord.builder().fields(fields).build()
         request = (
@@ -246,8 +308,12 @@ class BitableClient:
 
         with _WRITE_LOCK:
             response = self._client.bitable.v1.app_table_record.create(request)
-            _check(response, f"新增记录 table_id={table_id}")
-            created = response.data.record
+            data = _check(response, f"新增记录 table_id={table_id}")
+            created = data.record
+            if created is None or not created.record_id:
+                raise BitableError(f"新增记录 table_id={table_id} 成功但没拿到 record_id")
+            if not reread:
+                return Record(record_id=created.record_id, fields=created.fields or {})
             # 自动编号等系统字段在 create 响应里不一定回填，回读一次才拿得准
             return self.get_record(table_id, created.record_id)
 
@@ -257,7 +323,7 @@ class BitableClient:
         目前只有 ``scripts/seed_dev_data.py --reset`` 用它清理开发租户里的种子
         数据。机器人和对账任务都不删记录 —— 审计表更是明确只增不改。放在这里而
         不是让脚本自己调 SDK，是为了让删除也走同一把写锁：删和写并发同样会撞
-        ``1254045 WriteConflict``。
+        ``1254291 Write conflict``。
         """
         request = (
             DeleteAppTableRecordRequest.builder()
@@ -269,7 +335,7 @@ class BitableClient:
 
         with _WRITE_LOCK:
             response = self._client.bitable.v1.app_table_record.delete(request)
-            _check(response, f"删除记录 record_id={record_id}")
+            _check(response, f"删除记录 record_id={record_id}", require_data=False)
 
     # ---------- schema 快照 ----------
 
