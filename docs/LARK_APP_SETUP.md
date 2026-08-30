@@ -118,12 +118,30 @@ LARK_APP_SECRET=你的secret
 
 左侧「权限管理」，搜索并开通下面这些。**一次开齐**，免得后面反复发版本。
 
-| 权限标识 | 用途 |
-| --- | --- |
-| `bitable:app` | 读写多维表格。渠道、客户、佣金、审计全靠它 |
-| `im:message` | 接收销售发给机器人的消息 |
-| `im:message:send_as_bot` | 以机器人身份发消息和卡片 |
-| `contact:user.base:readonly` | 读销售的姓名，卡片上显示「张三，你登记的渠道是 R010」 |
+| 权限标识 | 官方名称（后台里搜这个） | 用途 |
+| --- | --- | --- |
+| `bitable:app` | 查看、评论、编辑和管理多维表格 | 读写多维表格。渠道、客户、佣金、审计全靠它 |
+| `im:message.p2p_msg:readonly` | 读取用户发给机器人的单聊消息<br>英文后台：Get direct messages sent to bot | **第 5 步订阅 `im.message.receive_v1` 的前置条件**。销售私聊机器人的消息靠它推过来 |
+| `im:message:send_as_bot` | 以应用的身份发消息 | 以机器人身份发消息和卡片 |
+| `contact:user.base:readonly` | 获取用户基本信息 | 用 open_id 反查姓名。**当前代码没调用**（卡片上的姓名读的是 Base 里的销售名册表），一起申请的理由见 [IT_APPROVAL.md](IT_APPROVAL.md) 第四节 |
+
+### 接收消息的权限不是 `im:message`
+
+这一条踩过坑，单独说明。`im:message`（获取与发送单聊、群组消息）名字里带「获取」，看着就该是接收消息用的 —— 但官方《[接收消息](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive)》事件文档「开启任一权限即可」那张表里**没有它**。能满足 `im.message.receive_v1` 的只有这几个细分权限：
+
+| 场景 | 权限标识 | 官方名称 |
+| --- | --- | --- |
+| **单聊私发给机器人（本项目用这个）** | `im:message.p2p_msg:readonly` | 读取用户发给机器人的单聊消息 |
+| 单聊，历史版本 | `im:message.p2p_msg` | 获取用户发给机器人的单聊消息（历史版本） |
+| 群里 @ 机器人 | `im:message.group_at_msg:readonly` | 获取群组中用户@机器人消息 |
+| 群里 @ 机器人，含其它机器人 | `im:message.group_at_msg.include_bot:readonly` | 获取群组中其他机器人和用户@当前机器人的消息 |
+| 群里全部消息 | `im:message.group_msg` | 获取群组中所有消息（**敏感权限**） |
+
+销售是**单聊私发**给机器人，不走群聊也不 @，所以只需要第一行那一个。群聊那几个一概不开，`im:message.group_msg` 更是官方标了「敏感权限」的东西，开了要多解释一轮。
+
+搜 `p2p` 会同时搜到带「（历史版本）」的 `im:message.p2p_msg`，两个都能满足订阅，选带 `:readonly` 的新版。
+
+发消息那一侧 `im:message` 其实是够用的（官方《[发送消息](https://open.feishu.cn/document/server-docs/im-v1/message/create)》列的是 `im:message` / `im:message:send_as_bot` / `im:message:send` 三选一），但它同时含「获取单聊、群组消息」的语义，范围比 `im:message:send_as_bot` 大一圈。两边都用不上它，所以整个清单里不出现 `im:message`。
 
 ## 第 5 步：订阅事件与回调
 
@@ -133,6 +151,16 @@ LARK_APP_SECRET=你的secret
 | --- | --- | --- |
 | 事件与回调 > **事件配置** | `im.message.receive_v1` | 销售给机器人发消息时触发，用来弹出登记卡片 |
 | 事件与回调 > **回调配置** | `card.action.trigger` | 销售点卡片上的提交按钮时触发，**这是数据录入的主通道** |
+
+两者的权限要求不一样：`im.message.receive_v1` 必须先有第 4 步那个 `im:message.p2p_msg:readonly`；`card.action.trigger` 官方标的是「暂无」，不需要任何权限，只要订阅上就能收。
+
+> **添加 `im.message.receive_v1` 时如果那一页出现橙色的「Please add any one of the following scopes」**（中文后台是「请添加以下任一权限」），下面列着 Get direct messages sent to bot、Receive group messages… 那一串 —— 说明事件订阅上了，但它依赖的权限一个都没开。
+>
+> 这个警告**只在事件配置页显示**。回到权限管理页看，开着的那几条权限都是绿的，一切正常，完全看不出缺了东西。
+>
+> 症状是**机器人完全不回消息，终端也没有任何日志** —— 长连接是通的、`ws_smoke.py` 打印着「长连接已建立」，但飞书压根不给你推事件，所以本地没有任何东西可打。很容易误判成代码 bug 或者长连接掉了，往那个方向能查很久。
+>
+> 处理：回第 4 步开 `im:message.p2p_msg:readonly`，创建版本发布，等几十秒生效，警告消失。
 
 **两个页面的订阅方式都选「使用长连接接收事件」。**
 
@@ -368,6 +396,8 @@ uv run python -m crm_basebot.jobs.reconcile --all-periods      # 全部月份
 
 **点卡片按钮报 `200340`** — CARD 帧补丁没生效。跑 `uv run pytest tests/test_ws_patch.py -v` 看补丁状态。如果测试提示 SDK 已官方修复，说明补丁被自动跳过了但 SDK 的修复方式和我们预期不同，需要重新看一下 `ws_patch.py`。
 
+**机器人一条消息都不回，终端一行日志都没有** — 九成是 `im:message.p2p_msg:readonly` 没开。去「事件与回调 > 事件配置」看 `im.message.receive_v1` 那一行上方有没有橙色的「Please add any one of the following scopes」/「请添加以下任一权限」。这个警告只在这一页显示，权限管理页看不出来；权限没开的时候飞书根本不推事件，所以本地没有任何日志可看，长连接却照样是「已建立」状态。详见第 5 步里的那段提示。
+
 **保存「使用长连接接收事件」失败** — 本地程序没在跑，或者跑起来了但没连上。先让 `ws_smoke.py` 打印出「长连接已建立」再去保存。
 
 **改了权限后不生效** — 自建应用改权限需要「创建版本并发布」，在自己的组织里你就是审核人，点一下通过即可。发布后可能要几十秒生效。
@@ -393,7 +423,7 @@ uv run python -m crm_basebot.jobs.reconcile --all-periods      # 全部月份
 对本项目来说这意味着：
 
 - `contact:user.base:readonly` 走通讯录，**不计费**
-- `im.message.receive_v1` 和 `card.action.trigger` 走事件订阅，**不计费**
-- 多维表格读写（`bitable:app`）和发消息发卡片（`im`）**计费**，这是主要消耗
+- `im.message.receive_v1`（`im:message.p2p_msg:readonly`）和 `card.action.trigger` 走事件订阅，**不计费**
+- 多维表格读写（`bitable:app`）和发消息发卡片（`im:message:send_as_bot`）**计费**，这是主要消耗
 
 一次登记大致是几次 Base 读 + 一次写 + 一次发卡片，量级在个位数。开发测试阶段撞不到上限。真正要留意的是对账任务：`reconcile` 会全量拉表，跑之前先想一下记录条数乘以分页次数。
