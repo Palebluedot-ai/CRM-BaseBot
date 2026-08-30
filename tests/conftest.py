@@ -23,6 +23,9 @@ class FakeTable:
         self.records: dict[str, dict[str, Any]] = {}
         self._ids = itertools.count(1)
         self._serial = itertools.count(start_at + 1)
+        # 被完整遍历过几次。真实 API 下每次遍历都是一串分页请求，
+        # 所以有测试拿它来钉住「不许多读一遍表」。
+        self.scan_count = 0
 
     def add_existing(self, fields: dict[str, Any]) -> str:
         record_id = f"rec{next(self._ids):04d}"
@@ -41,7 +44,9 @@ class FakeBitable:
         return self.tables.setdefault(table_id, FakeTable())
 
     def iter_records(self, table_id: str, **kwargs):
-        for record_id, fields in list(self.table(table_id).records.items()):
+        table = self.table(table_id)
+        table.scan_count += 1
+        for record_id, fields in list(table.records.items()):
             yield Record(record_id=record_id, fields=dict(fields))
 
     def get_record(self, table_id: str, record_id: str) -> Record:

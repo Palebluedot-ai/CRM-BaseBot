@@ -59,6 +59,8 @@ uv run python -m crm_basebot.jobs.reconcile --period 2026-03 --write
 
 客户UID 是 18–19 位数字，超过 float64 的安全整数上限（2^53，16 位）。全链路必须当字符串处理，任何一处 `int()` 或 `float()` 都会让 join key 静默错配，佣金算到别人头上。`bitable.py` 的读取层强制转字符串，`tests/test_bitable.py` 用真实 UID 值锁住这个行为。
 
+字符串化只能保证 UID 在我们手里不坏。交易明细是同事从内部系统导出再导入的，只要中间过了一手 Excel（只保留 15 位有效数字），UID 的低位在进 Base 之前就已经被抹成 0 了 —— 这种损伤下游修不了。`values.py` 的 `assess_uid_health()` 用尾零特征做事后诊断，`scripts/inspect_base.py` 和对账流程都会跑一遍并告警。它是启发式，只提示不拦截，判据和误报权衡写在 `looks_excel_truncated()` 的 docstring 里。
+
 **2. SDK 在长连接下会丢弃卡片回调**
 
 `lark-oapi` 的 WebSocket 客户端把 CARD 帧直接 return 掉了（[issue #126](https://github.com/larksuite/oapi-sdk-python/issues/126)，已关闭但至今未修）。后果是销售点提交按钮报 `200340`，服务端没有任何日志。`lark/ws_patch.py` 打了补丁，`tests/test_ws_patch.py` 会在 SDK 官方修复后提醒可以删掉它。

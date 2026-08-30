@@ -236,6 +236,48 @@ def test_空pnl的行被跳过(base):
     assert rows[0].txn_count == 1
 
 
+# ---------- UID 体检 ----------
+
+
+def test_干净数据的uid体检不告警(base):
+    _txn(base, UID_A, 729.99)
+    _txn(base, UID_B, 710.89)
+
+    calculator = CommissionCalculator(base, settings=Settings())
+    calculator.compute(period="2026-03")
+
+    assert calculator.uid_health().verdict == "clean"
+
+
+def test_交易明细里的excel截断uid被体检抓到(base):
+    # 这批 UID 是同事导入的，尾部低位已经被 Excel 抹成 0。
+    # 它们 join 不上客户表（进了 unmapped），但真正危险的是「刚好撞上别的客户」，
+    # 所以要在算钱之前就把损伤本身报出来。
+    for damaged in ("577809207768678000", "2141293991366270000", "577809207768600000"):
+        _txn(base, damaged, 1000)
+
+    calculator = CommissionCalculator(base, settings=Settings())
+    calculator.compute(period="2026-03")
+
+    report = calculator.uid_health()
+    assert report.verdict == "likely_damaged"
+    assert len(report.truncated) == 3
+
+
+def test_体检不额外读表(base):
+    # UID 是 compute() 途中顺手攒的。如果哪天有人改成再遍历一遍交易明细，
+    # 这里会炸 —— 对账不该因为体检多花一倍的 API 调用。
+    _txn(base, UID_A, 729.99)
+
+    calculator = CommissionCalculator(base, settings=Settings())
+    calculator.compute(period="2026-03")
+    scans_after_compute = base.tables[TBL_TXN].scan_count
+
+    calculator.uid_health()
+
+    assert base.tables[TBL_TXN].scan_count == scans_after_compute
+
+
 def test_没有数据时汇总文案友好():
     assert "没有可结算" in summarize([])
 

@@ -25,7 +25,13 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from ..lark.bitable import BitableClient
-from ..lark.values import extract_text, to_number, to_uid
+from ..lark.values import (
+    UidHealthReport,
+    assess_uid_health,
+    extract_text,
+    to_number,
+    to_uid,
+)
 from . import schema
 
 logger = logging.getLogger(__name__)
@@ -103,6 +109,9 @@ class CommissionCalculator:
     def __init__(self, bitable: BitableClient, *, settings) -> None:
         self._bitable = bitable
         self._settings = settings
+        # compute() 途中顺手攒下来的 UID，用于事后体检。
+        # 用 set 而不是 list：唯一 UID 的数量受客户数约束，不会随交易笔数膨胀。
+        self._seen_uids: set[str] = set()
 
     # ---------- 载入维表 ----------
 
@@ -129,6 +138,7 @@ class CommissionCalculator:
             uid = to_uid(record.fields.get(schema.CLIENT_UID))
             if not uid:
                 continue
+            self._seen_uids.add(uid)
 
             linked = record.fields.get(schema.CLIENT_REFERRAL_LINK) or []
             referral = None
@@ -169,6 +179,7 @@ class CommissionCalculator:
             uid = to_uid(record.fields.get(schema.TXN_CLIENT_UID))
             if not uid:
                 continue
+            self._seen_uids.add(uid)
 
             row_period = period_of(record.fields.get(schema.TXN_ORDER_TIME))
             if not row_period:
@@ -208,6 +219,13 @@ class CommissionCalculator:
 
         ordered = sorted(rows.values(), key=lambda r: (r.period, r.referral_no))
         return ordered, sorted(unmapped)
+
+    def uid_health(self) -> UidHealthReport:
+        """体检 compute() 过程中见到的所有 UID，看有没有 Excel 截断痕迹。
+
+        不额外读一遍表 —— UID 是 compute() 途中顺手攒的，所以这个检查基本不花钱。
+        """
+        return assess_uid_health(sorted(self._seen_uids))
 
 
 def _link_ids(value: Any) -> Iterable[str]:

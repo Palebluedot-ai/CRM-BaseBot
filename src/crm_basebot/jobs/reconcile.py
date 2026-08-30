@@ -22,6 +22,7 @@ from ..domain import schema
 from ..domain.audit import ACTION_COMPUTE_COMMISSION, AuditLog
 from ..domain.commission import CommissionCalculator, CommissionRow, summarize
 from ..lark.bitable import BitableClient, assert_fields_present
+from ..lark.values import uid_health_advice
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\n结算范围：{period or '全部月份'}\n")
     print(summarize(rows))
 
+    # UID 体检。算钱之前发现比事后对账发现便宜得多 —— 一旦 UID 被 Excel 改坏，
+    # 佣金会静默算到别的渠道头上。这是启发式，会误报，所以只告警不中止。
+    health = calculator.uid_health()
+    if health.verdict in ("likely_damaged", "inconclusive"):
+        print(f"\n{'!' * 60}")
+        print(uid_health_advice(health))
+        print("!" * 60)
+
     if unmapped:
         print(
             f"\n注意：{len(unmapped)} 个客户在交易明细里有记录但没登记归属渠道，"
@@ -122,6 +131,7 @@ def main(argv: list[str] | None = None) -> int:
             "结算范围": period or "全部月份",
             "写入行数": written,
             "未登记客户数": len(unmapped),
+            "UID体检": health.verdict,
         },
     )
 

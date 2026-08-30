@@ -13,6 +13,7 @@ Base 里已经有一堆表了，所以第一步不是建表而是看清现状：
 from __future__ import annotations
 
 import sys
+from itertools import islice
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -25,8 +26,16 @@ from crm_basebot.lark.bitable import (  # noqa: E402
     save_snapshot,
 )
 from crm_basebot.lark.field_types import type_name  # noqa: E402
+from crm_basebot.lark.values import (  # noqa: E402
+    assess_uid_health,
+    extract_text,
+    uid_health_advice,
+)
 
 SNAPSHOT_PATH = Path(__file__).resolve().parent.parent / "schema_snapshot.json"
+
+# UID 采样上限。够统计出比例就行，没必要把整张表拉下来。
+UID_SAMPLE_LIMIT = 1000
 
 # 探查时重点盯的字段：名字里带这些词的，单独拎出来提醒
 UID_HINTS = ("uid", "客户号", "客户 id", "客户id")
@@ -37,6 +46,20 @@ PROFIT_HINTS = ("pnl", "profit", "收益", "利润")
 def _looks_like(name: str, hints: tuple[str, ...]) -> bool:
     lowered = name.lower()
     return any(hint in lowered for hint in hints)
+
+
+def _sample_field(client: BitableClient, table_id: str, field_name: str) -> list[str]:
+    """取某个字段的前若干个取值。
+
+    刻意用 extract_text 而不是 to_uid：to_uid 遇到浮点数会抛异常，而这里的目的
+    正是把损坏的值看清楚，不能在第一个坏值上就停下。
+    """
+    values: list[str] = []
+    for record in islice(client.iter_records(table_id, field_names=[field_name]), UID_SAMPLE_LIMIT):
+        text = extract_text(record.fields.get(field_name))
+        if text:
+            values.append(text)
+    return values
 
 
 def main() -> int:
@@ -59,6 +82,7 @@ def main() -> int:
     print(f"共 {len(tables)} 张表\n")
 
     findings: list[str] = []
+    uid_fields: list[tuple[str, str, str]] = []  # (表名, table_id, 字段名)
 
     for table in tables:
         fields = client.list_fields(table.table_id)
@@ -74,6 +98,7 @@ def main() -> int:
             print(f"     {f.name:<24} {type_name(f.type):<10}{flag_text}")
 
             if _looks_like(f.name, UID_HINTS):
+                uid_fields.append((table.name, table.table_id, f.name))
                 if f.type == FIELD_TYPE_NUMBER:
                     findings.append(
                         f"严重：{table.name}.{f.name} 是「数字」类型。"
@@ -101,6 +126,30 @@ def main() -> int:
                 findings.append(f"{table.name}.{f.name} 是「{type_name(f.type)}」—— 佣金基数候选。")
 
         print()
+
+    # 字段类型对了不代表值是好的。UID 可能在**进入 Base 之前**就被 Excel 抹掉了
+    # 低位（交易明细是同事从内部系统导出再导入的），这种损伤在字段类型上看不出来，
+    # 只能采样实际取值来诊断。
+    for table_name, table_id, field_name in uid_fields:
+        print(f"── 采样 {table_name}.{field_name} 的实际取值")
+        try:
+            uids = _sample_field(client, table_id, field_name)
+        except Exception as exc:  # noqa: BLE001 - 探查脚本不该因为读不到就整体失败
+            print(f"     读取失败，跳过：{exc}\n")
+            continue
+
+        report = assess_uid_health(uids)
+        print(
+            f"     取到 {report.total} 个非空值，其中 {report.long_count} 个超过 15 位，"
+            f"疑似被截断 {report.suspicious_count} 个"
+        )
+        print()
+
+        advice = uid_health_advice(report)
+        if report.verdict == "likely_damaged":
+            findings.append(f"严重：{table_name}.{field_name} —— {advice}")
+        elif report.verdict == "inconclusive":
+            findings.append(f"{table_name}.{field_name} —— {advice}")
 
     if findings:
         print("=" * 60)
