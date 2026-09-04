@@ -159,7 +159,7 @@ def test_人员字段写成_id_对象数组(written):
 
 def test_单选字段直接给选项字符串(written):
     (fields,) = written[TBL_REFERRAL]
-    assert fields[schema.REFERRAL_STATUS] == schema.STATUS_PENDING
+    assert fields[schema.REFERRAL_STATUS] == schema.STATUS_ACTIVE
     assert isinstance(fields[schema.REFERRAL_STATUS], str)
 
 

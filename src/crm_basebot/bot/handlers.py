@@ -133,8 +133,7 @@ class BotHandlers:
         return _card_response(
             cards.success_card(
                 "渠道已登记",
-                f"编号 **{referral_no}**，状态为待审核。\n\n"
-                f"接下来可以把这个渠道介绍的客户登记进来。",
+                f"编号 **{referral_no}**，已生效。\n\n接下来可以把这个渠道介绍的客户登记进来。",
             ),
             toast=f"已登记 {referral_no}",
         )

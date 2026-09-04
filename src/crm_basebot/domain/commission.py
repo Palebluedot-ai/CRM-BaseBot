@@ -15,6 +15,9 @@
 
 金额用 Decimal 而不是 float：Pnl 是钱，累加上千行的浮点误差会让对账对不上。
 客户UID 全程字符串，理由见 lark/values.py。
+
+归月先把订单时间换算到业务时区（``BUSINESS_TIMEZONE``，默认 Asia/Singapore）再取年月，
+理由见 ``period_of``。
 """
 
 from __future__ import annotations
@@ -23,9 +26,10 @@ import logging
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, tzinfo
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from ..lark.bitable import BitableClient
 from ..lark.values import (
@@ -111,17 +115,21 @@ class Referral:
     status: str
 
 
-def period_of(order_time: Any) -> str:
+def period_of(order_time: Any, *, tz: tzinfo) -> str:
     """把订单时间归到 YYYY-MM。
 
-    Bitable 日期字段是毫秒时间戳；导入的数据偶尔是 '2026/03/02' 这类字符串，
-    两种都认。
+    Bitable 日期字段是 UTC 毫秒时间戳，归月必须先换算到业务时区 ``tz``：Base 里
+    显示「3 月 1 日 00:30」的交易，UTC 还是 2 月 28 日，按 UTC 取月份会把每个月
+    1 号凌晨的交易全算进上个月。``tz`` 刻意没有默认值 —— 悄悄退回 UTC 就是这个
+    bug 本身。
+
+    导入的数据偶尔是 '2026/03/02' 这类字符串，没有时区可言，照字面归月。
     """
     if order_time is None or order_time == "":
         return ""
 
     if isinstance(order_time, int | float) and not isinstance(order_time, bool):
-        moment = datetime.fromtimestamp(float(order_time) / 1000, tz=UTC)
+        moment = datetime.fromtimestamp(float(order_time) / 1000, tz=tz)
         return moment.strftime("%Y-%m")
 
     text = extract_text(order_time)
@@ -147,6 +155,8 @@ class CommissionCalculator:
     def __init__(self, bitable: BitableClient, *, settings) -> None:
         self._bitable = bitable
         self._settings = settings
+        # 归月用的业务时区。名字在 Settings 里已经校验过，这里不会炸。
+        self._tz = ZoneInfo(settings.business_timezone)
         # compute() 途中顺手攒下来的 UID，用于事后体检。
         # 用 set 而不是 list：唯一 UID 的数量受客户数约束，不会随交易笔数膨胀。
         self._seen_uids: set[str] = set()
@@ -223,7 +233,7 @@ class CommissionCalculator:
                 continue
             self._seen_uids.add(uid)
 
-            row_period = period_of(record.fields.get(schema.TXN_ORDER_TIME))
+            row_period = period_of(record.fields.get(schema.TXN_ORDER_TIME), tz=self._tz)
             if not row_period:
                 continue
 

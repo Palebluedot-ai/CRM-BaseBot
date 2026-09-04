@@ -9,6 +9,9 @@ dependencies = [
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     "python-dotenv>=1.0",
+    # zoneinfo 要的时区数据库。macOS 自带，内网 Linux 服务器和精简镜像不一定有，
+    # 缺了的话 BUSINESS_TIMEZONE 的校验会误报「时区名不合法」。
+    "tzdata>=2026.3",
 ]
 
 [dependency-groups]

@@ -106,7 +106,8 @@ class ReferralService:
             schema.REFERRAL_RATE: clean.commission_rate,
             schema.REFERRAL_OWNER: [{"id": sales.open_id}],
             schema.REFERRAL_OWNER_OPEN_ID: sales.open_id,
-            schema.REFERRAL_STATUS: schema.STATUS_PENDING,
+            # 登记即生效，没有「待审核」这一步（2026-09-04 定的）
+            schema.REFERRAL_STATUS: schema.STATUS_ACTIVE,
         }
 
         self._audit.record(

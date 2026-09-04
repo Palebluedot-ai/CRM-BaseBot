@@ -113,10 +113,11 @@ def test_归属人自动记为提交者(fake_bitable, service):
     assert stored[schema.REFERRAL_OWNER] == [{"id": ALICE}]
 
 
-def test_新渠道状态是待审核(fake_bitable, service):
+def test_新渠道登记即生效(fake_bitable, service):
+    """没有「待审核」这个状态（2026-09-04 定的）：销售登记完，渠道直接生效。"""
     _, record_id = service.create(alice, _valid())
     stored = fake_bitable.tables[TBL_REFERRAL].records[record_id]
-    assert stored[schema.REFERRAL_STATUS] == schema.STATUS_PENDING
+    assert stored[schema.REFERRAL_STATUS] == schema.STATUS_ACTIVE
 
 
 def test_只列出自己名下的渠道(service):

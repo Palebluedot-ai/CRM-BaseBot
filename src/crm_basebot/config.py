@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -34,6 +35,23 @@ class Settings(BaseSettings):
     # 关掉就走后端串行递增（读最大号 +1，在写锁的临界区内）。
     # 用 scripts/verify_numbering.py --probe 实测后决定，改这里不用改代码。
     referral_auto_number: bool = Field(default=True, alias="REFERRAL_AUTO_NUMBER")
+
+    # 对账把交易归到哪个月，按这个时区算。Bitable 日期字段存的是 UTC 毫秒时间戳，
+    # 直接按 UTC 取月份的话，本地每个月 1 号 0 点到 8 点的交易会掉进上个月。
+    # 用新加坡是 2026-09-04 定的业务规则；结算口径变了改 .env，不用改代码。
+    business_timezone: str = Field(default="Asia/Singapore", alias="BUSINESS_TIMEZONE")
+
+    @field_validator("business_timezone")
+    @classmethod
+    def _timezone_must_exist(cls, value: str) -> str:
+        """拼错时区名要在启动时炸，不能等对账跑到一半，更不能悄悄退回 UTC。"""
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError(
+                f"「{value}」不是合法的 IANA 时区名，要写成 Asia/Singapore 这种形式"
+            ) from exc
+        return value
 
 
 @lru_cache

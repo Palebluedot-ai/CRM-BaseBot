@@ -60,6 +60,8 @@ uv run python -m crm_basebot.jobs.reconcile --period 2026-03 --write
 
 **佣金规则**：`应付佣金 = max(0, 当月 Pnl 合计 × 分佣比例)`。整月亏损的渠道佣金按 0 保底，不倒扣、也不结转到下个月 —— 这是业务规则，2026-08-30 明确定的，不是代码漏了处理负数。Pnl 合计仍然如实记录负值，报表上看得见这个渠道当月是亏的，汇总输出也会单独标注一行。细节见 `domain/commission.py` 的 `CommissionRow.payable`。
 
+**归月时区**：「当月」按 `.env` 里 `BUSINESS_TIMEZONE` 指定的时区算，默认 `Asia/Singapore`（2026-09-04 定的）。Bitable 日期字段存的是 UTC 时间戳，直接按 UTC 取月份的话，每个月 1 号 0 点到 8 点的交易会全部算进上个月。
+
 ## 文档
 
 | 文档 | 内容 |

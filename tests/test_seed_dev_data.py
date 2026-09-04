@@ -11,9 +11,11 @@ import importlib.util
 import sys
 from decimal import ROUND_HALF_UP, Context
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
+from crm_basebot.config import Settings
 from crm_basebot.domain import schema
 from crm_basebot.domain.commission import period_of
 from crm_basebot.lark.values import assess_uid_health, looks_excel_truncated
@@ -34,6 +36,10 @@ def _load_seed_module():
 
 
 seed = _load_seed_module()
+
+# 对账归月用的业务时区。种子的时间戳是 UTC 零点，也就是这个时区的早上 8 点，
+# 而所有日期都避开了月初月末，所以归月不会被时区偏移挪到隔壁月份。
+BUSINESS_TZ = ZoneInfo(Settings.model_fields["business_timezone"].default)
 
 
 # ---------- 客户UID 的形态 ----------
@@ -110,10 +116,11 @@ def test_referral_rates_differ_and_include_a_fractional_one():
 
 
 def test_all_referrals_are_active():
-    """真实数据里不存在待审核或停用的渠道，种子不该造出现实中不存在的状态。
+    """渠道只有「生效」和「停用」两种状态，而停掉的渠道根本不在数据里。
 
-    佣金计算目前不看状态，所以种子里放一个「待审核」的渠道，它会照样算出佣金，
-    每次对账都让人怀疑是 bug —— 而那个疑惑纯粹是种子数据自己造出来的。
+    佣金计算不看状态（没有「待审核」，登记即生效，2026-09-04 定的），所以种子里
+    放一个非生效的渠道，它会照样算出佣金，每次对账都让人怀疑是 bug —— 而那个
+    疑惑纯粹是种子数据自己造出来的。
     """
     statuses = {r.status for r in seed.build_referrals()}
     assert statuses == {schema.STATUS_ACTIVE}, f"渠道状态必须全是生效，实际有 {statuses}"
@@ -136,7 +143,7 @@ def test_transactions_span_at_least_three_months():
 def test_order_time_survives_the_timestamp_round_trip():
     """日期转成毫秒时间戳后，reconcile 归的月份必须还是原来那个月。"""
     for txn in seed.build_transactions():
-        assert period_of(seed.to_timestamp_ms(txn.order_date)) == txn.period
+        assert period_of(seed.to_timestamp_ms(txn.order_date), tz=BUSINESS_TZ) == txn.period
 
 
 def test_pnl_is_realistic_and_includes_losses():

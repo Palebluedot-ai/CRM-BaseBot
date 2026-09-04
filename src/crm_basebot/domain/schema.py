@@ -32,7 +32,8 @@ REFERRAL_OWNER = "归属销售"
 REFERRAL_OWNER_OPEN_ID = "登记人OpenID"
 REFERRAL_STATUS = "状态"
 
-STATUS_PENDING = "待审核"
+# 只有这两种。没有「待审核」：销售登记完渠道直接生效，不设管理员过目这一步
+# （2026-09-04 定的）。佣金计算也不看状态，停掉的渠道按业务约定根本不在数据里。
 STATUS_ACTIVE = "生效"
 STATUS_DISABLED = "停用"
 

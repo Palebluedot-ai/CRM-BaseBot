@@ -4,6 +4,7 @@
 """
 
 import pytest
+from pydantic import ValidationError
 
 from crm_basebot.bot.auth import Sales
 from crm_basebot.config import Settings
@@ -64,3 +65,21 @@ def test_未配置的表id默认为空串():
     settings = _settings()
     assert settings.table_referral == ""
     assert settings.base_app_token == ""
+
+
+# ---------- 业务时区 ----------
+
+
+def test_业务时区默认新加坡():
+    assert _settings().business_timezone == "Asia/Singapore"
+
+
+def test_业务时区可以通过环境变量换():
+    assert _settings(BUSINESS_TIMEZONE="Asia/Hong_Kong").business_timezone == "Asia/Hong_Kong"
+
+
+def test_业务时区名字不合法时启动就报错():
+    """拼错时区名不能等到对账跑到一半才炸，也不能悄悄退回 UTC。"""
+    with pytest.raises(ValidationError) as exc_info:
+        _settings(BUSINESS_TIMEZONE="Asia/Nowhere")
+    assert "Asia/Nowhere" in str(exc_info.value)

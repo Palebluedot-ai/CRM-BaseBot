@@ -4,7 +4,9 @@
 客户UID 是 18-19 位。
 """
 
+from datetime import datetime
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -22,11 +24,14 @@ UID_A = "577809207768677761"
 UID_B = "2141293991366272768"
 UID_ORPHAN = "999999999999999999"
 
+SGT = ZoneInfo("Asia/Singapore")
+
 
 class Settings:
     table_referral = TBL_REFERRAL
     table_client = TBL_CLIENT
     table_transaction = TBL_TXN
+    business_timezone = "Asia/Singapore"
 
 
 @pytest.fixture
@@ -90,7 +95,52 @@ def _txn(bitable, uid, pnl, order_time="2026/03/02"):
     ],
 )
 def test_订单时间归月(value, expected):
-    assert period_of(value) == expected
+    assert period_of(value, tz=SGT) == expected
+
+
+def _sgt_ms(text: str) -> int:
+    """'2026-03-01 00:30' 按新加坡时间转成 Bitable 日期字段那种毫秒时间戳。"""
+    moment = datetime.strptime(text, "%Y-%m-%d %H:%M").replace(tzinfo=SGT)
+    return int(moment.timestamp() * 1000)
+
+
+@pytest.mark.parametrize(
+    "local_time,expected",
+    [
+        ("2026-03-01 00:00", "2026-03"),  # 月初零点。按 UTC 算是 2 月 28 日 16:00，会掉进 2 月
+        ("2026-03-01 07:59", "2026-03"),  # UTC 还在 2 月 28 日的最后一分钟
+        ("2026-02-28 23:59", "2026-02"),
+        ("2026-03-31 23:59", "2026-03"),
+    ],
+)
+def test_月初凌晨的交易按业务时区归月(local_time, expected):
+    """Base 里显示 3 月 1 日的交易就该算进 3 月。
+
+    时间戳本身是 UTC 的，只按 UTC 取月份的话，业务时区每个月 1 号 0 点到 8 点
+    的交易全都会被算进上个月的佣金。时区用新加坡，2026-09-04 定的。
+    """
+    assert period_of(_sgt_ms(local_time), tz=SGT) == expected
+
+
+def test_计算器按配置的业务时区归月(base):
+    _txn(base, UID_A, 100, order_time=_sgt_ms("2026-03-01 00:30"))
+
+    rows, _ = CommissionCalculator(base, settings=Settings()).compute()
+
+    assert [row.period for row in rows] == ["2026-03"]
+
+
+def test_换一个业务时区归月跟着变(base):
+    """时区来自配置而不是写死：换成纽约，同一笔交易就落在 2 月。"""
+
+    class NewYork(Settings):
+        business_timezone = "America/New_York"
+
+    _txn(base, UID_A, 100, order_time=_sgt_ms("2026-03-01 00:30"))
+
+    rows, _ = CommissionCalculator(base, settings=NewYork()).compute()
+
+    assert [row.period for row in rows] == ["2026-02"]
 
 
 # ---------- 计算 ----------
