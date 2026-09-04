@@ -3,10 +3,20 @@
     uv run python -m crm_basebot.jobs.reconcile                     # 最新有数据的月份
     uv run python -m crm_basebot.jobs.reconcile --period 2026-03
     uv run python -m crm_basebot.jobs.reconcile --period 2026-03 --write
+    uv run python -m crm_basebot.jobs.reconcile --period 2026-03 --write --replace
     uv run python -m crm_basebot.jobs.reconcile --all-periods
 
 默认**只算不写**。要真的写进 Base 得显式加 ``--write`` —— 这是一次会改动结算
 数据的操作，不应该手滑就发生。
+
+``--write`` 遇到汇总表里已经有本次结算月份的行时会拒绝，而不是在旁边再写一套：
+两套同月汇总摆在一起，看报表的人分不清哪套是对的，求和还会翻倍。数据改过要重算，
+加 ``--replace``：先删掉那些月份的旧行，再写新的（2026-09-05 定的）。删的范围就是
+本次结算的月份，``--all-periods --replace`` 则清空整张汇总表。算出来是空的时候
+不会拿空结果去顶掉旧汇总 —— 交易明细没导完就跑一次，不该把上个月好好的账删没。
+
+先删后写没有事务：删完写到一半失败，表里就是半套数据。这种情况下再跑一次
+``--write --replace`` 就好，不需要人工清理。
 
 不传 ``--period`` 时结算**交易明细里最新有数据的那个月**，不是「上个月」。理由见
 ``CommissionCalculator.compute_latest``。实际选中的月份一定会打印出来，不用猜。
@@ -20,12 +30,13 @@ from __future__ import annotations
 import argparse
 import logging
 import time
+from collections import defaultdict
 
 from ..domain import schema
 from ..domain.audit import ACTION_COMPUTE_COMMISSION, AuditLog
 from ..domain.commission import CommissionCalculator, CommissionRow, summarize
 from ..lark.bitable import BitableClient, assert_fields_present
-from ..lark.values import uid_health_advice
+from ..lark.values import extract_text, uid_health_advice
 from ..startup import load_settings, require_settings
 
 logger = logging.getLogger(__name__)
@@ -41,6 +52,69 @@ REQUIRED_KEYS = (
 # --write 才需要的两张。刻意在开算之前就查：全量拉一遍表要花掉不少 API 额度，
 # 算完了才发现写不进去，那次调用就白费了。
 WRITE_KEYS = ("TABLE_COMMISSION", "TABLE_AUDIT")
+
+
+class WriteRefused(RuntimeError):
+    """汇总表的现状不允许这次写入。入口把它打出来、以非 0 退出，一行都不改。"""
+
+
+def existing_summary(
+    bitable: BitableClient, table_id: str, periods: set[str] | None
+) -> dict[str, list[str]]:
+    """汇总表里已有的行，按结算月份分组，值是 record_id。``periods`` 给 None 表示不限月份。
+
+    只拉结算月份这一列。汇总表很小（每月每渠道一行），扫一遍比按月份 filter 少一种
+    请求形态，也不用担心字段名对不上时 filter 静默返回空、让检查形同虚设。
+    """
+    found: dict[str, list[str]] = defaultdict(list)
+    for record in bitable.iter_records(table_id, field_names=[schema.COMM_PERIOD]):
+        period = extract_text(record.fields.get(schema.COMM_PERIOD))
+        if periods is None or period in periods:
+            found[period].append(record.record_id)
+    return dict(found)
+
+
+def _describe(existing: dict[str, list[str]]) -> str:
+    return "、".join(
+        f"{period or '(月份为空)'}（{len(ids)} 行）" for period, ids in sorted(existing.items())
+    )
+
+
+def write_summary(
+    bitable: BitableClient,
+    table_id: str,
+    rows: list[CommissionRow],
+    *,
+    periods: set[str] | None,
+    replace: bool,
+) -> tuple[int, int]:
+    """把汇总行写进 Base，返回 (删除行数, 写入行数)。
+
+    ``periods`` 是本次结算覆盖的月份，None 表示全部。汇总表里已经有这些月份的行时：
+    不带 ``replace`` 直接拒绝；带了就先删旧行再写新行。两种拒绝都发生在动手之前，
+    拒绝了就一行都没动。
+    """
+    existing = existing_summary(bitable, table_id, periods)
+
+    if existing and not replace:
+        raise WriteRefused(
+            f"汇总表里已经有 {_describe(existing)} 的汇总，不会在旁边再写一套。"
+            "要用这次的结果顶掉它们，加 --replace（先删旧行再写新行）。"
+        )
+
+    if existing and not rows:
+        raise WriteRefused(
+            f"这次算出来是空的，不会拿空结果去顶掉汇总表里已有的 {_describe(existing)}。"
+            "先确认交易明细导全了、客户都登记了，再跑。"
+        )
+
+    deleted = 0
+    for record_ids in existing.values():
+        for record_id in record_ids:
+            bitable.delete_record(table_id, record_id)
+            deleted += 1
+
+    return deleted, _write_rows(bitable, table_id, rows)
 
 
 def _write_rows(bitable: BitableClient, table_id: str, rows: list[CommissionRow]) -> int:
@@ -67,7 +141,7 @@ def _write_rows(bitable: BitableClient, table_id: str, rows: list[CommissionRow]
     return written
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="按月计算渠道佣金")
     parser.add_argument(
         "--period",
@@ -81,14 +155,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--write",
         action="store_true",
-        help="把汇总写进 Base。不加这个就只打印结果",
+        help="把汇总写进 Base。不加这个就只打印结果。汇总表里已有本次月份的行时会拒绝",
+    )
+    parser.add_argument(
+        "--replace",
+        action="store_true",
+        help="汇总表里已有本次结算月份的行时，先删掉它们再写。只和 --write 一起用",
     )
     parser.add_argument(
         "--strict",
         action="store_true",
         help="交易明细里有未登记归属的客户时直接失败",
     )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
+    if args.replace and not args.write:
+        parser.error("--replace 只在 --write 时有意义：不写就没有什么可替换的")
 
     settings = load_settings()
     require_settings(settings, *REQUIRED_KEYS)
@@ -100,8 +186,11 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)-7s %(message)s",
     )
 
-    bitable = BitableClient(settings.base_app_token)
+    return run(args, settings, BitableClient(settings.base_app_token))
 
+
+def run(args: argparse.Namespace, settings, bitable: BitableClient) -> int:
+    """入口的主体。settings 和 bitable 从外面传进来，单测里换成假件就能把整条路走一遍。"""
     assert_fields_present(
         bitable.list_fields(settings.table_transaction),
         schema.TXN_REQUIRED_FIELDS,
@@ -166,7 +255,20 @@ def main(argv: list[str] | None = None) -> int:
         print("\n（只算没写。确认无误后加 --write 写进 Base）")
         return 0
 
-    written = _write_rows(bitable, settings.table_commission, rows)
+    # 本次结算覆盖的月份：--all-periods 是全部，另外两种模式都是单个月份。
+    # 默认模式的月份是算出来的，所以旧汇总的检查只能放在这里，没法提前到开算之前。
+    target_periods = None if args.all_periods else {period}
+    try:
+        deleted, written = write_summary(
+            bitable,
+            settings.table_commission,
+            rows,
+            periods=target_periods,
+            replace=args.replace,
+        )
+    except WriteRefused as exc:
+        print(f"\n没有写入：{exc}")
+        return 1
 
     AuditLog(bitable, settings.table_audit).record(
         actor_open_id="system",
@@ -177,13 +279,18 @@ def main(argv: list[str] | None = None) -> int:
             # 记的是实际结算的月份，不是命令行传进来的原始值 —— 默认值是算出来的，
             # 审计里必须能看出那次跑的到底是哪个月。
             "结算范围": period or "全部月份",
+            "替换": args.replace,
+            "删除行数": deleted,
             "写入行数": written,
             "未登记客户数": len(unmapped),
             "UID体检": health.verdict,
         },
     )
 
-    print(f"\n已写入 {written} 行汇总。")
+    if deleted:
+        print(f"\n已删除 {deleted} 行旧汇总，写入 {written} 行。")
+    else:
+        print(f"\n已写入 {written} 行汇总。")
     return 0
 
 

@@ -338,7 +338,7 @@ uv run python -m crm_basebot.jobs.reconcile --period 2026-02   # 指定月份
 uv run python -m crm_basebot.jobs.reconcile --all-periods      # 全部月份
 ```
 
-默认只算不写，确认无误再加 `--write`。
+默认只算不写，确认无误再加 `--write`。重跑同一个月要再加 `--replace`，不然它会拒绝写第二套。
 
 ### 不传 `--period` 时算哪个月
 

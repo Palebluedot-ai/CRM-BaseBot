@@ -69,7 +69,7 @@ Transaction Details ──客户UID──► Referred Client ──关联──�
 
 ## 表 4：Commission Summary（佣金汇总）
 
-后端按月写入。
+后端按月写入。同一月份重跑时 `--write` 会拒绝在旁边再写一套；加 `--replace` 先删该月旧行再写，`--all-periods --replace` 清空整张表（2026-09-05 定的）。
 
 | 字段 | 类型 |
 | --- | --- |

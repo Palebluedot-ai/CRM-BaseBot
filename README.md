@@ -54,9 +54,12 @@ uv run python -m crm_basebot.jobs.reconcile                    # 最新有数据
 uv run python -m crm_basebot.jobs.reconcile --period 2026-03   # 指定月份
 uv run python -m crm_basebot.jobs.reconcile --all-periods      # 全部月份
 uv run python -m crm_basebot.jobs.reconcile --period 2026-03 --write
+uv run python -m crm_basebot.jobs.reconcile --period 2026-03 --write --replace   # 重算：先删该月旧汇总再写
 ```
 
 不传 `--period` 时结算的是**交易明细里最新有数据的那个月**，不是「上个月」。写死上个月，月初跑的时候会算出一片空白，而它又恰好在「这个月的数据其实已经有了」的时候什么都不说。实际选中的月份一定会打印在输出第一行，不用猜。
+
+**重跑**：`--write` 遇到汇总表里已经有本次结算月份的行会拒绝，不会在旁边再写一套。数据改过要重算就加 `--replace`，先删那些月份的旧行再写新的；`--all-periods --replace` 清空整张汇总表。算出来是空的时候不会拿空结果顶掉旧汇总（2026-09-05 定的）。
 
 **佣金规则**：`应付佣金 = max(0, 当月 Pnl 合计 × 分佣比例)`。整月亏损的渠道佣金按 0 保底，不倒扣、也不结转到下个月 —— 这是业务规则，2026-08-30 明确定的，不是代码漏了处理负数。Pnl 合计仍然如实记录负值，报表上看得见这个渠道当月是亏的，汇总输出也会单独标注一行。细节见 `domain/commission.py` 的 `CommissionRow.payable`。
 

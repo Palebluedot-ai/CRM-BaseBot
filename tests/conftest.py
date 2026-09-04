@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from crm_basebot.domain import schema
-from crm_basebot.lark.bitable import Record
+from crm_basebot.lark.bitable import FieldInfo, Record
 
 
 class FakeTable:
@@ -26,6 +26,8 @@ class FakeTable:
         # 被完整遍历过几次。真实 API 下每次遍历都是一串分页请求，
         # 所以有测试拿它来钉住「不许多读一遍表」。
         self.scan_count = 0
+        # list_fields 会返回的字段清单。默认空，要过 assert_fields_present 的测试自己填。
+        self.fields: list[FieldInfo] = []
 
     def add_existing(self, fields: dict[str, Any]) -> str:
         record_id = f"rec{next(self._ids):04d}"
@@ -45,6 +47,8 @@ class FakeBitable:
         # 真实 API 下 reread=True 会多一个 get_record 往返，这里如实计数，
         # 让「别在 3 秒回调里白白多读一次」这条约束能被测到。
         self.read_back_count = 0
+        # 被删掉的 (table_id, record_id)，按删除顺序。删除是最该被盯住的写操作。
+        self.deleted: list[tuple[str, str]] = []
 
     def table(self, table_id: str) -> FakeTable:
         return self.tables.setdefault(table_id, FakeTable())
@@ -54,6 +58,13 @@ class FakeBitable:
         table.scan_count += 1
         for record_id, fields in list(table.records.items()):
             yield Record(record_id=record_id, fields=dict(fields))
+
+    def list_fields(self, table_id: str) -> list[FieldInfo]:
+        return list(self.table(table_id).fields)
+
+    def delete_record(self, table_id: str, record_id: str) -> None:
+        del self.table(table_id).records[record_id]
+        self.deleted.append((table_id, record_id))
 
     def get_record(self, table_id: str, record_id: str) -> Record:
         return Record(record_id=record_id, fields=dict(self.table(table_id).records[record_id]))
