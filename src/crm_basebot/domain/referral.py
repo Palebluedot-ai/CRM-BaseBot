@@ -139,6 +139,16 @@ class ReferralService:
             )
             referral_no = "(编号待生成)"
 
+        # 每一次业务写入留一行服务端日志：销售说「我登记了」而 Base 里没有的时候，
+        # 先翻这里，不用去查审计表。
+        logger.info(
+            "登记渠道 %s「%s」record_id=%s 操作人=%s(%s)",
+            referral_no,
+            clean.name,
+            created.record_id,
+            sales.name,
+            sales.open_id,
+        )
         return referral_no, created.record_id
 
     def list_for(self, sales: Sales) -> list[tuple[str, str]]:

@@ -7,13 +7,16 @@
 
 1. open_id **只能**取自回调事件本体，绝不能从卡片的 value、表单字段或消息文本里
    取 —— 那些是用户可控的，等于让人自报家门。
-2. 每一个读写入口都要过 ``require_owner``，不要因为「这个接口只有自己人用」
-   就跳过。
+2. 凡是按归属取数据的地方都走 ``owned_records`` 过滤，先筛掉不是他的记录再动手：
+   列「我的渠道」、把客户挂到渠道，走的都是这一个函数。管理员放行也只在它里面
+   定义，别在别处另写一份判断。
 """
 
 from __future__ import annotations
 
 import logging
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from ..domain import schema
@@ -39,19 +42,39 @@ class Sales:
         return self.role == schema.ROLE_ADMIN
 
 
-class SalesDirectory:
-    """销售名册。缓存是进程级的，人员变动后重启或调用 refresh()。"""
+# 名册缓存的有效期。停用一个人、加一个新人，最多这么久之后生效，不用重启机器人。
+# 名册很小，重新读一次就是一个请求，但卡片回调只有 3 秒预算，每个往返都是实的，
+# 所以不做成每次回调都读。
+CACHE_TTL_SECONDS = 60.0
 
-    def __init__(self, bitable: BitableClient, table_id: str) -> None:
+
+class SalesDirectory:
+    """销售名册。
+
+    缓存 ``ttl_seconds`` 秒，默认一分钟：名册在 Base 里改了，最多一分钟后生效；
+    要立刻生效调 ``refresh()``。``clock`` 只是给测试拨时间用的。
+    """
+
+    def __init__(
+        self,
+        bitable: BitableClient,
+        table_id: str,
+        *,
+        ttl_seconds: float = CACHE_TTL_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._bitable = bitable
         self._table_id = table_id
+        self._ttl = ttl_seconds
+        self._clock = clock
         self._cache: dict[str, Sales] | None = None
+        self._loaded_at = 0.0
 
     def refresh(self) -> None:
         self._cache = None
 
     def _load(self) -> dict[str, Sales]:
-        if self._cache is not None:
+        if self._cache is not None and self._clock() - self._loaded_at < self._ttl:
             return self._cache
 
         directory: dict[str, Sales] = {}
@@ -68,6 +91,7 @@ class SalesDirectory:
             )
 
         self._cache = directory
+        self._loaded_at = self._clock()
         return directory
 
     def lookup(self, open_id: str) -> Sales | None:
@@ -97,34 +121,11 @@ class SalesDirectory:
         return sales
 
 
-def require_owner(sales: Sales, record_owner_open_id: str, *, what: str) -> None:
-    """确认这条记录归这名销售所有。管理员放行。
-
-    ``what`` 用于日志和报错文案，比如「渠道 R007」。
-    """
-    if sales.is_admin:
-        return
-
-    if not record_owner_open_id:
-        # 归属为空的记录一律不给普通销售碰。历史数据补录归属之前只有管理员能看。
-        logger.warning("记录 %s 没有归属人，拒绝 %s(%s) 访问", what, sales.name, sales.open_id)
-        raise AuthError(f"{what} 没有登记归属人，请联系管理员处理。")
-
-    if record_owner_open_id != sales.open_id:
-        logger.warning(
-            "越权访问被拦截: %s(%s) 试图访问归属于 %s 的 %s",
-            sales.name,
-            sales.open_id,
-            record_owner_open_id,
-            what,
-        )
-        raise AuthError(f"{what} 不在你名下，无法查看或修改。")
-
-
 def owned_records(sales: Sales, records, owner_field: str):
     """过滤出该销售名下的记录。管理员看全部。
 
-    用生成器而不是列表，避免把整表读进内存。
+    归属为空的记录普通销售看不到：历史数据补录归属之前只有管理员能碰，
+    不能因为「无主」就人人可见。用生成器而不是列表，避免把整表读进内存。
     """
     for record in records:
         if sales.is_admin:

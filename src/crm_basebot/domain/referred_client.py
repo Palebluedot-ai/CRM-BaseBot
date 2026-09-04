@@ -110,4 +110,13 @@ class ReferredClientService:
         )
 
         created = self._bitable.create_record(self._table_id, fields)
+        logger.info(
+            "登记客户 %s「%s」挂到渠道 %s record_id=%s 操作人=%s(%s)",
+            clean.uid,
+            clean.name,
+            clean.referral_no,
+            created.record_id,
+            sales.name,
+            sales.open_id,
+        )
         return created.record_id

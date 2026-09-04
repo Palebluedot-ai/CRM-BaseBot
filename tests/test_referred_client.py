@@ -3,6 +3,8 @@
 重点在两处：客户UID 的精度和归属隔离。
 """
 
+import logging
+
 import pytest
 
 from crm_basebot.bot.auth import Sales
@@ -144,3 +146,24 @@ def test_登记客户留下审计(fake_bitable, services):
 
     actions = [row[schema.AUDIT_ACTION] for row in fake_bitable.tables[TBL_AUDIT].records.values()]
     assert actions == ["登记渠道", "登记客户"]
+
+
+# ---------- 日志 ----------
+
+
+def test_登记成功留一行日志说清谁写了哪条(services, caplog):
+    referrals, clients = services
+    no = _referral(referrals, alice)
+
+    with caplog.at_level(logging.INFO, logger="crm_basebot.domain.referred_client"):
+        record_id = clients.create(
+            alice, ClientInput(uid=UID_18, name="PLUTO STUDIO LIMITED", referral_no=no)
+        )
+
+    (line,) = [
+        r.getMessage() for r in caplog.records if r.name == "crm_basebot.domain.referred_client"
+    ]
+    assert UID_18 in line
+    assert record_id in line
+    assert no in line
+    assert ALICE in line

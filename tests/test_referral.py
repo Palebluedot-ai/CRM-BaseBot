@@ -1,5 +1,7 @@
 """渠道登记流程。"""
 
+import logging
+
 import pytest
 
 from crm_basebot.bot.auth import Sales
@@ -174,3 +176,17 @@ def test_校验失败时不写审计也不写业务表(fake_bitable, service):
 
     assert fake_bitable.tables[TBL_AUDIT].records == {}
     assert fake_bitable.tables[TBL_REFERRAL].records == {}
+
+
+# ---------- 日志 ----------
+
+
+def test_登记成功留一行日志说清谁写了哪条(service, caplog):
+    """销售说「我登记了」而 Base 里没有时，服务端要能翻到痕迹，不用去查审计表。"""
+    with caplog.at_level(logging.INFO, logger="crm_basebot.domain.referral"):
+        no, record_id = service.create(alice, _valid())
+
+    (line,) = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert no in line
+    assert record_id in line
+    assert ALICE in line

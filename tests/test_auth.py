@@ -10,7 +10,6 @@ from crm_basebot.bot.auth import (
     Sales,
     SalesDirectory,
     owned_records,
-    require_owner,
 )
 from crm_basebot.domain import schema
 from crm_basebot.lark.bitable import Record
@@ -84,33 +83,104 @@ def test_空openid被拒绝(directory):
         directory.require("")
 
 
-# ---------- 归属校验 ----------
-
-alice = Sales(open_id=ALICE, name="Alice", role=schema.ROLE_SALES, is_active=True)
-admin = Sales(open_id=ADMIN, name="Admin", role=schema.ROLE_ADMIN, is_active=True)
+# ---------- 缓存有效期 ----------
 
 
-def test_可以访问自己名下的记录():
-    require_owner(alice, ALICE, what="渠道 R007")
+class MutableBitable(FakeBitable):
+    """记录可以改、遍历次数可以数的假件，用来看缓存什么时候真的重新读表。"""
+
+    def __init__(self, records):
+        super().__init__(records)
+        self.scan_count = 0
+
+    def iter_records(self, table_id, **kwargs):
+        self.scan_count += 1
+        yield from list(self._records)
 
 
-def test_不能访问别人名下的记录():
-    with pytest.raises(AuthError, match="不在你名下"):
-        require_owner(alice, BOB, what="渠道 R007")
+class Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
 
 
-def test_没有归属人的记录普通销售也不能碰():
-    """历史数据补录归属之前，不能因为「无主」就人人可见。"""
-    with pytest.raises(AuthError, match="没有登记归属人"):
-        require_owner(alice, "", what="渠道 R001")
+@pytest.fixture
+def ticking():
+    """(名册, 假件, 时钟)。时钟手动拨，测试不用真睡。"""
+    bitable = MutableBitable([_sales_record(ALICE, "Alice")])
+    clock = Clock()
+    return SalesDirectory(bitable, "tbl_sales", ttl_seconds=60, clock=clock), bitable, clock
 
 
-def test_管理员不受归属限制():
-    require_owner(admin, BOB, what="渠道 R007")
-    require_owner(admin, "", what="渠道 R001")
+def test_有效期内不重复读表(ticking):
+    directory, bitable, _ = ticking
+    directory.require(ALICE)
+    directory.require(ALICE)
+    assert bitable.scan_count == 1
+
+
+def test_过了有效期重新读表(ticking):
+    directory, bitable, clock = ticking
+    directory.require(ALICE)
+    clock.now += 61
+    directory.require(ALICE)
+    assert bitable.scan_count == 2
+
+
+def test_停用的人最多一个有效期后被拒(ticking):
+    """人员变动不用重启机器人：名册改了，一分钟内生效。"""
+    directory, bitable, clock = ticking
+    directory.require(ALICE)
+
+    bitable._records[:] = [_sales_record(ALICE, "Alice", status=schema.SALES_STATUS_DISABLED)]
+    # 还在有效期内，旧缓存放行。这是有意的：用最多一分钟的延迟换掉每次回调多读一遍表。
+    directory.require(ALICE)
+
+    clock.now += 61
+    with pytest.raises(AuthError, match="已停用"):
+        directory.require(ALICE)
+
+
+def test_新人最多一个有效期后能用(ticking):
+    directory, bitable, clock = ticking
+    with pytest.raises(AuthError, match="还没有被登记"):
+        directory.require(BOB)
+
+    bitable._records.append(_sales_record(BOB, "Bob"))
+    clock.now += 61
+    assert directory.require(BOB).name == "Bob"
+
+
+def test_refresh立刻生效(ticking):
+    directory, bitable, _ = ticking
+    directory.require(ALICE)
+    bitable._records.append(_sales_record(BOB, "Bob"))
+    directory.refresh()
+    assert directory.require(BOB).name == "Bob"
+
+
+def test_默认有效期是一分钟():
+    """「人员变动一分钟内生效」是对使用方的承诺，改这个数要同时改文档。"""
+    bitable = MutableBitable([_sales_record(ALICE, "Alice")])
+    clock = Clock()
+    directory = SalesDirectory(bitable, "tbl_sales", clock=clock)
+
+    directory.require(ALICE)
+    clock.now += 59
+    directory.require(ALICE)
+    assert bitable.scan_count == 1
+
+    clock.now += 2
+    directory.require(ALICE)
+    assert bitable.scan_count == 2
 
 
 # ---------- 列表过滤 ----------
+
+alice = Sales(open_id=ALICE, name="Alice", role=schema.ROLE_SALES, is_active=True)
+admin = Sales(open_id=ADMIN, name="Admin", role=schema.ROLE_ADMIN, is_active=True)
 
 
 def _referral(record_id, owner):
