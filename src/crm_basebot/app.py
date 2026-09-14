@@ -9,12 +9,14 @@
 from __future__ import annotations
 
 import logging
+import threading
 
 import lark_oapi as lark
 
 from .bot.auth import SalesDirectory
 from .bot.handlers import BotHandlers
 from .domain.audit import AuditLog
+from .domain.commission_query import CommissionQueryService
 from .domain.referral import ReferralService
 from .domain.referred_client import ReferredClientService
 from .lark.bitable import BitableClient
@@ -25,7 +27,8 @@ from .startup import load_settings, require_settings
 logger = logging.getLogger(__name__)
 
 # 机器人跑起来至少要能读写这几张表：鉴权查名册、登记写渠道和客户、每一次写都记审计。
-# 交易明细和佣金汇总只有对账任务用得着，不在这里拦。
+# 佣金查询按钮还要读日读看板 —— 缺表会在点按钮时报错，不在启动时硬拦，是刻意的：
+# 先让机器人能跑，佣金查询是增量功能，不该拦住登记流。佣金汇总表由对账任务写。
 REQUIRED_KEYS = (
     "LARK_BASE_APP_TOKEN",
     "TABLE_REFERRAL",
@@ -42,6 +45,17 @@ def build_handlers() -> BotHandlers:
     bitable = BitableClient(settings.base_app_token)
     audit = AuditLog(bitable, settings.table_audit)
 
+    # 主字段回填走后台线程，不进卡片回调 3 秒预算。见 ReferralService.__init__
+    # 里对 background 的说明。
+    def _in_background(fn):
+        threading.Thread(target=fn, daemon=True).start()
+
+    # 佣金查询只在配了 TABLE_DAILY_BOARD 时启用。没配的话按钮点了会回「未启用」，
+    # 而不是随便去读一个空 table_id 报一堆看不懂的错。
+    commission_query = (
+        CommissionQueryService(bitable, settings=settings) if settings.table_daily_board else None
+    )
+
     return BotHandlers(
         client=get_client(),
         directory=SalesDirectory(bitable, settings.table_sales),
@@ -50,10 +64,13 @@ def build_handlers() -> BotHandlers:
             settings.table_referral,
             audit,
             auto_number=settings.referral_auto_number,
+            background=_in_background,
         ),
         clients=ReferredClientService(
             bitable, settings.table_client, settings.table_referral, audit
         ),
+        commission_query=commission_query,
+        background=_in_background,
     )
 
 

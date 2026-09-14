@@ -11,6 +11,7 @@ from crm_basebot.domain.referral import (
     ReferralInput,
     ReferralService,
     ValidationError,
+    display_title,
     format_referral_no,
     parse_referral_no,
 )
@@ -103,6 +104,49 @@ def test_回退方案空表从R001开始(fake_bitable):
     audit = AuditLog(fake_bitable, TBL_AUDIT)
     service = ReferralService(fake_bitable, TBL_REFERRAL, audit, auto_number=False)
     assert service.next_manual_no() == "R001"
+
+
+# ---------- 主字段回填 ----------
+
+
+def test_display_title拼编号和名称():
+    assert display_title("R001", "ABC Capital") == "R001 ABC Capital"
+    assert display_title("R001", "") == "R001"
+    assert display_title("", "ABC") == "ABC"
+    assert display_title("", "") == ""
+
+
+def test_登记后主字段被回填成编号加名称(fake_bitable, service):
+    """关联字段展示主字段值，主字段没写就是「无标题记录」。"""
+    _, record_id = service.create(alice, _valid("鲸落数字"))
+    stored = fake_bitable.tables[TBL_REFERRAL].records[record_id]
+    primary_name = fake_bitable.tables[TBL_REFERRAL].primary_field
+    assert stored[primary_name] == "R001 鲸落数字"
+
+
+def test_主字段就是渠道名称时不重复更新(fake_bitable):
+    """避免多一次无谓的 update 往返 —— create 已经写过渠道名称了。"""
+    fake_bitable.tables[TBL_REFERRAL].primary_field = schema.REFERRAL_NAME
+    audit = AuditLog(fake_bitable, TBL_AUDIT)
+    service = ReferralService(fake_bitable, TBL_REFERRAL, audit, auto_number=True)
+
+    service.create(alice, _valid())
+
+    assert fake_bitable.updates == []
+
+
+def test_回填主字段失败不阻断登记(fake_bitable, service, monkeypatch):
+    """主字段是给展示看的，写不进去也不该把整个登记推翻。"""
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("模拟接口超时")
+
+    monkeypatch.setattr(fake_bitable, "update_record", boom)
+
+    no, record_id = service.create(alice, _valid())
+
+    assert no == "R001"
+    assert record_id in fake_bitable.tables[TBL_REFERRAL].records
 
 
 # ---------- 归属 ----------

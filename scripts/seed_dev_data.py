@@ -4,15 +4,16 @@
 ## 为什么需要这个脚本
 
 飞书自建应用「只能在同一企业内发布和使用」。你在自建的 `CRM-Dev` 团队里建的应用，
-没有任何办法被加成公司租户里那张真实交易明细表的协作者 —— 阶段 A 根本读不到真数据。
+没有任何办法直接读到公司租户里那张真实的销售收入日读看板 —— 阶段 A 得自己造数据。
 
 那手工导出 CSV 再导进来行不行？不行，而且是这个项目里最贵的一个坑：Excel 只保留
-15 位有效数字，18-19 位的客户UID 一过 Excel 就被抹掉低位，
+15 位有效数字，18-19 位的 user_id 一过 Excel 就被抹掉低位，
 ``577809207768677761`` 变成 ``577809207768678000``。抹完之后它看起来仍然是个合法的
 长数字，join 时静默匹配到别的客户。测试数据从第一天起就是坏的，而且坏得看不出来。
 
 所以种子数据只能走 API 直接写：Python 的 int 和 str 都是任意精度，全程不经过任何
-浮点数环节。
+浮点数环节。生产环境用 scripts/import_daily_board.py 从真实 xlsx 导入，那条路径也
+显式挡了浮点 UID。
 
 ## 怎么用
 
@@ -63,7 +64,6 @@ open_id 打出来。拿不到就先加 ``--no-open-id``，但归属会挂在占�
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -78,14 +78,7 @@ from crm_basebot.domain.audit import (  # noqa: E402
     ACTION_CREATE_REFERRAL,
     AuditLog,
 )
-from crm_basebot.lark.bitable import (  # noqa: E402
-    FIELD_TYPE_DATETIME,
-    FIELD_TYPE_NUMBER,
-    FIELD_TYPE_TEXT,
-    BitableClient,
-    Record,
-)
-from crm_basebot.lark.client import get_client  # noqa: E402
+from crm_basebot.lark.bitable import BitableClient, Record  # noqa: E402
 from crm_basebot.lark.values import extract_text, to_number, to_uid  # noqa: E402
 from crm_basebot.startup import load_settings, require_settings  # noqa: E402
 
@@ -95,41 +88,22 @@ from crm_basebot.startup import load_settings, require_settings  # noqa: E402
 SEED_PREFIX = "SEED-"
 
 # 每张表用哪个字段承载标记。挑的都是自由文本字段，不影响任何计算 ——
-# 对账只读订单时间、客户UID、Pnl(USD) 三个字段。
+# 对账只读交易日期、客户UID、总收入 三个字段。
 SEED_MARKER_FIELD: dict[str, str] = {
     schema.TABLE_REFERRAL_NAME: schema.REFERRAL_NAME,
     schema.TABLE_CLIENT_NAME: schema.CLIENT_NAME,
-    schema.TABLE_TRANSACTION_NAME: schema.TXN_CLIENT_NAME,
+    schema.TABLE_DAILY_BOARD_NAME: schema.BOARD_CLIENT_NAME,
     schema.TABLE_COMMISSION_NAME: schema.COMM_REFERRAL_NAME,
     schema.TABLE_AUDIT_NAME: schema.AUDIT_ACTOR_NAME,
     schema.TABLE_SALES_NAME: schema.SALES_NAME,
 }
 
-# 模拟交易明细表的字段。**刻意不放进 domain/schema.py。**
-# schema.py 里的 TXN_* 描述的是同事那张我们只读的真表，而 sync_base.py 明确不建它 ——
-# 真跑到生产 Base 上建一张同名表，会盖住同事的表，是灾难。这份「要建成什么样」的定义
-# 只对开发租户有意义，所以留在这个只在开发租户跑的脚本里。字段名仍然全部引用 schema.py
-# 的常量，不重复硬编码。
-#
-# 一处刻意的偏差：真表里客户UID 是「查找引用」，这里建成「文本」。
-# schema.TXN_REQUIRED_FIELDS 对这个字段的期望类型是 None（只要求存在），
-# 两种类型 to_uid 都能安全取值，所以对账代码一行不用改。绝不能建成「数字」。
-MOCK_TRANSACTION_FIELDS: dict[str, int] = {
-    schema.TXN_ORDER_TIME: FIELD_TYPE_DATETIME,
-    schema.TXN_ENTITY: FIELD_TYPE_TEXT,
-    schema.TXN_CLIENT_NAME: FIELD_TYPE_TEXT,
-    schema.TXN_CLIENT_UID: FIELD_TYPE_TEXT,
-    schema.TXN_QUANTITY: FIELD_TYPE_NUMBER,
-    schema.TXN_PRICE: FIELD_TYPE_NUMBER,
-    schema.TXN_FEE: FIELD_TYPE_NUMBER,
-    schema.TXN_FEE_CURRENCY: FIELD_TYPE_TEXT,
-    schema.TXN_PNL: FIELD_TYPE_NUMBER,
-}
-
-# 我们自己维护、由 sync_base.py 建好的表
+# 我们自己维护、由 sync_base.py 建好的表。所有 6 张都在这里 —— 日读看板不再是
+# 外部只读表，而是我们导入维护的。
 OWNED_TABLES = (
     schema.TABLE_REFERRAL_NAME,
     schema.TABLE_CLIENT_NAME,
+    schema.TABLE_DAILY_BOARD_NAME,
     schema.TABLE_COMMISSION_NAME,
     schema.TABLE_AUDIT_NAME,
     schema.TABLE_SALES_NAME,
@@ -161,16 +135,19 @@ class SeedClient:
 
 
 @dataclass(frozen=True)
-class SeedTransaction:
+class SeedBoardRow:
+    """一行日读看板种子数据。字段和 xlsx 表头对齐（跨列改名的走 import 脚本）。"""
+
     order_date: str
     uid: str
     client_name: str
-    pnl: float
-    entity: str
-    quantity: float
-    price: float
-    fee: float
-    fee_currency: str
+    revenue: float          # 总收入(opt+现货) —— 佣金基数
+    station: str
+    sales_group: str
+    sales_name: str
+    opt_fee: float
+    spot_fee_ex_mm: float
+    opt_pnl: float
 
     @property
     def period(self) -> str:
@@ -271,8 +248,8 @@ def build_clients() -> list[SeedClient]:
     ]
 
 
-# 只在交易明细里出现、没登记归属渠道的客户。
-# 真实场景每天都在发生：同事导入的交易里冒出一个新客户，销售还没来得及登记。
+# 只在看板里出现、没登记归属渠道的客户。
+# 真实场景每天都在发生：看板里冒出一个新客户，销售还没来得及登记。
 # 这几行是用来验证 reconcile 的 unmapped 告警真的会响的。
 UNMAPPED_CLIENTS: dict[str, str] = {
     "577809207768703914": f"{SEED_PREFIX}未登记的星辰投资",
@@ -280,20 +257,21 @@ UNMAPPED_CLIENTS: dict[str, str] = {
     "577809207768715026": f"{SEED_PREFIX}未登记的南山家办",
 }
 
-# (订单日期, 客户UID, Pnl(USD))
+# (交易日期, 客户UID, 总收入)
 #
 # 三件事是刻意设计出来的，不是随手编的：
 #
 # 1. 跨 2026-01 / 02 / 03 三个月，用来验证按月汇总没有把月份串了。
-# 2. 有亏损单（负 Pnl），而且分两种情形：
+# 2. 有负值行（负收入），而且分两种情形 —— 这在看板里对应退款/冲销/校准：
 #    - 北极星资本 2026-02 有一笔 -875.40，但当月合计仍然为正
 #    - 恒星资本 2026-02 合计为 -2935.10，**整月为负**
-#    第二种是关键：它落在业务规则「整月亏损佣金按 0 保底，不倒扣不结转」上，
-#    对账输出里那个渠道当月应付是 0、Pnl 仍是 -2935.10，并且会被单独标注出来。
+#    第二种是关键：它落在业务规则「整月合计为负佣金保底 0，不倒扣不结转」上，
+#    对账输出里那个渠道当月应付是 0、收入合计仍是 -2935.10，并且会被单独标注出来。
 #    这条规则由 CommissionRow.payable 落实，种子数据保证它每次对账都被走到一遍。
-# 3. Pnl 量级是几百到几千 USD 且都带小数，跟真实盘口一致；整数金额会掩盖掉
+#    （毛收入不太可能整月为负，但规则条款仍要被覆盖到 —— 这就是这里的意义。）
+# 3. 收入量级是几百到几千 USD 且都带小数，跟真实盘口一致；整数金额会掩盖掉
 #    Decimal 累加和 float 累加的差别。
-_TRANSACTION_ROWS: tuple[tuple[str, str, float], ...] = (
+_BOARD_ROWS: tuple[tuple[str, str, float], ...] = (
     # ---- 2026-01 ----
     ("2026-01-06", "577809207768677761", 1240.55),
     ("2026-01-14", "577809207768677761", 862.30),
@@ -358,7 +336,7 @@ DAMAGED_UIDS: dict[str, str] = {
 # 每个损伤 UID 两笔，一共 6 行。够触发 assess_uid_health 的聚合判定：
 # 它要求命中数至少 2 个、且超过「纯属巧合」期望值的 3 倍，而这批 UID 的巧合期望
 # 加起来不到 0.05 个。数量再多没有额外信息，只是让表更脏。
-_DAMAGED_TRANSACTION_ROWS: tuple[tuple[str, str, float], ...] = (
+_DAMAGED_BOARD_ROWS: tuple[tuple[str, str, float], ...] = (
     ("2026-03-05", "577809207768678000", 1820.40),
     ("2026-03-19", "577809207768678000", 640.75),
     ("2026-03-12", "2141293991366270000", 2450.85),
@@ -367,32 +345,37 @@ _DAMAGED_TRANSACTION_ROWS: tuple[tuple[str, str, float], ...] = (
     ("2026-01-22", "577809207768681000", 905.60),
 )
 
-# 佣金不看这几个字段，但真表里有，就得填上 —— 空着的话，
-# 哪天有人写了个依赖它们的报表，会以为线上数据也长这样。
-_PRICES = (0.1875, 0.2032, 0.1946, 0.2210)
-_ENTITIES = ("HashKey SG", "HashKey HK")
-_FEE_CURRENCIES = ("USDT", "USD")
+# 佣金只看总收入，但看板还有站点/销售分组/销售/手续费/opt_pnl 这几列，
+# 得填上 —— 空着的话，哪天有人写了个依赖它们的报表，会以为线上数据也长这样。
+_STATIONS = ("HashKey SG", "HashKey HK")
+_SALES_GROUPS = (f"{SEED_PREFIX}机构组A", f"{SEED_PREFIX}机构组B")
+_SALES_NAMES = (f"{SEED_PREFIX}王小明", f"{SEED_PREFIX}李小华")
 
 
-def build_transactions(*, with_damaged_uid: bool = False) -> list[SeedTransaction]:
+def build_board_rows(*, with_damaged_uid: bool = False) -> list[SeedBoardRow]:
     names = {c.uid: c.name for c in build_clients()} | UNMAPPED_CLIENTS | DAMAGED_UIDS
 
-    source = _TRANSACTION_ROWS + (_DAMAGED_TRANSACTION_ROWS if with_damaged_uid else ())
+    source = _BOARD_ROWS + (_DAMAGED_BOARD_ROWS if with_damaged_uid else ())
 
-    rows: list[SeedTransaction] = []
-    for index, (order_date, uid, pnl) in enumerate(source):
-        price = _PRICES[index % len(_PRICES)]
+    rows: list[SeedBoardRow] = []
+    for index, (order_date, uid, revenue) in enumerate(source):
+        # opt / 现货手续费按收入的很小比例摊，opt_pnl 用收入的一部分，都是配平
+        # 用的数据 —— 佣金不看这几列，但看板列不能空着。
+        opt_fee = round(abs(revenue) * 0.0006, 4)
+        spot_fee = round(abs(revenue) * 0.0004, 4)
+        opt_pnl = round(revenue * 0.35, 4)
         rows.append(
-            SeedTransaction(
+            SeedBoardRow(
                 order_date=order_date,
                 uid=uid,
                 client_name=names[uid],
-                pnl=pnl,
-                entity=_ENTITIES[index % len(_ENTITIES)],
-                quantity=round(abs(pnl) / price, 2),
-                price=price,
-                fee=round(abs(pnl) * 0.0008, 4),
-                fee_currency=_FEE_CURRENCIES[index % len(_FEE_CURRENCIES)],
+                revenue=revenue,
+                station=_STATIONS[index % len(_STATIONS)],
+                sales_group=_SALES_GROUPS[index % len(_SALES_GROUPS)],
+                sales_name=_SALES_NAMES[index % len(_SALES_NAMES)],
+                opt_fee=opt_fee,
+                spot_fee_ex_mm=spot_fee,
+                opt_pnl=opt_pnl,
             )
         )
     return rows
@@ -450,25 +433,15 @@ def is_seed_value(value: Any) -> bool:
     return extract_text(value).startswith(SEED_PREFIX)
 
 
-def transaction_key(order_ms: int, uid: str, pnl: float) -> tuple[int, str, float]:
-    """交易行的自然键。同一天同一个客户可能有多笔，所以要带上 Pnl。"""
-    return (order_ms, uid, round(pnl, 4))
+def board_row_key(order_ms: int, uid: str, revenue: float) -> tuple[int, str, float]:
+    """看板行的自然键。同一天同一个客户可能有多行（历史修正），所以带上收入区分。"""
+    return (order_ms, uid, round(revenue, 4))
 
 
 # ---------- 以下开始碰真实 API ----------
 
 
-def _load_sync_base():
-    """复用 sync_base.py 的建表/建字段实现，不复制一份。"""
-    spec = importlib.util.spec_from_file_location(
-        "sync_base", Path(__file__).resolve().parent / "sync_base.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-# 发现几条外来记录就够下结论了。生产 Base 的交易明细是几万行的全量表，
+# 发现几条外来记录就够下结论了。看板可能是几万行的全量表，
 # 没必要为了确认「这里不能碰」把它整张拉下来。
 FOREIGN_SAMPLE_LIMIT = 5
 
@@ -548,54 +521,7 @@ def _resolve_tables(bitable: BitableClient) -> tuple[dict[str, str], list[str]]:
     existing = {t.name: t.table_id for t in bitable.list_tables()}
     found = {name: existing[name] for name in OWNED_TABLES if name in existing}
     missing = [name for name in OWNED_TABLES if name not in existing]
-
-    if schema.TABLE_TRANSACTION_NAME in existing:
-        found[schema.TABLE_TRANSACTION_NAME] = existing[schema.TABLE_TRANSACTION_NAME]
-
     return found, missing
-
-
-def _create_mock_transaction_table(app_token: str) -> str:
-    sync_base = _load_sync_base()
-    client = get_client()
-
-    table_id = sync_base._create_table(client, app_token, schema.TABLE_TRANSACTION_NAME)
-    print(f"  已建表「{schema.TABLE_TRANSACTION_NAME}」-> {table_id}")
-    for field_name, type_code in MOCK_TRANSACTION_FIELDS.items():
-        sync_base._create_field(client, app_token, table_id, field_name, type_code)
-        print(f"    + {field_name}")
-    return table_id
-
-
-def _check_mock_transaction_fields(
-    bitable: BitableClient, app_token: str, table_id: str, *, apply: bool
-) -> list[str]:
-    """模拟交易明细表已经在了，确认它的字段能用，缺的补上。
-
-    单独拎出「客户UID 是不是数字类型」这一条硬拦：往数字字段里写 18 位 UID，
-    精度在 Bitable 服务端就丢了，客户端无论怎么写都救不回来 —— 那就等于从第一天
-    起就在错的数据上做对账，正是这个脚本要避免的事。
-    """
-    current = {f.name: f for f in bitable.list_fields(table_id)}
-    uid_field = current.get(schema.TXN_CLIENT_UID)
-
-    if uid_field is not None and uid_field.type == FIELD_TYPE_NUMBER:
-        raise SystemExit(
-            f"「{schema.TABLE_TRANSACTION_NAME}」的 {schema.TXN_CLIENT_UID} 是「数字」类型。"
-            "18-19 位 UID 存进数字字段会在服务端就被抹掉低位，请先在 Base 里把它改成「文本」。"
-        )
-
-    notes: list[str] = []
-    sync_base = _load_sync_base() if apply else None
-
-    for field_name, type_code in MOCK_TRANSACTION_FIELDS.items():
-        if field_name in current:
-            continue
-        notes.append(f"「{schema.TABLE_TRANSACTION_NAME}」补字段 {field_name}")
-        if apply and sync_base is not None:
-            sync_base._create_field(get_client(), app_token, table_id, field_name, type_code)
-
-    return notes
 
 
 def _owner_fields(open_id: str | None, user_field: str, text_field: str) -> dict[str, Any]:
@@ -690,7 +616,7 @@ def _seed_clients(
     return created, skipped
 
 
-def _seed_transactions(
+def _seed_board_rows(
     bitable: BitableClient,
     scan: TableScan,
     *,
@@ -698,18 +624,18 @@ def _seed_transactions(
     with_damaged_uid: bool = False,
 ) -> tuple[int, int]:
     existing = {
-        transaction_key(
-            int(to_number(r.fields.get(schema.TXN_ORDER_TIME)) or 0),
-            to_uid(r.fields.get(schema.TXN_CLIENT_UID)),
-            to_number(r.fields.get(schema.TXN_PNL)) or 0.0,
+        board_row_key(
+            int(to_number(r.fields.get(schema.BOARD_ORDER_DATE)) or 0),
+            to_uid(r.fields.get(schema.BOARD_CLIENT_UID)),
+            to_number(r.fields.get(schema.BOARD_TOTAL_REVENUE)) or 0.0,
         )
         for r in scan.seed_records
     }
     created = skipped = 0
 
-    for txn in build_transactions(with_damaged_uid=with_damaged_uid):
-        order_ms = to_timestamp_ms(txn.order_date)
-        if transaction_key(order_ms, txn.uid, txn.pnl) in existing:
+    for row in build_board_rows(with_damaged_uid=with_damaged_uid):
+        order_ms = to_timestamp_ms(row.order_date)
+        if board_row_key(order_ms, row.uid, row.revenue) in existing:
             skipped += 1
             continue
 
@@ -720,16 +646,18 @@ def _seed_transactions(
         bitable.create_record(
             scan.table_id,
             {
-                schema.TXN_ORDER_TIME: order_ms,
-                schema.TXN_ENTITY: txn.entity,
-                schema.TXN_CLIENT_NAME: txn.client_name,
-                schema.TXN_CLIENT_UID: txn.uid,
-                schema.TXN_QUANTITY: txn.quantity,
-                schema.TXN_PRICE: txn.price,
-                schema.TXN_FEE: txn.fee,
-                schema.TXN_FEE_CURRENCY: txn.fee_currency,
-                schema.TXN_PNL: txn.pnl,
+                schema.BOARD_ORDER_DATE: order_ms,
+                schema.BOARD_STATION: row.station,
+                schema.BOARD_CLIENT_NAME: row.client_name,
+                schema.BOARD_CLIENT_UID: row.uid,
+                schema.BOARD_SALES_GROUP: row.sales_group,
+                schema.BOARD_SALES_NAME: row.sales_name,
+                schema.BOARD_TOTAL_REVENUE: row.revenue,
+                schema.BOARD_OPT_FEE: row.opt_fee,
+                schema.BOARD_SPOT_FEE_EX_MM: row.spot_fee_ex_mm,
+                schema.BOARD_OPT_PNL: row.opt_pnl,
             },
+            reread=False,
         )
 
     return created, skipped
@@ -891,8 +819,8 @@ def main(argv: list[str] | None = None) -> int:
     print("模式：真正写入" if apply else "模式：预演（不写任何东西）")
     if args.with_damaged_uid:
         print(
-            f"--with-damaged-uid：额外灌 {len(_DAMAGED_TRANSACTION_ROWS)} 笔"
-            f"被 Excel 抹掉低位的 UID（{len(DAMAGED_UIDS)} 个客户），只进交易明细。\n"
+            f"--with-damaged-uid：额外灌 {len(_DAMAGED_BOARD_ROWS)} 行"
+            f"被 Excel 抹掉低位的 UID（{len(DAMAGED_UIDS)} 个客户），只进日读看板。\n"
             "                    这是一次性的检测自检，确认告警会响之后请用 --reset 换回干净数据。"
         )
     print()
@@ -924,30 +852,6 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-
-    # 交易明细表在开发租户里不存在（那是公司租户里同事维护的表，跨租户读不到），
-    # 得我们自己造一张同名同字段的顶上，对账代码才不用改。
-    if schema.TABLE_TRANSACTION_NAME not in tables:
-        if not apply:
-            print(
-                f"将新建模拟交易明细表「{schema.TABLE_TRANSACTION_NAME}」"
-                f"及 {len(MOCK_TRANSACTION_FIELDS)} 个字段"
-            )
-            table_id = ""
-        else:
-            table_id = _create_mock_transaction_table(settings.base_app_token)
-            tables[schema.TABLE_TRANSACTION_NAME] = table_id
-        scans[schema.TABLE_TRANSACTION_NAME] = TableScan(
-            table_id=table_id, seed_records=[], foreign_samples=[]
-        )
-    else:
-        for note in _check_mock_transaction_fields(
-            bitable,
-            settings.base_app_token,
-            tables[schema.TABLE_TRANSACTION_NAME],
-            apply=apply,
-        ):
-            print(note)
 
     if args.reset:
         if not apply:
@@ -982,13 +886,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     results.append((schema.TABLE_CLIENT_NAME, created, skipped))
 
-    created, skipped = _seed_transactions(
+    created, skipped = _seed_board_rows(
         bitable,
-        scans[schema.TABLE_TRANSACTION_NAME],
+        scans[schema.TABLE_DAILY_BOARD_NAME],
         apply=apply,
         with_damaged_uid=args.with_damaged_uid,
     )
-    results.append((schema.TABLE_TRANSACTION_NAME, created, skipped))
+    results.append((schema.TABLE_DAILY_BOARD_NAME, created, skipped))
 
     created, skipped = _seed_sales(
         bitable, scans[schema.TABLE_SALES_NAME], open_id, args.admin_name, apply=apply
@@ -1013,7 +917,7 @@ def main(argv: list[str] | None = None) -> int:
     env_keys = {
         schema.TABLE_REFERRAL_NAME: "TABLE_REFERRAL",
         schema.TABLE_CLIENT_NAME: "TABLE_CLIENT",
-        schema.TABLE_TRANSACTION_NAME: "TABLE_TRANSACTION",
+        schema.TABLE_DAILY_BOARD_NAME: "TABLE_DAILY_BOARD",
         schema.TABLE_COMMISSION_NAME: "TABLE_COMMISSION",
         schema.TABLE_AUDIT_NAME: "TABLE_AUDIT",
         schema.TABLE_SALES_NAME: "TABLE_SALES",
@@ -1029,8 +933,8 @@ def main(argv: list[str] | None = None) -> int:
             "拿到 open_id 后重跑一次：--open-id ou_xxx --yes-this-is-a-dev-base --reset"
         )
 
-    transactions = build_transactions(with_damaged_uid=args.with_damaged_uid)
-    periods = sorted({t.period for t in transactions})
+    board_rows = build_board_rows(with_damaged_uid=args.with_damaged_uid)
+    periods = sorted({r.period for r in board_rows})
     print("\n下一步，验证对账（只算不写）：")
     for period in periods:
         print(f"  uv run python -m crm_basebot.jobs.reconcile --period {period}")
@@ -1039,14 +943,14 @@ def main(argv: list[str] | None = None) -> int:
     unmapped_count = len(UNMAPPED_CLIENTS) + (len(DAMAGED_UIDS) if args.with_damaged_uid else 0)
     print(
         f"\n预期能看到：{unmapped_count} 个未登记归属的客户告警；"
-        "以及 2026-02 有一个渠道整月 Pnl 为负 —— 按业务规则它当月应付佣金是 0"
+        "以及 2026-02 有一个渠道整月合计为负 —— 按业务规则它当月应付佣金是 0"
         "（保底，不倒扣不结转），汇总里会单独标注一行。"
     )
 
     if args.with_damaged_uid:
         print(
-            f"\n另外 inspect_base.py 和 reconcile 都会对「{schema.TABLE_TRANSACTION_NAME}"
-            f".{schema.TXN_CLIENT_UID}」报 UID 损伤告警（判定 likely_damaged），"
+            f"\n另外 inspect_base.py 和 reconcile 都会对「{schema.TABLE_DAILY_BOARD_NAME}"
+            f".{schema.BOARD_CLIENT_UID}」报 UID 损伤告警（判定 likely_damaged），"
             f"点名那 {len(DAMAGED_UIDS)} 个以连续 0 结尾的值。看到告警就说明检测在工作。\n"
             "确认完请换回干净数据，别顶着这条告警继续跑：\n"
             "  uv run python scripts/seed_dev_data.py --open-id ou_xxx "

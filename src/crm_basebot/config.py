@@ -23,10 +23,13 @@ class Settings(BaseSettings):
     # 探查 Base 之前这些是空的，所以都给默认值
     table_referral: str = Field(default="", alias="TABLE_REFERRAL")
     table_client: str = Field(default="", alias="TABLE_CLIENT")
-    table_transaction: str = Field(default="", alias="TABLE_TRANSACTION")
+    table_daily_board: str = Field(default="", alias="TABLE_DAILY_BOARD")
     table_commission: str = Field(default="", alias="TABLE_COMMISSION")
     table_audit: str = Field(default="", alias="TABLE_AUDIT")
     table_sales: str = Field(default="", alias="TABLE_SALES")
+
+    # 日读看板 xlsx 的默认路径。import_daily_board.py 支持 --file 覆盖。
+    daily_board_xlsx: str = Field(default="", alias="DAILY_BOARD_XLSX")
 
     domain: str = Field(default="https://open.feishu.cn", alias="LARK_DOMAIN")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")

@@ -13,16 +13,16 @@
 两套同月汇总摆在一起，看报表的人分不清哪套是对的，求和还会翻倍。数据改过要重算，
 加 ``--replace``：先删掉那些月份的旧行，再写新的（2026-09-05 定的）。删的范围就是
 本次结算的月份，``--all-periods --replace`` 则清空整张汇总表。算出来是空的时候
-不会拿空结果去顶掉旧汇总 —— 交易明细没导完就跑一次，不该把上个月好好的账删没。
+不会拿空结果去顶掉旧汇总 —— 看板没导完就跑一次，不该把上个月好好的账删没。
 
 先删后写没有事务：删完写到一半失败，表里就是半套数据。这种情况下再跑一次
 ``--write --replace`` 就好，不需要人工清理。
 
-不传 ``--period`` 时结算**交易明细里最新有数据的那个月**，不是「上个月」。理由见
+不传 ``--period`` 时结算**日读看板里最新有数据的那个月**，不是「上个月」。理由见
 ``CommissionCalculator.compute_latest``。实际选中的月份一定会打印出来，不用猜。
 
-算之前先校验交易明细表的结构。那张表是同事每天手工导入维护的，列名被改过而
-我们浑然不觉地继续算，是这个系统最容易出的事故。
+算之前先校验日读看板的结构。那张表由 scripts/import_daily_board.py 每天从 xlsx
+导入，列名被改过而我们浑然不觉地继续算，是这个系统最容易出的事故。
 """
 
 from __future__ import annotations
@@ -41,10 +41,10 @@ from ..startup import load_settings, require_settings
 
 logger = logging.getLogger(__name__)
 
-# 算一次佣金要读的三张表：交易明细出 Pnl，客户表把 UID 归到渠道，渠道表给分佣比例。
+# 算一次佣金要读的三张表：日读看板出总收入，客户表把 UID 归到渠道，渠道表给分佣比例。
 REQUIRED_KEYS = (
     "LARK_BASE_APP_TOKEN",
-    "TABLE_TRANSACTION",
+    "TABLE_DAILY_BOARD",
     "TABLE_CLIENT",
     "TABLE_REFERRAL",
 )
@@ -105,7 +105,7 @@ def write_summary(
     if existing and not rows:
         raise WriteRefused(
             f"这次算出来是空的，不会拿空结果去顶掉汇总表里已有的 {_describe(existing)}。"
-            "先确认交易明细导全了、客户都登记了，再跑。"
+            "先确认看板导全了、客户都登记了，再跑。"
         )
 
     deleted = 0
@@ -129,7 +129,7 @@ def _write_rows(bitable: BitableClient, table_id: str, rows: list[CommissionRow]
                 schema.COMM_REFERRAL_NAME: row.referral_name,
                 schema.COMM_CLIENT_COUNT: row.client_count,
                 schema.COMM_TXN_COUNT: row.txn_count,
-                schema.COMM_PNL_TOTAL: float(row.pnl_total),
+                schema.COMM_REVENUE_TOTAL: float(row.revenue_total),
                 schema.COMM_RATE: float(row.rate_percent),
                 schema.COMM_PAYABLE: float(row.payable),
                 schema.COMM_COMPUTED_AT: now_ms,
@@ -192,9 +192,9 @@ def main(argv: list[str] | None = None) -> int:
 def run(args: argparse.Namespace, settings, bitable: BitableClient) -> int:
     """入口的主体。settings 和 bitable 从外面传进来，单测里换成假件就能把整条路走一遍。"""
     assert_fields_present(
-        bitable.list_fields(settings.table_transaction),
-        schema.TXN_REQUIRED_FIELDS,
-        table_label="交易明细表",
+        bitable.list_fields(settings.table_daily_board),
+        schema.DAILY_BOARD_REQUIRED_FIELDS,
+        table_label="日读看板",
     )
 
     calculator = CommissionCalculator(bitable, settings=settings)
@@ -210,15 +210,15 @@ def run(args: argparse.Namespace, settings, bitable: BitableClient) -> int:
     else:
         period, rows, unmapped = calculator.compute_latest(strict=args.strict)
         if not period:
-            # 定不出默认月份就没法往下走。返回非 0 是有意的：交易明细空了，
-            # 或者整列订单时间都解析不出来，都说明上游导入出了问题，该被告警看见。
+            # 定不出默认月份就没法往下走。返回非 0 是有意的：看板空了，
+            # 或者整列交易日期都解析不出来，都说明上游导入出了问题，该被告警看见。
             print(
-                "\n定不出要结算哪个月：交易明细是空的，"
-                f"或者没有一行的「{schema.TXN_ORDER_TIME}」能解析出 YYYY-MM。\n"
-                "先确认同事的导入跑过了，或者用 --period YYYY-MM 显式指定。"
+                "\n定不出要结算哪个月：日读看板是空的，"
+                f"或者没有一行的「{schema.BOARD_ORDER_DATE}」能解析出 YYYY-MM。\n"
+                "先确认 scripts/import_daily_board.py 跑过了，或者用 --period YYYY-MM 显式指定。"
             )
             return 1
-        scope = f"{period}（自动选定：交易明细里最新有数据的月份）"
+        scope = f"{period}（自动选定：日读看板里最新有数据的月份）"
 
     # 把实际结算的月份原原本本打出来。默认值是算出来的而不是写死的，
     # 不打印的话，看报表的人没法确认这个数对应的是哪个月。
@@ -243,8 +243,8 @@ def run(args: argparse.Namespace, settings, bitable: BitableClient) -> int:
         # 未登记归属是数据问题，不该因为这次只结算一个月就被藏起来。
         scope_note = "" if args.period else "（全表范围，不限本月）"
         print(
-            f"\n注意：{len(unmapped)} 个客户在交易明细里有记录但没登记归属渠道{scope_note}，"
-            "这部分 Pnl 没有计入任何佣金："
+            f"\n注意：{len(unmapped)} 个客户在日读看板里有记录但没登记归属渠道{scope_note}，"
+            "这部分收入没有计入任何佣金："
         )
         for uid in unmapped[:20]:
             print(f"    {uid}")

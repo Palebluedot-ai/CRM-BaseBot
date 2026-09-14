@@ -286,6 +286,7 @@ def test_主菜单按钮都带回调且不在表单里():
         cards.ACTION_OPEN_REFERRAL_FORM,
         cards.ACTION_OPEN_CLIENT_FORM,
         cards.ACTION_LIST_REFERRALS,
+        cards.ACTION_OPEN_COMMISSION_QUERY,
     }
 
 

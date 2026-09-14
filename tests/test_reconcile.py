@@ -21,7 +21,7 @@ from crm_basebot.lark.bitable import (
     FieldInfo,
 )
 
-from .conftest import TBL_AUDIT, TBL_CLIENT, TBL_COMMISSION, TBL_REFERRAL, TBL_TXN
+from .conftest import TBL_AUDIT, TBL_BOARD, TBL_CLIENT, TBL_COMMISSION, TBL_REFERRAL
 
 UID = "577809207768677761"
 
@@ -29,7 +29,7 @@ UID = "577809207768677761"
 class Settings:
     table_referral = TBL_REFERRAL
     table_client = TBL_CLIENT
-    table_transaction = TBL_TXN
+    table_daily_board = TBL_BOARD
     table_commission = TBL_COMMISSION
     table_audit = TBL_AUDIT
     business_timezone = "Asia/Singapore"
@@ -41,7 +41,7 @@ def _row(period: str, no: str = "R001") -> CommissionRow:
         referral_no=no,
         referral_name="ABC Capital",
         rate_percent=Decimal("20"),
-        pnl_total=Decimal("100"),
+        revenue_total=Decimal("100"),
         txn_count=1,
         client_uids={UID},
     )
@@ -165,10 +165,10 @@ def test_空结果且没有旧汇总时什么都不做(fake_bitable):
 
 @pytest.fixture
 def base(fake_bitable):
-    fake_bitable.tables[TBL_TXN].fields = [
-        FieldInfo("fld1", schema.TXN_ORDER_TIME, FIELD_TYPE_DATETIME, "DateTime", True),
-        FieldInfo("fld2", schema.TXN_CLIENT_UID, FIELD_TYPE_TEXT, "Text", False),
-        FieldInfo("fld3", schema.TXN_PNL, FIELD_TYPE_NUMBER, "Number", False),
+    fake_bitable.tables[TBL_BOARD].fields = [
+        FieldInfo("fld1", schema.BOARD_ORDER_DATE, FIELD_TYPE_DATETIME, "DateTime", True),
+        FieldInfo("fld2", schema.BOARD_CLIENT_UID, FIELD_TYPE_TEXT, "Text", False),
+        FieldInfo("fld3", schema.BOARD_TOTAL_REVENUE, FIELD_TYPE_NUMBER, "Number", False),
     ]
     referral = fake_bitable.tables[TBL_REFERRAL].add_existing(
         {
@@ -185,11 +185,11 @@ def base(fake_bitable):
             schema.CLIENT_REFERRAL_LINK: [referral],
         }
     )
-    fake_bitable.tables[TBL_TXN].add_existing(
+    fake_bitable.tables[TBL_BOARD].add_existing(
         {
-            schema.TXN_ORDER_TIME: "2026/03/02",
-            schema.TXN_CLIENT_UID: UID,
-            schema.TXN_PNL: 729.99,
+            schema.BOARD_ORDER_DATE: "2026/03/02",
+            schema.BOARD_CLIENT_UID: UID,
+            schema.BOARD_TOTAL_REVENUE: 729.99,
         }
     )
     return fake_bitable

@@ -86,7 +86,7 @@ def written(fake_bitable, services):
                 referral_no=no,
                 referral_name="北极星资本",
                 rate_percent=_decimal("12.5"),
-                pnl_total=_decimal("1240.55"),
+                revenue_total=_decimal("1240.55"),
                 txn_count=3,
                 client_uids={UID},
             )
@@ -249,10 +249,10 @@ def test_审计写入不额外回读(fake_bitable, services):
 
 def test_佣金金额转成_float_而不是_decimal(written):
     (fields,) = written[TBL_COMMISSION]
-    for name in (schema.COMM_PNL_TOTAL, schema.COMM_RATE, schema.COMM_PAYABLE):
+    for name in (schema.COMM_REVENUE_TOTAL, schema.COMM_RATE, schema.COMM_PAYABLE):
         assert isinstance(fields[name], float), f"{name} 还是 Decimal，序列化会炸"
 
-    assert fields[schema.COMM_PNL_TOTAL] == pytest.approx(1240.55)
+    assert fields[schema.COMM_REVENUE_TOTAL] == pytest.approx(1240.55)
     assert fields[schema.COMM_PAYABLE] == pytest.approx(155.07)
     assert fields[schema.COMM_CLIENT_COUNT] == 1
     assert fields[schema.COMM_TXN_COUNT] == 3

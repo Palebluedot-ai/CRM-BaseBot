@@ -47,10 +47,11 @@ from crm_basebot.lark.client import get_client  # noqa: E402
 from crm_basebot.lark.field_types import type_name  # noqa: E402
 from crm_basebot.startup import load_settings, require_settings  # noqa: E402
 
-# 我们负责维护的表。交易明细不在其中 —— 那是同事的表，我们只读。
+# 我们负责维护的表。
 TARGET_TABLES: dict[str, dict[str, int]] = {
     schema.TABLE_REFERRAL_NAME: schema.REFERRAL_FIELDS,
     schema.TABLE_CLIENT_NAME: schema.CLIENT_FIELDS,
+    schema.TABLE_DAILY_BOARD_NAME: schema.DAILY_BOARD_FIELDS,
     schema.TABLE_COMMISSION_NAME: schema.COMMISSION_FIELDS,
     schema.TABLE_AUDIT_NAME: schema.AUDIT_FIELDS,
     schema.TABLE_SALES_NAME: schema.SALES_FIELDS,

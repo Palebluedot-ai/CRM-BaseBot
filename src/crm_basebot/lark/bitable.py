@@ -33,6 +33,7 @@ from lark_oapi.api.bitable.v1 import (
     ListAppTableRequest,
     SearchAppTableRecordRequest,
     SearchAppTableRecordRequestBody,
+    UpdateAppTableRecordRequest,
 )
 
 from .client import get_client
@@ -227,6 +228,19 @@ class BitableClient:
 
         return fields
 
+    def resolve_primary_field(self, table_id: str) -> FieldInfo:
+        """找到某张表的主字段。找不到就抛，别拿一个不确定的字段回去写。
+
+        主字段决定所有指向本表的关联字段展示什么 —— 主字段为空时飞书界面上会
+        显示成「无标题记录」，佣金对账里再复杂的关联链也就跟着「untitled」。
+        """
+        for f in self.list_fields(table_id):
+            if f.is_primary:
+                return f
+        raise BitableError(
+            f"表 {table_id} 没有主字段？飞书至少给每张表一个主字段，读不到就是接口异常"
+        )
+
     def iter_records(
         self,
         table_id: str,
@@ -316,6 +330,34 @@ class BitableClient:
                 return Record(record_id=created.record_id, fields=created.fields or {})
             # 自动编号等系统字段在 create 响应里不一定回填，回读一次才拿得准
             return self.get_record(table_id, created.record_id)
+
+    def update_record(
+        self, table_id: str, record_id: str, fields: dict[str, Any]
+    ) -> Record:
+        """更新已有记录的部分字段。fields 里没提到的字段不动。
+
+        用于回填历史数据（比如给老渠道记录补上主字段值），机器人日常业务是不改
+        已有记录的 —— 改动都走「新增」，审计表更是明确只增不改。
+        """
+        record = AppTableRecord.builder().fields(fields).build()
+        request = (
+            UpdateAppTableRecordRequest.builder()
+            .app_token(self._app_token)
+            .table_id(table_id)
+            .record_id(record_id)
+            .request_body(record)
+            .build()
+        )
+
+        with _WRITE_LOCK:
+            response = self._client.bitable.v1.app_table_record.update(request)
+            data = _check(response, f"更新记录 record_id={record_id}")
+            updated = data.record
+            if updated is None or not updated.record_id:
+                raise BitableError(
+                    f"更新记录 record_id={record_id} 成功但没拿到 record"
+                )
+            return Record(record_id=updated.record_id, fields=updated.fields or {})
 
     def delete_record(self, table_id: str, record_id: str) -> None:
         """删除一条记录。

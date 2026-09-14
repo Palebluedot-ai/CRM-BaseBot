@@ -5,13 +5,17 @@
 ## 关系
 
 ```
-Transaction Details ──客户UID──► Referred Client ──关联──► Referral Information
-   (同事维护，只读)                  (bot 写入)              (bot 写入，含分佣比例)
+Daily Revenue Board ──客户UID──► Referred Client ──关联──► Referral Information
+   (脚本每天从 xlsx 导入)          (bot 写入)              (bot 写入，含分佣比例)
                                                                     │
-                                          Pnl(USD) × 分佣比例，按月聚合
+                                     总收入(opt+现货) × 分佣比例，按月聚合
                                                                     ▼
                                                         Commission Summary
 ```
+
+**基数从 Pnl 切到毛收入是 2026-09-09 的业务决定**。原方案按 Pnl(USD) 算，
+现在按看板里已经聚合好的「总收入(opt+现货)」算 —— 使用方明确要求按毛收入分佣。
+`max(0, ...)` 保底条款保留（见表 4）。
 
 ## 表 1：Referral Information（渠道登记）
 
@@ -47,25 +51,28 @@ Transaction Details ──客户UID──► Referred Client ──关联──�
 
 `scripts/inspect_base.py` 会专门检查这一点并报警。
 
-## 表 3：Transaction Details（交易明细）
+## 表 3：Daily Revenue Board（销售收入日读看板）
 
-同事每天手工导入，**我们只读，从不写**。
+由 `scripts/import_daily_board.py` **每天从 xlsx 导入**，替换了原来「同事手工导入的 Transaction Details 只读表」。改动理由：使用方 2026-09-09 决定按毛收入结算，看板是唯一权威口径。
 
-| 字段 | 类型 | 用途 |
-| --- | --- | --- |
-| 订单时间 | 日期 | 归月 |
-| 名称 | 文本 | 我方主体，如 HashKey SG |
-| 客户名称 | 文本 | 人看的 |
-| 客户UID | 查找引用 | **join 键** |
-| HTS 获得数量 | 数字 | 不参与佣金 |
-| 价格 | 数字 | 不参与佣金 |
-| 手续费 | 数字 | 不参与佣金 |
-| 手续费币种 | 文本 | |
-| Pnl(USD) | 数字 | **佣金基数** |
+| 字段 | 类型 | xlsx 表头 | 用途 |
+| --- | --- | --- | --- |
+| 站点 | 文本 | 站点 | HashKey SG / HK 等 |
+| 客户UID | 文本 | user_id | **join 键**（跨列改名，为了和客户表共用） |
+| 客户名称 | 文本 | client_name | 人看的（跨列改名） |
+| 销售分组 | 文本 | 销售分组 | 展示用 |
+| 销售 | 文本 | 销售 | 展示用；归属仍走渠道 |
+| 交易日期 | 日期 | 交易日期 | 归月 |
+| 总收入(opt+现货) | 数字 | 总收入（opt+现货） | **佣金基数** |
+| opt手续费 | 数字 | opt手续费 | 展示 |
+| 现货手续费剔除做市商 | 数字 | 现货手续费剔除做市商 | 展示 |
+| opt_pnl | 数字 | opt_pnl | 展示 |
 
-算佣金真正依赖的只有三个：订单时间、客户UID、Pnl(USD)。`jobs/reconcile.py` 在计算前会调 `assert_fields_present` 校验这三个还在、类型没变，对不上就中止 —— 这张表不在我们控制下，静默算错比报错危险得多。
+算佣金真正依赖的只有三个：交易日期、客户UID、总收入(opt+现货)。`jobs/reconcile.py` 在计算前会调 `assert_fields_present` 校验这三个还在、类型没变，对不上就中止。
 
-阶段 A 的开发租户里读不到这张表（自建应用跨不了租户），所以 `scripts/seed_dev_data.py` 会在那边建一张同名同字段的模拟表顶上，对账代码一行不用改。唯一的偏差是客户UID 建成「文本」而不是真表的「查找引用」—— 两种 `to_uid` 都能安全取值，`TXN_REQUIRED_FIELDS` 对它的期望类型也是 None。`sync_base.py` 永远不建这张表，免得在公司 Base 上盖掉同事的。
+**为什么必须走 xlsx 不走 CSV**：CSV 看起来对 18-19 位 user_id 更安全，但源头几乎总是过 Excel，UID 的低位在存成 CSV 之前就被抹成 0 了，下游修不了。xlsx 保留原生类型；`import_daily_board.py` 对 user_id 列强制字符串校验，拿到浮点数直接报错。
+
+**幂等策略**：按交易日期区间「先删后写」。看板每天更新，同一天的行可能被多次修正；按行 upsert 找不到稳定主键，按日期批量替换是最简单也最安全的语义。
 
 ## 表 4：Commission Summary（佣金汇总）
 
@@ -77,15 +84,17 @@ Transaction Details ──客户UID──► Referred Client ──关联──�
 | 渠道编号 | 文本 |
 | 渠道名称 | 文本 |
 | 客户数 | 数字 |
-| 交易笔数 | 数字 |
-| Pnl合计 | 数字 |
+| 记录笔数 | 数字 |
+| 总收入合计 | 数字 |
 | 分佣比例 | 数字 |
 | 应付佣金 | 数字 |
 | 计算时间 | 日期 |
 
-**结算月份怎么归**：订单时间先换算到 `.env` 里 `BUSINESS_TIMEZONE` 指定的时区（默认 `Asia/Singapore`，2026-09-04 定的）再取年月。Bitable 日期字段存的是 UTC 时间戳，直接按 UTC 取月份的话，本地每个月 1 号 0 点到 8 点的交易会全部算进上个月。
+**结算月份怎么归**：交易日期先换算到 `.env` 里 `BUSINESS_TIMEZONE` 指定的时区（默认 `Asia/Singapore`，2026-09-04 定的）再取年月。Bitable 日期字段存的是 UTC 时间戳，直接按 UTC 取月份的话，本地每个月 1 号 0 点到 8 点的交易会全部算进上个月。
 
-`应付佣金 = max(0, Pnl合计 × 分佣比例)`。整月亏损的渠道佣金按 0 保底，不倒扣也不结转到下个月 —— 这是业务规则（2026-08-30 定的），不是代码漏了处理负数。注意 `Pnl合计` **仍然如实记负值**：报表上要看得见这个渠道当月是亏的，把 Pnl 也截成 0 会让对账说不清账。完整说明见 `domain/commission.py` 的 `CommissionRow.payable`。
+`应付佣金 = max(0, 总收入合计 × 分佣比例)`。整月合计为负的渠道佣金按 0 保底，不倒扣也不结转到下个月 —— 这是业务规则（2026-08-30 定的），不是代码漏了处理负数。注意 `总收入合计` **仍然如实记负值**：报表上要看得见这个渠道当月是负的（退款/冲销/校准场景），把它也截成 0 会让对账说不清账。完整说明见 `domain/commission.py` 的 `CommissionRow.payable`。
+
+原基数是 `Pnl(USD)`；2026-09-09 切成毛收入之后，`max(0, ...)` 保底大多数月份是空转，但规则条款不变 —— 退款/冲销那种边界情况仍然要兜住。
 
 **为什么不在 Base 里用公式算**：Bitable 的 `FILTER` 上限 2 万条，单表也有行数上限，而交易明细是全量表且只增不减。后端聚合后只写少量汇总行，既避开上限，也让计算逻辑可被单元测试覆盖（见 `tests/test_commission.py`）。
 

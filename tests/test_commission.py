@@ -18,7 +18,7 @@ from crm_basebot.domain.commission import (
     summarize,
 )
 
-from .conftest import TBL_CLIENT, TBL_REFERRAL, TBL_TXN
+from .conftest import TBL_BOARD, TBL_CLIENT, TBL_REFERRAL
 
 UID_A = "577809207768677761"
 UID_B = "2141293991366272768"
@@ -30,7 +30,7 @@ SGT = ZoneInfo("Asia/Singapore")
 class Settings:
     table_referral = TBL_REFERRAL
     table_client = TBL_CLIENT
-    table_transaction = TBL_TXN
+    table_daily_board = TBL_BOARD
     business_timezone = "Asia/Singapore"
 
 
@@ -70,12 +70,13 @@ def base(fake_bitable):
     return fake_bitable
 
 
-def _txn(bitable, uid, pnl, order_time="2026/03/02"):
-    bitable.tables[TBL_TXN].add_existing(
+def _txn(bitable, uid, revenue, order_time="2026/03/02"):
+    """看板行 —— 名字保留 _txn 是因为改起来太多，语义上是「一条看板记录」。"""
+    bitable.tables[TBL_BOARD].add_existing(
         {
-            schema.TXN_ORDER_TIME: order_time,
-            schema.TXN_CLIENT_UID: uid,
-            schema.TXN_PNL: pnl,
+            schema.BOARD_ORDER_DATE: order_time,
+            schema.BOARD_CLIENT_UID: uid,
+            schema.BOARD_TOTAL_REVENUE: revenue,
         }
     )
 
@@ -94,7 +95,7 @@ def _txn(bitable, uid, pnl, order_time="2026/03/02"):
         ("garbage", ""),
     ],
 )
-def test_订单时间归月(value, expected):
+def test_交易日期归月(value, expected):
     assert period_of(value, tz=SGT) == expected
 
 
@@ -156,7 +157,7 @@ def test_单渠道单月佣金(base):
     assert len(rows) == 1
     row = rows[0]
     assert row.referral_no == "R001"
-    assert row.pnl_total == Decimal("1440.88")
+    assert row.revenue_total == Decimal("1440.88")
     assert row.payable == Decimal("288.18")  # 1440.88 * 20%
     assert row.txn_count == 2
     assert row.client_count == 1
@@ -179,7 +180,7 @@ def test_按月分开算(base):
 
     rows, _ = CommissionCalculator(base, settings=Settings()).compute()
 
-    periods = {r.period: r.pnl_total for r in rows}
+    periods = {r.period: r.revenue_total for r in rows}
     assert periods == {"2026-03": Decimal("1000"), "2026-04": Decimal("2000")}
 
 
@@ -190,7 +191,7 @@ def test_指定月份只算那个月(base):
     rows, _ = CommissionCalculator(base, settings=Settings()).compute(period="2026-04")
 
     assert len(rows) == 1
-    assert rows[0].pnl_total == Decimal("2000")
+    assert rows[0].revenue_total == Decimal("2000")
 
 
 def test_累加不引入浮点误差(base):
@@ -200,7 +201,7 @@ def test_累加不引入浮点误差(base):
 
     rows, _ = CommissionCalculator(base, settings=Settings()).compute(period="2026-03")
 
-    assert rows[0].pnl_total == Decimal("100.0")
+    assert rows[0].revenue_total == Decimal("100.0")
     assert rows[0].payable == Decimal("20.00")
 
 
@@ -234,7 +235,7 @@ def test_未登记归属的客户被单独列出而不是算进别人头上(base
     rows, unmapped = CommissionCalculator(base, settings=Settings()).compute(period="2026-03")
 
     assert unmapped == [UID_ORPHAN]
-    assert sum(r.pnl_total for r in rows) == Decimal("1000")
+    assert sum(r.revenue_total for r in rows) == Decimal("1000")
 
 
 def test_strict模式下未登记客户直接报错(base):
@@ -258,23 +259,23 @@ def test_相近uid不会串台(base, fake_bitable):
     rows, unmapped = CommissionCalculator(base, settings=Settings()).compute(period="2026-03")
 
     assert unmapped == []
-    by_no = {r.referral_no: r.pnl_total for r in rows}
+    by_no = {r.referral_no: r.revenue_total for r in rows}
     assert by_no == {"R001": Decimal("1000"), "R002": Decimal("2000")}
 
 
 def test_uid以查找引用数组形式出现也能join(base):
-    base.tables[TBL_TXN].add_existing(
+    base.tables[TBL_BOARD].add_existing(
         {
-            schema.TXN_ORDER_TIME: "2026/03/02",
-            schema.TXN_CLIENT_UID: [{"type": "text", "text": UID_A}],
-            schema.TXN_PNL: 4231.31,
+            schema.BOARD_ORDER_DATE: "2026/03/02",
+            schema.BOARD_CLIENT_UID: [{"type": "text", "text": UID_A}],
+            schema.BOARD_TOTAL_REVENUE: 4231.31,
         }
     )
 
     rows, unmapped = CommissionCalculator(base, settings=Settings()).compute(period="2026-03")
 
     assert unmapped == []
-    assert rows[0].pnl_total == Decimal("4231.31")
+    assert rows[0].revenue_total == Decimal("4231.31")
 
 
 def test_空pnl的行被跳过(base):
@@ -299,10 +300,10 @@ def test_干净数据的uid体检不告警(base):
     assert calculator.uid_health().verdict == "clean"
 
 
-def test_交易明细里的excel截断uid被体检抓到(base):
-    # 这批 UID 是同事导入的，尾部低位已经被 Excel 抹成 0。
-    # 它们 join 不上客户表（进了 unmapped），但真正危险的是「刚好撞上别的客户」，
-    # 所以要在算钱之前就把损伤本身报出来。
+def test_看板里的excel截断uid被体检抓到(base):
+    # 这批 UID 从看板 xlsx 导入时源头被 Excel 抹成 0（import 脚本会挡，但这里
+    # 模拟已经在 Base 里的历史脏数据）。它们 join 不上客户表（进了 unmapped），
+    # 但真正危险的是「刚好撞上别的客户」，所以要在算钱之前就把损伤本身报出来。
     for damaged in ("577809207768678000", "2141293991366270000", "577809207768600000"):
         _txn(base, damaged, 1000)
 
@@ -315,26 +316,28 @@ def test_交易明细里的excel截断uid被体检抓到(base):
 
 
 def test_体检不额外读表(base):
-    # UID 是 compute() 途中顺手攒的。如果哪天有人改成再遍历一遍交易明细，
+    # UID 是 compute() 途中顺手攒的。如果哪天有人改成再遍历一遍看板，
     # 这里会炸 —— 对账不该因为体检多花一倍的 API 调用。
     _txn(base, UID_A, 729.99)
 
     calculator = CommissionCalculator(base, settings=Settings())
     calculator.compute(period="2026-03")
-    scans_after_compute = base.tables[TBL_TXN].scan_count
+    scans_after_compute = base.tables[TBL_BOARD].scan_count
 
     calculator.uid_health()
 
-    assert base.tables[TBL_TXN].scan_count == scans_after_compute
+    assert base.tables[TBL_BOARD].scan_count == scans_after_compute
 
 
-# ---------- 业务规则：整月亏损佣金保底 0 ----------
+# ---------- 业务规则：整月合计为负佣金保底 0 ----------
 #
-# 规则由使用方在 2026-08-30 明确拍板：payable = max(0, pnl_total × rate)，
-# 亏损月不倒扣、不结转。这一组测试是这条规则的锁 —— 谁改动保底逻辑，这里必须炸。
+# 规则由使用方在 2026-08-30 明确拍板：payable = max(0, revenue_total × rate)，
+# 负值月不倒扣、不结转。这一组测试是这条规则的锁 —— 谁改动保底逻辑，这里必须炸。
+# 基数 2026-09-09 从 Pnl 切到毛收入之后，这条规则的应用场景是退款/冲销/校准，
+# 但条款不变。
 
 
-def test_整月亏损时佣金保底0但pnl如实保留负数(base):
+def test_整月合计为负时佣金保底0但收入如实保留负数(base):
     _txn(base, UID_A, -2680.30)
     _txn(base, UID_A, -1145.20)
     _txn(base, UID_A, 890.40)
@@ -342,15 +345,15 @@ def test_整月亏损时佣金保底0但pnl如实保留负数(base):
     rows, _ = CommissionCalculator(base, settings=Settings()).compute(period="2026-03")
 
     row = rows[0]
-    assert row.pnl_total == Decimal("-2935.10"), "Pnl 必须如实记负数，报表上要看得见亏损"
-    assert row.payable == Decimal("0"), "整月亏损，应付佣金保底 0"
+    assert row.revenue_total == Decimal("-2935.10"), "收入必须如实记负数，报表上要看得见"
+    assert row.payable == Decimal("0"), "整月合计为负，应付佣金保底 0"
     # -2935.10 × 20%
     assert row.gross_payable == Decimal("-587.02"), "原始值仍然可查，保底这一步要是可见的"
     assert row.is_loss_month is True
 
 
 def test_正负混合但合计为正时照常计算(base):
-    """单笔亏损被同月的盈利盖过去了就不算亏损月，保底不该介入。"""
+    """单笔负值被同月的正值盖过去了就不算负值月，保底不该介入。"""
     _txn(base, UID_A, -875.40)
     _txn(base, UID_A, 430.85)
     _txn(base, UID_A, 1290.60)
@@ -358,23 +361,23 @@ def test_正负混合但合计为正时照常计算(base):
     rows, _ = CommissionCalculator(base, settings=Settings()).compute(period="2026-03")
 
     row = rows[0]
-    assert row.pnl_total == Decimal("846.05")
+    assert row.revenue_total == Decimal("846.05")
     assert row.payable == Decimal("169.21")  # 846.05 * 20%
     assert row.payable == row.gross_payable, "合计为正时保底不该改动任何数字"
     assert row.is_loss_month is False
 
 
-def test_合计恰好为零时不算亏损月(base):
-    """0 和负数在报表上不该长成一样：一个是没赚到，一个是亏了。"""
+def test_合计恰好为零时不算负值月(base):
+    """0 和负数在报表上不该长成一样：一个是没进账，一个是负的。"""
     _txn(base, UID_A, 1000.00)
     _txn(base, UID_A, -1000.00)
 
     rows, _ = CommissionCalculator(base, settings=Settings()).compute(period="2026-03")
 
     row = rows[0]
-    assert row.pnl_total == Decimal("0.00")
+    assert row.revenue_total == Decimal("0.00")
     assert row.payable == Decimal("0.00")
-    assert row.is_loss_month is False, "合计为 0 不是亏损月，不该被标注成亏损"
+    assert row.is_loss_month is False, "合计为 0 不是负值月，不该被标注成负值"
 
 
 def test_保底不影响同月其他渠道(base):
@@ -389,8 +392,8 @@ def test_保底不影响同月其他渠道(base):
     assert by_no["R002"].is_loss_month is False
 
 
-def test_亏损月不结转到下个月(base):
-    """不结转是明确决定的：上个月亏多少都不冲抵这个月的佣金。"""
+def test_负值月不结转到下个月(base):
+    """不结转是明确决定的：上个月负多少都不冲抵这个月的佣金。"""
     _txn(base, UID_A, -5000.00, "2026/03/02")
     _txn(base, UID_A, 1000.00, "2026/04/10")
 
@@ -398,10 +401,10 @@ def test_亏损月不结转到下个月(base):
 
     by_period = {r.period: r for r in rows}
     assert by_period["2026-03"].payable == Decimal("0")
-    assert by_period["2026-04"].payable == Decimal("200.00"), "4 月按 1000 全额算，不扣 3 月的亏损"
+    assert by_period["2026-04"].payable == Decimal("200.00"), "4 月按 1000 全额算，不扣 3 月的负值"
 
 
-def test_极小额亏损也保底为正零(base):
+def test_极小额负值也保底为正零(base):
     """-0.01 × 20% 量化后是 -0.00，不能让负零漏出去。"""
     _txn(base, UID_A, -0.01)
 
@@ -425,7 +428,7 @@ def test_默认结算有数据的最新月份(base):
 
     assert period == "2026-03"
     assert len(rows) == 1
-    assert rows[0].pnl_total == Decimal("2000.00")
+    assert rows[0].revenue_total == Decimal("2000.00")
 
 
 def test_最新月份取自交易明细而不是有佣金的月份(base):
@@ -461,13 +464,13 @@ def test_空表时最新月份为空串(base):
 
 
 def test_求最新月份不额外读表(base):
-    """默认月份是扫表时顺手记的。改成再遍历一遍交易明细的话，对账 API 调用量会翻倍。"""
+    """默认月份是扫表时顺手记的。改成再遍历一遍看板的话，对账 API 调用量会翻倍。"""
     _txn(base, UID_A, 1000.00, "2026/03/02")
 
     calculator = CommissionCalculator(base, settings=Settings())
     calculator.compute_latest()
 
-    assert base.tables[TBL_TXN].scan_count == 1
+    assert base.tables[TBL_BOARD].scan_count == 1
 
 
 def test_显式指定月份时也记下表里的最新月份(base):
@@ -477,7 +480,7 @@ def test_显式指定月份时也记下表里的最新月份(base):
     calculator = CommissionCalculator(base, settings=Settings())
     calculator.compute(period="2026-01")
 
-    assert calculator.latest_transaction_period == "2026-03"
+    assert calculator.latest_board_period == "2026-03"
 
 
 # ---------- 汇总输出 ----------
@@ -496,31 +499,31 @@ def test_汇总文案包含渠道和金额(base):
     assert "1,361.08" in text
 
 
-def test_汇总文案显式标注亏损月(base):
-    """只输出一个 0，读的人分不清「亏了」和「没交易」。"""
+def test_汇总文案显式标注负值月(base):
+    """只输出一个 0，读的人分不清「负了」和「没交易」。"""
     _txn(base, UID_A, -2935.10)
     rows, _ = CommissionCalculator(base, settings=Settings()).compute(period="2026-03")
 
     text = summarize(rows)
 
-    assert "2,935.10" in text, "要看得见亏了多少"
-    assert "整月亏损" in text
+    assert "2,935.10" in text, "要看得见负了多少"
+    assert "整月合计为负" in text
     assert "不结转" in text, "要写明这是有意的规则，不是算错"
-    assert "1 个渠道整月亏损" in text, "月份小结也要提一句"
+    assert "1 个渠道整月合计为负" in text, "月份小结也要提一句"
 
 
-def test_汇总文案不给盈利渠道加亏损标注(base):
+def test_汇总文案不给正收入渠道加负值标注(base):
     _txn(base, UID_A, 6805.40)
     rows, _ = CommissionCalculator(base, settings=Settings()).compute(period="2026-03")
 
-    assert "整月亏损" not in summarize(rows)
+    assert "整月合计为负" not in summarize(rows)
 
 
-def test_月份合计不把亏损渠道算成负数(base):
+def test_月份合计不把负值渠道算成负数(base):
     _txn(base, UID_A, -5000.00)
     _txn(base, UID_B, 3668.00)
     rows, _ = CommissionCalculator(base, settings=Settings()).compute(period="2026-03")
 
     text = summarize(rows)
 
-    assert "合计应付 458.50 USD" in text, "亏损渠道按 0 计入合计，不倒扣别人的佣金"
+    assert "合计应付 458.50 USD" in text, "负值渠道按 0 计入合计，不倒扣别人的佣金"
