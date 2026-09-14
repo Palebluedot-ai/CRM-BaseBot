@@ -37,14 +37,15 @@ uv run python scripts/sync_base.py --apply  # 执行
 uv run python scripts/seed_dev_data.py --open-id ou_xxx   # 预演种子数据
 uv run python scripts/seed_dev_data.py --open-id ou_xxx --yes-this-is-a-dev-base
 uv run python scripts/verify_numbering.py --probe   # 实测 R+3 位编号
+uv run python scripts/import_daily_board.py --file 看板.xlsx --dry-run   # 生产：每天把日读看板 xlsx 导进 Base
 uv run python -m crm_basebot.app            # 启动机器人
 ```
 
 **为什么要造种子数据**：自建应用只能在同一个企业租户内使用，所以阶段 A 那个自建的免费
-组织，读不到公司租户里那张真实的交易明细表。而手工导出 CSV 再导进来是不行的 —— Excel
+组织，读不到公司的真实数据。而手工导出 CSV 再导进来是不行的 —— Excel
 只保留 15 位有效数字，18-19 位的客户UID 一过 Excel 就被抹掉低位，测试数据从第一天起就
-是坏的。`scripts/seed_dev_data.py` 走 API 直接写，全程不经过浮点数，顺带在开发租户里造
-一张字段一致的模拟交易明细表顶上。它默认只预演，且会先扫一遍目标 Base，发现不是它造的
+是坏的。`scripts/seed_dev_data.py` 走 API 直接写，全程不经过浮点数，往 `sync_base.py` 建好的
+日读看板表里灌一批模拟行。它默认只预演，且会先扫一遍目标 Base，发现不是它造的
 数据就拒绝执行。
 
 对账（默认只算不写）：
@@ -57,11 +58,11 @@ uv run python -m crm_basebot.jobs.reconcile --period 2026-03 --write
 uv run python -m crm_basebot.jobs.reconcile --period 2026-03 --write --replace   # 重算：先删该月旧汇总再写
 ```
 
-不传 `--period` 时结算的是**交易明细里最新有数据的那个月**，不是「上个月」。写死上个月，月初跑的时候会算出一片空白，而它又恰好在「这个月的数据其实已经有了」的时候什么都不说。实际选中的月份一定会打印在输出第一行，不用猜。
+不传 `--period` 时结算的是**日读看板里最新有数据的那个月**，不是「上个月」。写死上个月，月初跑的时候会算出一片空白，而它又恰好在「这个月的数据其实已经有了」的时候什么都不说。实际选中的月份一定会打印在输出第一行，不用猜。
 
 **重跑**：`--write` 遇到汇总表里已经有本次结算月份的行会拒绝，不会在旁边再写一套。数据改过要重算就加 `--replace`，先删那些月份的旧行再写新的；`--all-periods --replace` 清空整张汇总表。算出来是空的时候不会拿空结果顶掉旧汇总（2026-09-05 定的）。
 
-**佣金规则**：`应付佣金 = max(0, 当月 Pnl 合计 × 分佣比例)`。整月亏损的渠道佣金按 0 保底，不倒扣、也不结转到下个月 —— 这是业务规则，2026-08-30 明确定的，不是代码漏了处理负数。Pnl 合计仍然如实记录负值，报表上看得见这个渠道当月是亏的，汇总输出也会单独标注一行。细节见 `domain/commission.py` 的 `CommissionRow.payable`。
+**佣金规则**：`应付佣金 = max(0, 当月 总收入(opt+现货) 合计 × 分佣比例)`。基数是日读看板里的毛收入，2026-09-09 定的，此前按 Pnl(USD) 算。整月合计为负的渠道佣金按 0 保底，不倒扣、也不结转到下个月 —— 这是业务规则，2026-08-30 明确定的，不是代码漏了处理负数。收入合计仍然如实记录负值，报表上看得见这个渠道当月是负的，汇总输出也会单独标注一行。细节见 `domain/commission.py` 的 `CommissionRow.payable`。
 
 **归月时区**：「当月」按 `.env` 里 `BUSINESS_TIMEZONE` 指定的时区算，默认 `Asia/Singapore`（2026-09-04 定的）。Bitable 日期字段存的是 UTC 时间戳，直接按 UTC 取月份的话，每个月 1 号 0 点到 8 点的交易会全部算进上个月。
 
@@ -79,7 +80,7 @@ uv run python -m crm_basebot.jobs.reconcile --period 2026-03 --write --replace  
 
 客户UID 是 18–19 位数字，超过 float64 的安全整数上限（2^53，16 位）。全链路必须当字符串处理，任何一处 `int()` 或 `float()` 都会让 join key 静默错配，佣金算到别人头上。`values.py` 的读取层强制转字符串（拿到浮点数直接报错而不是凑合），`tests/test_values.py` 用真实 UID 值锁住这个行为，`tests/test_write_payloads.py` 盯住写回去的那一侧。
 
-字符串化只能保证 UID 在我们手里不坏。交易明细是同事从内部系统导出再导入的，只要中间过了一手 Excel（只保留 15 位有效数字），UID 的低位在进 Base 之前就已经被抹成 0 了 —— 这种损伤下游修不了。`values.py` 的 `assess_uid_health()` 用尾零特征做事后诊断，`scripts/inspect_base.py` 和对账流程都会跑一遍并告警。它是启发式，只提示不拦截，判据和误报权衡写在 `looks_excel_truncated()` 的 docstring 里。
+字符串化只能保证 UID 在我们手里不坏。日读看板是从内部系统导出的 xlsx，只要 user_id 那一列在源头被 Excel 当成数字处理（只保留 15 位有效数字），UID 的低位在进 Base 之前就已经被抹成 0 了 —— 这种损伤下游修不了。所以 `scripts/import_daily_board.py` 只认 xlsx 不认 CSV，拿到浮点形态的 user_id 直接报错；`values.py` 的 `assess_uid_health()` 再用尾零特征做事后诊断，`scripts/inspect_base.py` 和对账流程都会跑一遍并告警。它是启发式，只提示不拦截，判据和误报权衡写在 `looks_excel_truncated()` 的 docstring 里。
 
 **2. SDK 在长连接下会丢弃卡片回调**
 
