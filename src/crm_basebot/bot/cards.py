@@ -17,6 +17,8 @@ ACTION_OPEN_CLIENT_FORM = "open_client_form"
 ACTION_SUBMIT_REFERRAL = "submit_referral"
 ACTION_SUBMIT_CLIENT = "submit_client"
 ACTION_LIST_REFERRALS = "list_referrals"
+ACTION_OPEN_COMMISSION_QUERY = "open_commission_query"
+ACTION_QUERY_COMMISSION = "query_commission"
 
 # 表单项标识，回调的 form_value 里用它取值
 F_REFERRAL_NAME = "referral_name"
@@ -27,6 +29,7 @@ F_REFERRAL_RATE = "referral_rate"
 F_CLIENT_UID = "client_uid"
 F_CLIENT_NAME = "client_name"
 F_CLIENT_REFERRAL = "client_referral"
+F_QUERY_PERIOD = "query_period"
 
 
 def _text(content: str, size: str = "normal") -> dict[str, Any]:
@@ -61,7 +64,21 @@ def _submit(name: str, action: str, text: str = "提交") -> dict[str, Any]:
     }
 
 
+def _menu_button(text: str, action: str, *, primary: bool = False) -> dict[str, Any]:
+    return {
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": text},
+        "type": "primary" if primary else "default",
+        "width": "fill",
+        "margin": "0px 0px 8px 0px",
+        "behaviors": [{"type": "callback", "value": {"action": action}}],
+    }
+
+
 def menu_card(sales_name: str) -> dict[str, Any]:
+    # 三个按钮垂直堆叠、每个撑满宽度。之前用 column_set 三等分横排，手机屏
+    # 窄的时候每列只放得下 3-4 个字，「登记新渠道」被截成「登记..」。垂直
+    # 排列纵向多占一点空间，但任何设备都能把标签完整显示出来。
     return {
         "schema": "2.0",
         "header": {
@@ -71,78 +88,10 @@ def menu_card(sales_name: str) -> dict[str, Any]:
         "body": {
             "elements": [
                 _text(f"**{sales_name}**，你要做什么？"),
-                {
-                    "tag": "column_set",
-                    "horizontal_spacing": "8px",
-                    "columns": [
-                        {
-                            "tag": "column",
-                            "width": "weighted",
-                            "weight": 1,
-                            "elements": [
-                                {
-                                    "tag": "button",
-                                    "text": {
-                                        "tag": "plain_text",
-                                        "content": "登记新渠道",
-                                    },
-                                    "type": "primary",
-                                    "width": "fill",
-                                    "behaviors": [
-                                        {
-                                            "type": "callback",
-                                            "value": {"action": ACTION_OPEN_REFERRAL_FORM},
-                                        }
-                                    ],
-                                }
-                            ],
-                        },
-                        {
-                            "tag": "column",
-                            "width": "weighted",
-                            "weight": 1,
-                            "elements": [
-                                {
-                                    "tag": "button",
-                                    "text": {
-                                        "tag": "plain_text",
-                                        "content": "登记新客户",
-                                    },
-                                    "type": "default",
-                                    "width": "fill",
-                                    "behaviors": [
-                                        {
-                                            "type": "callback",
-                                            "value": {"action": ACTION_OPEN_CLIENT_FORM},
-                                        }
-                                    ],
-                                }
-                            ],
-                        },
-                        {
-                            "tag": "column",
-                            "width": "weighted",
-                            "weight": 1,
-                            "elements": [
-                                {
-                                    "tag": "button",
-                                    "text": {
-                                        "tag": "plain_text",
-                                        "content": "我的渠道",
-                                    },
-                                    "type": "default",
-                                    "width": "fill",
-                                    "behaviors": [
-                                        {
-                                            "type": "callback",
-                                            "value": {"action": ACTION_LIST_REFERRALS},
-                                        }
-                                    ],
-                                }
-                            ],
-                        },
-                    ],
-                },
+                _menu_button("登记新渠道", ACTION_OPEN_REFERRAL_FORM, primary=True),
+                _menu_button("登记新客户", ACTION_OPEN_CLIENT_FORM),
+                _menu_button("我的渠道", ACTION_LIST_REFERRALS),
+                _menu_button("佣金查询", ACTION_OPEN_COMMISSION_QUERY),
             ]
         },
     }
@@ -188,7 +137,10 @@ def client_form_card(referral_options: list[tuple[str, str]]) -> dict[str, Any]:
 
     options = [
         {
-            "text": {"tag": "plain_text", "content": f"{no} {name}".strip()},
+            "text": {
+                "tag": "plain_text",
+                "content": f"{no} {name}".strip() if name else f"{no}（未命名）",
+            },
             "value": no,
         }
         for no, name in referral_options
@@ -259,5 +211,90 @@ def referral_list_card(items: list[tuple[str, str]]) -> dict[str, Any]:
     if not items:
         return notice_card("我的渠道", "你名下还没有登记任何渠道。")
 
-    lines = "\n".join(f"- **{no}** {name}" for no, name in items)
+    # 名字为空时留一个占位（比如 R006 是在 Base 里直接建的、渠道名称字段没填），
+    # 避免渲染成「- **R006** 」这种末尾一个空格、看着像 bug 的行。
+    lines = "\n".join(
+        f"- **{no}** {name if name else '（未命名，建议到 Base 里补齐）'}"
+        for no, name in items
+    )
     return notice_card("我的渠道", f"共 {len(items)} 个：\n\n{lines}", template="blue")
+
+
+def commission_query_card(default_period: str, period_options: list[str]) -> dict[str, Any]:
+    """佣金查询：选月份，回调 ACTION_QUERY_COMMISSION。
+
+    ``period_options`` 是可选的月份列表（YYYY-MM）。为空时给一个手动输入的占位。
+    有值时用下拉，避免用户拼错格式；``default_period`` 会预选到最新那一个。
+    """
+    if period_options:
+        options = [
+            {
+                "text": {"tag": "plain_text", "content": p},
+                "value": p,
+            }
+            for p in sorted(period_options, reverse=True)
+        ]
+        selector: dict[str, Any] = {
+            "tag": "select_static",
+            "name": F_QUERY_PERIOD,
+            "placeholder": {"tag": "plain_text", "content": "选择月份"},
+            "required": True,
+            "width": "fill",
+            "options": options,
+            "initial_option": default_period if default_period in period_options else None,
+            "margin": "0px 0px 8px 0px",
+        }
+        # initial_option 为 None 时飞书不认这个 key，去掉
+        if selector["initial_option"] is None:
+            del selector["initial_option"]
+    else:
+        # 极少数情况：连一个月份都取不到（看板空）。给一个文本框兜底，让用户
+        # 至少能自己敲一个 YYYY-MM 查（结果多半是「没有可展示的明细」，但这
+        # 比一片空白强 —— 它明确告诉了用户「查得动，只是没数据」）。
+        selector = _input(
+            F_QUERY_PERIOD,
+            "月份 YYYY-MM",
+            default_period or "2026-09",
+        )
+
+    return {
+        "schema": "2.0",
+        "header": {
+            "title": {"tag": "plain_text", "content": "佣金查询"},
+            "template": "blue",
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "form",
+                    "name": "commission_query_form",
+                    "elements": [
+                        _text("**结算月份**"),
+                        selector,
+                        _submit("commission_query_submit", ACTION_QUERY_COMMISSION, "查询"),
+                    ],
+                },
+                _text(
+                    "<font color='grey'>展示你名下每个渠道的应付佣金，"
+                    "以及每个客户的贡献占比。管理员可以看全部渠道。</font>",
+                    size="notation",
+                ),
+            ]
+        },
+    }
+
+
+def commission_result_card(title: str, body_md: str) -> dict[str, Any]:
+    """佣金明细结果卡。
+
+    结果内容由 domain.commission_query.summarize() 生成，卡片这一层只负责套壳。
+    单独一张卡是因为它可能相当长，独立标题也更容易在会话里定位。
+    """
+    return {
+        "schema": "2.0",
+        "header": {
+            "title": {"tag": "plain_text", "content": title},
+            "template": "blue",
+        },
+        "body": {"elements": [_text(body_md)]},
+    }

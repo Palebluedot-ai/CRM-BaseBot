@@ -130,9 +130,14 @@ def test_文本和人员字段不带多余的_property():
         assert "property" not in payload
 
 
-# ---------- 不该碰的表 ----------
+# ---------- 日读看板表纳入 sync ----------
 
 
-def test_不建同事的交易明细表():
-    """在生产 Base 上建一张同名表会盖住同事那张真表，是灾难。"""
-    assert schema.TABLE_TRANSACTION_NAME not in sync_base.TARGET_TABLES
+def test_建日读看板表():
+    """日读看板是我们自己维护的表（从 xlsx 导入），必须由 sync_base 负责建结构。
+
+    早期版本这里是「不建交易明细」—— 那时候交易明细是同事在公司租户维护的只读表，
+    我们建同名表会盖住她们的。切到日读看板后，这张表变成了我们自己的写入面，
+    sync_base 必须把它建出来。
+    """
+    assert schema.TABLE_DAILY_BOARD_NAME in sync_base.TARGET_TABLES

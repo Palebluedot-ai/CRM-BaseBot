@@ -9,6 +9,9 @@ dependencies = [
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     "python-dotenv>=1.0",
+    # 日读看板从 xlsx 导入 —— CSV 不行：Excel 会把 18-19 位 UID 抹掉低位，
+    # 见 lark/values.py 里 EXCEL_SIGNIFICANT_DIGITS 的说明。
+    "openpyxl>=3.1",
 ]
 
 [dependency-groups]

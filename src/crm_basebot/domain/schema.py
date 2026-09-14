@@ -76,26 +76,52 @@ CLIENT_FIELDS: dict[str, int] = {
     CLIENT_OWNER_OPEN_ID: FIELD_TYPE_TEXT,
 }
 
-# ---------- 表 3：交易明细（同事维护，我们只读） ----------
+# ---------- 表 3：日读看板（销售收入日读，每日由脚本导入） ----------
+#
+# 这张表**替换**了原来的「Transaction Details」交易明细。原表是同事从内部系统按
+# 单笔订单粒度导出的，本项目只读；新表是从「销售收入日读看板」xlsx 导入的按
+# (客户, 日期) 已经聚合过的数据，粒度更粗，字段更多（区分了 opt 和现货、手续费、
+# opt_pnl 等），且**佣金基数从「Pnl(USD)」改成「总收入(opt+现货)」**。改动理由：
+# 使用方 2026-09-09 确认按毛收入结算，看板是唯一权威口径。
+#
+# 由 scripts/import_daily_board.py 每天导入。字段名与 xlsx 里的表头对齐，
+# 需要跨列改名的两个（user_id -> 客户UID, client_name -> 客户名称）在导入脚本里
+# 显式做映射，好和客户表 join。
 
-TABLE_TRANSACTION_NAME = "Transaction Details"
+TABLE_DAILY_BOARD_NAME = "Daily Revenue Board"
 
-TXN_ORDER_TIME = "订单时间"
-TXN_ENTITY = "名称"
-TXN_CLIENT_NAME = "客户名称"
-TXN_CLIENT_UID = "客户UID"
-TXN_QUANTITY = "HTS 获得数量"
-TXN_PRICE = "价格"
-TXN_FEE = "手续费"
-TXN_FEE_CURRENCY = "手续费币种"
-TXN_PNL = "Pnl(USD)"
+BOARD_STATION = "站点"
+BOARD_CLIENT_UID = "客户UID"  # xlsx 里叫 user_id
+BOARD_CLIENT_NAME = "客户名称"  # xlsx 里叫 client_name
+BOARD_SALES_GROUP = "销售分组"
+BOARD_SALES_NAME = "销售"
+BOARD_ORDER_DATE = "交易日期"
+BOARD_TOTAL_REVENUE = "总收入(opt+现货)"  # 佣金基数
+BOARD_OPT_FEE = "opt手续费"
+BOARD_SPOT_FEE_EX_MM = "现货手续费剔除做市商"
+BOARD_OPT_PNL = "opt_pnl"
+
+DAILY_BOARD_FIELDS: dict[str, int] = {
+    BOARD_STATION: FIELD_TYPE_TEXT,
+    # 必须是文本。看板里的 user_id 是 18-19 位数字，存成数字字段会在服务端就被
+    # float64 抹平精度，join 客户表时静默错配。见 lark/values.py。
+    BOARD_CLIENT_UID: FIELD_TYPE_TEXT,
+    BOARD_CLIENT_NAME: FIELD_TYPE_TEXT,
+    BOARD_SALES_GROUP: FIELD_TYPE_TEXT,
+    BOARD_SALES_NAME: FIELD_TYPE_TEXT,
+    BOARD_ORDER_DATE: FIELD_TYPE_DATETIME,
+    BOARD_TOTAL_REVENUE: FIELD_TYPE_NUMBER,
+    BOARD_OPT_FEE: FIELD_TYPE_NUMBER,
+    BOARD_SPOT_FEE_EX_MM: FIELD_TYPE_NUMBER,
+    BOARD_OPT_PNL: FIELD_TYPE_NUMBER,
+}
 
 # 算佣金真正依赖的三个字段。类型给 None 表示只要求存在 —— 客户UID 可能是文本，
 # 也可能是查找引用，两种都能安全取值，但绝不能是数字。
-TXN_REQUIRED_FIELDS: dict[str, int | None] = {
-    TXN_ORDER_TIME: None,
-    TXN_CLIENT_UID: None,
-    TXN_PNL: FIELD_TYPE_NUMBER,
+DAILY_BOARD_REQUIRED_FIELDS: dict[str, int | None] = {
+    BOARD_ORDER_DATE: None,
+    BOARD_CLIENT_UID: None,
+    BOARD_TOTAL_REVENUE: FIELD_TYPE_NUMBER,
 }
 
 # ---------- 表 4：佣金汇总（按月，后端写入） ----------
@@ -106,8 +132,8 @@ COMM_PERIOD = "结算月份"
 COMM_REFERRAL_NO = "渠道编号"
 COMM_REFERRAL_NAME = "渠道名称"
 COMM_CLIENT_COUNT = "客户数"
-COMM_TXN_COUNT = "交易笔数"
-COMM_PNL_TOTAL = "Pnl合计"
+COMM_TXN_COUNT = "记录笔数"
+COMM_REVENUE_TOTAL = "总收入合计"  # 曾叫 Pnl 合计。切到日读看板后佣金基数是毛收入，不是 Pnl
 COMM_RATE = "分佣比例"
 COMM_PAYABLE = "应付佣金"
 COMM_COMPUTED_AT = "计算时间"
@@ -118,7 +144,7 @@ COMMISSION_FIELDS: dict[str, int] = {
     COMM_REFERRAL_NAME: FIELD_TYPE_TEXT,
     COMM_CLIENT_COUNT: FIELD_TYPE_NUMBER,
     COMM_TXN_COUNT: FIELD_TYPE_NUMBER,
-    COMM_PNL_TOTAL: FIELD_TYPE_NUMBER,
+    COMM_REVENUE_TOTAL: FIELD_TYPE_NUMBER,
     COMM_RATE: FIELD_TYPE_NUMBER,
     COMM_PAYABLE: FIELD_TYPE_NUMBER,
     COMM_COMPUTED_AT: FIELD_TYPE_DATETIME,

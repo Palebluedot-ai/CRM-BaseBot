@@ -34,8 +34,28 @@ STRANGER = "ou_stranger0000000000000000000"
 UID = "577809207768677761"
 
 
+class _StubResponse:
+    code = 0
+    msg = "ok"
+
+    def success(self) -> bool:
+        return True
+
+
 class StubLarkClient:
-    """handlers 只在发消息时用到 client，卡片回调这条路径根本不碰它。"""
+    """卡片回调走同步分支时根本不碰 client；``_submit_client`` 走异步分支后
+    需要 ``im.v1.message.create`` 推结果消息，所以这里给个最小可用的 stub，
+    把最后一次调用记下来供断言。"""
+
+    def __init__(self) -> None:
+        self.sent: list[Any] = []
+        self.im = self  # type: ignore[assignment]
+        self.v1 = self  # type: ignore[assignment]
+        self.message = self  # type: ignore[assignment]
+
+    def create(self, request: Any) -> _StubResponse:
+        self.sent.append(request)
+        return _StubResponse()
 
 
 @pytest.fixture
@@ -54,6 +74,8 @@ def handlers(fake_bitable):
         directory=SalesDirectory(fake_bitable, TBL_SALES),
         referrals=ReferralService(fake_bitable, TBL_REFERRAL, audit),
         clients=ReferredClientService(fake_bitable, TBL_CLIENT, TBL_REFERRAL, audit),
+        # 同步执行后台任务，避免线程竞态干扰断言
+        background=lambda fn: fn(),
     )
 
 

@@ -14,12 +14,20 @@ from typing import Any
 import pytest
 
 from crm_basebot.domain import schema
-from crm_basebot.lark.bitable import Record
+from crm_basebot.lark.bitable import FieldInfo, Record
 
 
 class FakeTable:
-    def __init__(self, auto_number_field: str | None = None, start_at: int = 0):
+    def __init__(
+        self,
+        auto_number_field: str | None = None,
+        start_at: int = 0,
+        primary_field: str = "文本",
+    ):
         self.auto_number_field = auto_number_field
+        # 主字段名字。真机上建表若不指定 fields，飞书会塞一个默认叫「文本」的
+        # 主字段 —— 这里跟着这个默认，测试里也能显式改。
+        self.primary_field = primary_field
         self.records: dict[str, dict[str, Any]] = {}
         self._ids = itertools.count(1)
         self._serial = itertools.count(start_at + 1)
@@ -45,9 +53,29 @@ class FakeBitable:
         # 真实 API 下 reread=True 会多一个 get_record 往返，这里如实计数，
         # 让「别在 3 秒回调里白白多读一次」这条约束能被测到。
         self.read_back_count = 0
+        # 记录 update_record 的调用，便于测试断言主字段回填的实际写入
+        self.updates: list[tuple[str, str, dict[str, Any]]] = []
 
     def table(self, table_id: str) -> FakeTable:
         return self.tables.setdefault(table_id, FakeTable())
+
+    def resolve_primary_field(self, table_id: str) -> FieldInfo:
+        primary_name = self.table(table_id).primary_field
+        return FieldInfo(
+            field_id=f"fld_primary_{table_id}",
+            name=primary_name,
+            type=1,
+            ui_type="Text",
+            is_primary=True,
+        )
+
+    def update_record(
+        self, table_id: str, record_id: str, fields: dict[str, Any]
+    ) -> Record:
+        self.updates.append((table_id, record_id, dict(fields)))
+        stored = self.table(table_id).records[record_id]
+        stored.update(fields)
+        return Record(record_id=record_id, fields=dict(stored))
 
     def iter_records(self, table_id: str, **kwargs):
         table = self.table(table_id)
@@ -84,7 +112,7 @@ TBL_REFERRAL = "tblReferral"
 TBL_CLIENT = "tblClient"
 TBL_AUDIT = "tblAudit"
 TBL_SALES = "tblSales"
-TBL_TXN = "tblTxn"
+TBL_BOARD = "tblBoard"
 TBL_COMMISSION = "tblCommission"
 
 
@@ -95,6 +123,6 @@ def fake_bitable():
     bitable.tables[TBL_CLIENT] = FakeTable()
     bitable.tables[TBL_AUDIT] = FakeTable()
     bitable.tables[TBL_SALES] = FakeTable()
-    bitable.tables[TBL_TXN] = FakeTable()
+    bitable.tables[TBL_BOARD] = FakeTable()
     bitable.tables[TBL_COMMISSION] = FakeTable()
     return bitable

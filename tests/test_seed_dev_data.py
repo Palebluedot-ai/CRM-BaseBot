@@ -81,7 +81,7 @@ def test_no_uid_looks_excel_truncated():
     all_uids = (
         [c.uid for c in seed.build_clients()]
         + list(seed.UNMAPPED_CLIENTS)
-        + [t.uid for t in seed.build_transactions()]
+        + [t.uid for t in seed.build_board_rows()]
     )
 
     for uid in all_uids:
@@ -91,7 +91,7 @@ def test_no_uid_looks_excel_truncated():
 def test_unmapped_clients_are_not_registered():
     """未登记归属的客户：出现在交易里，但不在客户表里。用来验证 reconcile 的告警。"""
     registered = {c.uid for c in seed.build_clients()}
-    traded = {t.uid for t in seed.build_transactions()}
+    traded = {t.uid for t in seed.build_board_rows()}
 
     assert seed.UNMAPPED_CLIENTS, "至少要有一个未登记归属的客户"
     for uid in seed.UNMAPPED_CLIENTS:
@@ -128,23 +128,24 @@ def test_every_client_points_at_an_existing_referral():
 # ---------- 交易明细 ----------
 
 
-def test_transactions_span_at_least_three_months():
-    periods = {t.period for t in seed.build_transactions()}
+def test_board_rows_span_at_least_three_months():
+    periods = {t.period for t in seed.build_board_rows()}
     assert len(periods) >= 3, f"只跨了 {sorted(periods)}，验证不了按月汇总"
 
 
 def test_order_time_survives_the_timestamp_round_trip():
     """日期转成毫秒时间戳后，reconcile 归的月份必须还是原来那个月。"""
-    for txn in seed.build_transactions():
+    for txn in seed.build_board_rows():
         assert period_of(seed.to_timestamp_ms(txn.order_date)) == txn.period
 
 
-def test_pnl_is_realistic_and_includes_losses():
-    pnls = [t.pnl for t in seed.build_transactions()]
+def test_revenue_is_realistic_and_includes_negatives():
+    """种子里必须有负收入（模拟退款/冲销）—— 佣金保底 0 的规则得能被触发到。"""
+    revenues = [t.revenue for t in seed.build_board_rows()]
 
-    assert any(p < 0 for p in pnls), "没有亏损单，验证不了负 Pnl 的处理"
-    assert all(100 <= abs(p) <= 10000 for p in pnls), "Pnl 量级不像真实盘口"
-    assert all(round(p, 2) != round(p) for p in pnls), "Pnl 应该带小数，整数会掩盖累加误差"
+    assert any(p < 0 for p in revenues), "没有负值行，验证不了 max(0, ...) 保底的处理"
+    assert all(100 <= abs(p) <= 10000 for p in revenues), "收入量级不像真实盘口"
+    assert all(round(p, 2) != round(p) for p in revenues), "收入应该带小数，整数会掩盖累加误差"
 
 
 def test_one_referral_month_totals_negative():
@@ -156,34 +157,34 @@ def test_one_referral_month_totals_negative():
     referral_of = {c.uid: c.referral_name for c in seed.build_clients()}
 
     totals: dict[tuple[str, str], float] = {}
-    for txn in seed.build_transactions():
+    for txn in seed.build_board_rows():
         referral_name = referral_of.get(txn.uid)
         if referral_name is None:
             continue
         key = (txn.period, referral_name)
-        totals[key] = round(totals.get(key, 0.0) + txn.pnl, 2)
+        totals[key] = round(totals.get(key, 0.0) + txn.revenue, 2)
 
     assert any(total < 0 for total in totals.values()), (
         f"没有整月为负的渠道，负 Pnl 的处理不会被暴露出来：{totals}"
     )
 
 
-def test_transaction_client_names_match_the_client_table():
+def test_board_row_client_names_match_the_client_table():
     known = {c.uid: c.name for c in seed.build_clients()} | dict(seed.UNMAPPED_CLIENTS)
-    for txn in seed.build_transactions():
-        assert txn.client_name == known[txn.uid]
+    for row in seed.build_board_rows():
+        assert row.client_name == known[row.uid]
 
 
 # ---------- --with-damaged-uid：让 Excel 损伤检测响一次 ----------
 
 
 def test_damaged_uids_are_off_by_default():
-    default_uids = {t.uid for t in seed.build_transactions()}
+    default_uids = {t.uid for t in seed.build_board_rows()}
     assert not (default_uids & set(seed.DAMAGED_UIDS)), "默认不该灌损伤 UID"
 
 
-def test_damaged_uids_are_added_only_to_transactions():
-    """损伤只发生在交易明细那条导入链路上。客户表是机器人走 API 写的，不过 Excel。
+def test_damaged_uids_are_added_only_to_board_rows():
+    """损伤只发生在看板那条导入链路上。客户表是机器人走 API 写的，不过 Excel。
 
     也因此这几个 UID 必然 join 不上客户表 —— 那正是真实的失败形态。写进客户表反而会
     凭空多出一个拿佣金的幽灵渠道。
@@ -192,10 +193,10 @@ def test_damaged_uids_are_added_only_to_transactions():
     for uid in seed.DAMAGED_UIDS:
         assert uid not in registered
 
-    damaged_txns = [
-        t for t in seed.build_transactions(with_damaged_uid=True) if t.uid in seed.DAMAGED_UIDS
+    damaged_rows = [
+        t for t in seed.build_board_rows(with_damaged_uid=True) if t.uid in seed.DAMAGED_UIDS
     ]
-    assert len(damaged_txns) == len(seed._DAMAGED_TRANSACTION_ROWS)
+    assert len(damaged_rows) == len(seed._DAMAGED_BOARD_ROWS)
 
 
 def test_every_damaged_uid_actually_trips_the_detector():
@@ -247,7 +248,7 @@ def test_damaged_batch_is_enough_to_reach_a_verdict():
 
 def test_clean_seed_data_gets_a_clean_verdict():
     """反过来也要成立：不开开关时检测必须是 clean，否则平时全是假警。"""
-    uids = [t.uid for t in seed.build_transactions()] + [c.uid for c in seed.build_clients()]
+    uids = [t.uid for t in seed.build_board_rows()] + [c.uid for c in seed.build_clients()]
 
     assert assess_uid_health(uids).verdict == "clean"
 
@@ -259,19 +260,19 @@ def test_damaged_rows_carry_the_seed_marker_so_reset_can_remove_them():
 
 def test_damaged_rows_do_not_change_the_period_range():
     """损伤数据只是加噪，不该把结算月份范围也改了。"""
-    clean = {t.period for t in seed.build_transactions()}
-    damaged = {t.period for t in seed.build_transactions(with_damaged_uid=True)}
+    clean = {t.period for t in seed.build_board_rows()}
+    damaged = {t.period for t in seed.build_board_rows(with_damaged_uid=True)}
 
     assert clean == damaged
 
 
-def test_transaction_natural_key_separates_same_day_same_client_rows():
-    """幂等靠这个键。同一天同一个客户可能有多笔，键必须分得开。"""
+def test_board_row_natural_key_separates_same_day_same_client_rows():
+    """幂等靠这个键。同一天同一个客户可能有多行（历史修正），键必须分得开。"""
     keys = [
-        seed.transaction_key(seed.to_timestamp_ms(t.order_date), t.uid, t.pnl)
-        for t in seed.build_transactions()
+        seed.board_row_key(seed.to_timestamp_ms(t.order_date), t.uid, t.revenue)
+        for t in seed.build_board_rows()
     ]
-    assert len(keys) == len(set(keys)), "交易的自然键有重复，重复跑会漏写或写重"
+    assert len(keys) == len(set(keys)), "看板的自然键有重复，重复跑会漏写或写重"
 
 
 # ---------- 销售名册 ----------
@@ -305,7 +306,7 @@ def test_every_seeded_row_carries_the_marker():
         [r.name for r in seed.build_referrals()]
         + [c.name for c in seed.build_clients()]
         + list(seed.UNMAPPED_CLIENTS.values())
-        + [t.client_name for t in seed.build_transactions()]
+        + [t.client_name for t in seed.build_board_rows()]
         + [s.name for s in seed.build_sales("ou_abc123", "陈超")]
     )
     for value in marked:
@@ -321,37 +322,41 @@ def test_is_seed_value_rejects_real_looking_data():
 
 def test_marker_fields_are_not_used_by_the_commission_calculation():
     """标记只能落在对账不读的字段上，否则等于往计算里掺假。"""
-    used_by_reconcile = set(schema.TXN_REQUIRED_FIELDS)
-    assert seed.SEED_MARKER_FIELD[schema.TABLE_TRANSACTION_NAME] not in used_by_reconcile
+    used_by_reconcile = set(schema.DAILY_BOARD_REQUIRED_FIELDS)
+    assert seed.SEED_MARKER_FIELD[schema.TABLE_DAILY_BOARD_NAME] not in used_by_reconcile
 
 
-# ---------- 模拟交易明细表的字段 ----------
+# ---------- 日读看板表的字段（sync_base.py 建，seed 只往里写） ----------
 
 
-def test_mock_transaction_table_has_every_field_of_the_real_one():
-    expected = {
-        schema.TXN_ORDER_TIME,
-        schema.TXN_ENTITY,
-        schema.TXN_CLIENT_NAME,
-        schema.TXN_CLIENT_UID,
-        schema.TXN_QUANTITY,
-        schema.TXN_PRICE,
-        schema.TXN_FEE,
-        schema.TXN_FEE_CURRENCY,
-        schema.TXN_PNL,
-    }
-    assert set(seed.MOCK_TRANSACTION_FIELDS) == expected
+def test_daily_board_schema_has_every_field_the_import_maps_to():
+    """schema.DAILY_BOARD_FIELDS 必须覆盖 import_daily_board.COLUMN_MAP 的所有目标。"""
+    # 用 importlib 而不是 import：scripts/ 不是包
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent.parent / "scripts" / "import_daily_board.py"
+    spec = importlib.util.spec_from_file_location("import_daily_board", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    mapped_targets = set(module.COLUMN_MAP.values())
+    declared = set(schema.DAILY_BOARD_FIELDS)
+    extra = mapped_targets - declared
+    assert not extra, f"COLUMN_MAP 映射到了未声明的字段：{extra}"
 
 
-def test_mock_uid_field_is_text_not_number():
+def test_board_uid_field_is_text_not_number():
     from crm_basebot.lark.bitable import FIELD_TYPE_NUMBER, FIELD_TYPE_TEXT
 
-    assert seed.MOCK_TRANSACTION_FIELDS[schema.TXN_CLIENT_UID] == FIELD_TYPE_TEXT
-    assert seed.MOCK_TRANSACTION_FIELDS[schema.TXN_CLIENT_UID] != FIELD_TYPE_NUMBER
+    assert schema.DAILY_BOARD_FIELDS[schema.BOARD_CLIENT_UID] == FIELD_TYPE_TEXT
+    assert schema.DAILY_BOARD_FIELDS[schema.BOARD_CLIENT_UID] != FIELD_TYPE_NUMBER
 
 
-def test_mock_table_satisfies_the_reconcile_schema_check():
-    """assert_fields_present 会在算钱前校验这三个字段，模拟表必须过得了。"""
+def test_board_table_satisfies_the_reconcile_schema_check():
+    """assert_fields_present 会在算钱前校验这三个字段，看板表必须过得了。"""
     from crm_basebot.lark.bitable import FieldInfo, assert_fields_present
 
     fields = [
@@ -362,9 +367,9 @@ def test_mock_table_satisfies_the_reconcile_schema_check():
             ui_type="",
             is_primary=False,
         )
-        for index, (name, type_code) in enumerate(seed.MOCK_TRANSACTION_FIELDS.items())
+        for index, (name, type_code) in enumerate(schema.DAILY_BOARD_FIELDS.items())
     ]
-    assert_fields_present(fields, schema.TXN_REQUIRED_FIELDS, table_label="模拟交易明细表")
+    assert_fields_present(fields, schema.DAILY_BOARD_REQUIRED_FIELDS, table_label="日读看板")
 
 
 # ---------- CLI 的失败路径 ----------
