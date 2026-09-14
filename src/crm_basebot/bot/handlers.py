@@ -191,9 +191,7 @@ class BotHandlers:
                 logger.exception("异步登记客户失败 open_id=%s", target_open_id)
                 self._send_to_user(
                     target_open_id,
-                    cards.error_card(
-                        "系统出错了，请稍后再试。管理员可以在服务端日志里看到详情。"
-                    ),
+                    cards.error_card("系统出错了，请稍后再试。管理员可以在服务端日志里看到详情。"),
                 )
                 return
 

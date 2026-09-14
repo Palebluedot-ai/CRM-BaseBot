@@ -80,8 +80,10 @@ def main(argv: list[str] | None = None) -> int:
 
     print()
     verb = "已写入" if args.apply else "将写入（预演）"
-    print(f"{verb} {updated} 条；跳过 {skipped} 条（已一致）；"
-          f"{empty_name_or_no} 条编号和名称均为空，未处理。")
+    print(
+        f"{verb} {updated} 条；跳过 {skipped} 条（已一致）；"
+        f"{empty_name_or_no} 条编号和名称均为空，未处理。"
+    )
 
     if updated and not args.apply:
         print("\n确认无误后加 --apply 真正执行。")

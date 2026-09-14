@@ -225,9 +225,7 @@ class ReferralService:
         try:
             self._bitable.update_record(self._table_id, record_id, {primary: title})
         except Exception:  # noqa: BLE001 - 见方法 docstring
-            logger.exception(
-                "回填渠道主字段失败 record_id=%s primary=%s", record_id, primary
-            )
+            logger.exception("回填渠道主字段失败 record_id=%s primary=%s", record_id, primary)
 
     def list_for(self, sales: Sales) -> list[tuple[str, str]]:
         """该销售名下的渠道，返回 [(编号, 名称)]。管理员看全部。"""

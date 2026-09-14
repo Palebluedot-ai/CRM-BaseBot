@@ -148,9 +148,7 @@ def test_客户份额加起来等于渠道应付(base):
     result = CommissionQueryService(base, settings=Settings()).query(alice, "2026-03")
 
     referral = result.referrals[0]
-    total_share = sum(
-        (referral.client_share(c) for c in referral.clients.values()), Decimal("0")
-    )
+    total_share = sum((referral.client_share(c) for c in referral.clients.values()), Decimal("0"))
     assert referral.payable == Decimal("200.00")  # 1000 × 20%
     assert total_share == referral.payable
 

@@ -331,9 +331,7 @@ class BitableClient:
             # 自动编号等系统字段在 create 响应里不一定回填，回读一次才拿得准
             return self.get_record(table_id, created.record_id)
 
-    def update_record(
-        self, table_id: str, record_id: str, fields: dict[str, Any]
-    ) -> Record:
+    def update_record(self, table_id: str, record_id: str, fields: dict[str, Any]) -> Record:
         """更新已有记录的部分字段。fields 里没提到的字段不动。
 
         用于回填历史数据（比如给老渠道记录补上主字段值），机器人日常业务是不改
@@ -354,9 +352,7 @@ class BitableClient:
             data = _check(response, f"更新记录 record_id={record_id}")
             updated = data.record
             if updated is None or not updated.record_id:
-                raise BitableError(
-                    f"更新记录 record_id={record_id} 成功但没拿到 record"
-                )
+                raise BitableError(f"更新记录 record_id={record_id} 成功但没拿到 record")
             return Record(record_id=updated.record_id, fields=updated.fields or {})
 
     def delete_record(self, table_id: str, record_id: str) -> None:

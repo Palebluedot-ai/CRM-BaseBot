@@ -107,9 +107,7 @@ def _load_workbook(path: Path):
     try:
         from openpyxl import load_workbook
     except ImportError as exc:
-        raise BoardImportError(
-            "缺 openpyxl，先跑 `uv sync` 装齐依赖再试。"
-        ) from exc
+        raise BoardImportError("缺 openpyxl，先跑 `uv sync` 装齐依赖再试。") from exc
 
     if not path.exists():
         raise BoardImportError(f"找不到文件：{path}")
@@ -198,9 +196,7 @@ def _cell_to_number(value: Any, field_name: str, *, row_num: int) -> float | Non
         try:
             return float(stripped)
         except ValueError as exc:
-            raise BoardImportError(
-                f"第 {row_num} 行的「{field_name}」不是数字：{value!r}"
-            ) from exc
+            raise BoardImportError(f"第 {row_num} 行的「{field_name}」不是数字：{value!r}") from exc
     raise BoardImportError(f"第 {row_num} 行的「{field_name}」无法转数字：{value!r}")
 
 

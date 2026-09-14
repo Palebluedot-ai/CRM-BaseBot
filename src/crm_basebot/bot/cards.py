@@ -214,8 +214,7 @@ def referral_list_card(items: list[tuple[str, str]]) -> dict[str, Any]:
     # 名字为空时留一个占位（比如 R006 是在 Base 里直接建的、渠道名称字段没填），
     # 避免渲染成「- **R006** 」这种末尾一个空格、看着像 bug 的行。
     lines = "\n".join(
-        f"- **{no}** {name if name else '（未命名，建议到 Base 里补齐）'}"
-        for no, name in items
+        f"- **{no}** {name if name else '（未命名，建议到 Base 里补齐）'}" for no, name in items
     )
     return notice_card("我的渠道", f"共 {len(items)} 个：\n\n{lines}", template="blue")
 

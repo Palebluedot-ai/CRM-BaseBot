@@ -73,9 +73,7 @@ class FakeBitable:
             is_primary=True,
         )
 
-    def update_record(
-        self, table_id: str, record_id: str, fields: dict[str, Any]
-    ) -> Record:
+    def update_record(self, table_id: str, record_id: str, fields: dict[str, Any]) -> Record:
         self.updates.append((table_id, record_id, dict(fields)))
         stored = self.table(table_id).records[record_id]
         stored.update(fields)

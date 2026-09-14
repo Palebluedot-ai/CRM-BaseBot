@@ -141,7 +141,7 @@ class SeedBoardRow:
     order_date: str
     uid: str
     client_name: str
-    revenue: float          # 总收入(opt+现货) —— 佣金基数
+    revenue: float  # 总收入(opt+现货) —— 佣金基数
     station: str
     sales_group: str
     sales_name: str

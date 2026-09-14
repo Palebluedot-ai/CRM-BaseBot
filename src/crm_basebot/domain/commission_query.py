@@ -276,9 +276,7 @@ def summarize(result: QueryResult, *, viewer_name: str) -> str:
             )
 
         # 客户按贡献从大到小；负贡献放最后，一眼看得出是谁把这个渠道拉负了
-        clients_sorted = sorted(
-            ref.clients.values(), key=lambda c: c.revenue, reverse=True
-        )
+        clients_sorted = sorted(ref.clients.values(), key=lambda c: c.revenue, reverse=True)
         for client in clients_sorted:
             share = ref.client_share(client)
             name = client.name or "(未命名客户)"
