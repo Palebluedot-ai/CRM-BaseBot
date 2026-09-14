@@ -14,11 +14,14 @@ import importlib.util
 import sys
 from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 from openpyxl import Workbook
 
 from crm_basebot.domain import schema
+
+from .conftest import TBL_BOARD
 
 
 def _load_module():
@@ -219,3 +222,62 @@ def test_中文表头也认(tmp_path):
     rows = importer.parse_workbook(path)
     assert len(rows) == 1
     assert rows[0].fields[schema.BOARD_CLIENT_UID] == "577809207768677761"
+
+
+# ---------- 写进 Base 的日期，以及先删后写认不认界面里填的日期 ----------
+
+SGT = ZoneInfo("Asia/Singapore")
+UID_X = "577809207768677761"
+
+
+def _board_row(day: date, uid: str = UID_X) -> importer.BoardRow:
+    return importer.BoardRow(
+        order_date=day,
+        fields={
+            schema.BOARD_CLIENT_UID: uid,
+            schema.BOARD_ORDER_DATE: day,
+            schema.BOARD_TOTAL_REVENUE: 100.0,
+        },
+    )
+
+
+def _sgt_midnight_ms(day: date) -> int:
+    return int(datetime(day.year, day.month, day.day, tzinfo=SGT).timestamp() * 1000)
+
+
+def test_交易日期写成业务时区那天的零点(fake_bitable):
+    importer._apply(fake_bitable, TBL_BOARD, [_board_row(date(2026, 9, 10))], tz=SGT)
+
+    (record,) = fake_bitable.tables[TBL_BOARD].records.values()
+    assert record[schema.BOARD_ORDER_DATE] == _sgt_midnight_ms(date(2026, 9, 10))
+
+
+def test_先删后写认得界面里手工填的日期(fake_bitable):
+    """Base 界面里填「9 月 10 日」存的是新加坡零点。按 UTC 取日期它是 9 月 9 日，
+    重导 9 月 10 日时就删不掉它，表里会留下两份。"""
+    stale = fake_bitable.tables[TBL_BOARD].add_existing(
+        {
+            schema.BOARD_ORDER_DATE: _sgt_midnight_ms(date(2026, 9, 10)),
+            schema.BOARD_CLIENT_UID: UID_X,
+        }
+    )
+
+    deleted, written = importer._apply(
+        fake_bitable, TBL_BOARD, [_board_row(date(2026, 9, 10))], tz=SGT
+    )
+
+    assert (deleted, written) == (1, 1)
+    assert stale not in fake_bitable.tables[TBL_BOARD].records
+
+
+def test_先删后写只碰涉及的日期(fake_bitable):
+    kept = fake_bitable.tables[TBL_BOARD].add_existing(
+        {
+            schema.BOARD_ORDER_DATE: _sgt_midnight_ms(date(2026, 9, 9)),
+            schema.BOARD_CLIENT_UID: UID_X,
+        }
+    )
+
+    importer._apply(fake_bitable, TBL_BOARD, [_board_row(date(2026, 9, 10))], tz=SGT)
+
+    assert kept in fake_bitable.tables[TBL_BOARD].records

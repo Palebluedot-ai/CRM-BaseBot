@@ -66,9 +66,10 @@ from __future__ import annotations
 import argparse
 import sys
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, tzinfo
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -78,6 +79,7 @@ from crm_basebot.domain.audit import (  # noqa: E402
     ACTION_CREATE_REFERRAL,
     AuditLog,
 )
+from crm_basebot.domain.dates import date_to_ms  # noqa: E402
 from crm_basebot.lark.bitable import BitableClient, Record  # noqa: E402
 from crm_basebot.lark.values import extract_text, to_number, to_uid  # noqa: E402
 from crm_basebot.startup import load_settings, require_settings  # noqa: E402
@@ -419,13 +421,13 @@ def build_sales(open_id: str | None, admin_name: str) -> list[SeedSales]:
     return rows
 
 
-def to_timestamp_ms(order_date: str) -> int:
+def to_timestamp_ms(order_date: str, *, tz: tzinfo) -> int:
     """'2026-01-06' -> Bitable 日期字段要的毫秒时间戳。
 
-    按 UTC 零点算，也就是新加坡时间早上 8 点。所有日期都避开了月初月末，换成任何
-    业务时区归月都不会挪到隔壁月份。
+    取业务时区那天的零点，和 scripts/import_daily_board.py 同一约定，界面里看到的就是
+    那一天 0:00。所有日期都避开了月初月末，换任何时区归月都不会挪到隔壁月份。
     """
-    return int(datetime.strptime(order_date, "%Y-%m-%d").replace(tzinfo=UTC).timestamp() * 1000)
+    return date_to_ms(datetime.strptime(order_date, "%Y-%m-%d").date(), tz=tz)
 
 
 def is_seed_value(value: Any) -> bool:
@@ -621,6 +623,7 @@ def _seed_board_rows(
     scan: TableScan,
     *,
     apply: bool,
+    tz: tzinfo,
     with_damaged_uid: bool = False,
 ) -> tuple[int, int]:
     existing = {
@@ -634,7 +637,7 @@ def _seed_board_rows(
     created = skipped = 0
 
     for row in build_board_rows(with_damaged_uid=with_damaged_uid):
-        order_ms = to_timestamp_ms(row.order_date)
+        order_ms = to_timestamp_ms(row.order_date, tz=tz)
         if board_row_key(order_ms, row.uid, row.revenue) in existing:
             skipped += 1
             continue
@@ -814,6 +817,7 @@ def main(argv: list[str] | None = None) -> int:
 
     bitable = BitableClient(settings.base_app_token)
     apply = args.confirmed
+    tz = ZoneInfo(settings.business_timezone)
 
     print(f"目标 Base: {settings.base_app_token}")
     print("模式：真正写入" if apply else "模式：预演（不写任何东西）")
@@ -890,6 +894,7 @@ def main(argv: list[str] | None = None) -> int:
         bitable,
         scans[schema.TABLE_DAILY_BOARD_NAME],
         apply=apply,
+        tz=tz,
         with_damaged_uid=args.with_damaged_uid,
     )
     results.append((schema.TABLE_DAILY_BOARD_NAME, created, skipped))

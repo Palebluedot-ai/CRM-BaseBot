@@ -143,7 +143,19 @@ def test_board_rows_span_at_least_three_months():
 def test_order_time_survives_the_timestamp_round_trip():
     """日期转成毫秒时间戳后，reconcile 归的月份必须还是原来那个月。"""
     for txn in seed.build_board_rows():
-        assert period_of(seed.to_timestamp_ms(txn.order_date), tz=BUSINESS_TZ) == txn.period
+        assert (
+            period_of(seed.to_timestamp_ms(txn.order_date, tz=BUSINESS_TZ), tz=BUSINESS_TZ)
+            == txn.period
+        )
+
+
+def test_seed_dates_are_business_timezone_midnight():
+    """和导入脚本同一约定：交易日期写成业务时区那天的零点，界面里看到的就是那一天 0:00。"""
+    from datetime import datetime
+
+    ms = seed.to_timestamp_ms("2026-01-06", tz=BUSINESS_TZ)
+    local = datetime.fromtimestamp(ms / 1000, tz=BUSINESS_TZ)
+    assert (local.year, local.month, local.day, local.hour, local.minute) == (2026, 1, 6, 0, 0)
 
 
 def test_revenue_is_realistic_and_includes_negatives():
@@ -276,7 +288,7 @@ def test_damaged_rows_do_not_change_the_period_range():
 def test_board_row_natural_key_separates_same_day_same_client_rows():
     """幂等靠这个键。同一天同一个客户可能有多行（历史修正），键必须分得开。"""
     keys = [
-        seed.board_row_key(seed.to_timestamp_ms(t.order_date), t.uid, t.revenue)
+        seed.board_row_key(seed.to_timestamp_ms(t.order_date, tz=BUSINESS_TZ), t.uid, t.revenue)
         for t in seed.build_board_rows()
     ]
     assert len(keys) == len(set(keys)), "看板的自然键有重复，重复跑会漏写或写重"

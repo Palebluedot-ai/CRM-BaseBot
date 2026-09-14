@@ -23,6 +23,12 @@ xlsx 底层是每个单元格保留原生类型和显示格式。只要「user_i
 同一天可能只有一行，也可能有多行的历史修正），按行 upsert 会漏改重复。按日期
 批量替换是最简单也最安全的语义。
 
+## 日期按业务时区
+
+看板里的「交易日期」是新加坡的日历日。写进 Base 时取 BUSINESS_TIMEZONE 那一天的零点，
+先删后写也按这个时区取日期，界面里看到的就是那一天 0:00。按 UTC 算的话，界面里手工填的
+日期会被算成前一天，重导时删不掉它。
+
 ## 用法
 
     uv run python scripts/import_daily_board.py                # 用 .env 的默认路径全量导
@@ -42,13 +48,15 @@ import logging
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import date, datetime, tzinfo
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from crm_basebot.domain import schema  # noqa: E402
+from crm_basebot.domain.dates import date_to_ms, ms_to_date  # noqa: E402
 from crm_basebot.lark.bitable import BitableClient  # noqa: E402
 from crm_basebot.lark.values import PrecisionLossError, extract_text, to_uid  # noqa: E402
 from crm_basebot.startup import load_settings, require_settings  # noqa: E402
@@ -248,26 +256,31 @@ def parse_workbook(path: Path, *, only_date: date | None = None) -> list[BoardRo
     return rows
 
 
-def _to_timestamp_ms(d: date) -> int:
-    """交易日期按 UTC 零点存成毫秒时间戳（Bitable 日期字段要求）。"""
-    return int(datetime(d.year, d.month, d.day, tzinfo=UTC).timestamp() * 1000)
+def _existing_by_date(
+    bitable: BitableClient, table_id: str, *, tz: tzinfo
+) -> dict[date, list[str]]:
+    """扫一遍 Base 表，按交易日期分组 record_id，供「先删」阶段用。
 
-
-def _existing_by_date(bitable: BitableClient, table_id: str) -> dict[date, list[str]]:
-    """扫一遍 Base 表，按交易日期分组 record_id，供「先删」阶段用。"""
+    日期按业务时区取：界面里手工填的「9 月 10 日」是新加坡零点，按 UTC 取会成 9 月 9 日，
+    重导 9 月 10 日时就删不掉它。
+    """
     grouped: dict[date, list[str]] = defaultdict(list)
     for record in bitable.iter_records(table_id, field_names=[schema.BOARD_ORDER_DATE]):
         raw = record.fields.get(schema.BOARD_ORDER_DATE)
         if isinstance(raw, int | float) and not isinstance(raw, bool):
-            d = datetime.fromtimestamp(float(raw) / 1000, tz=UTC).date()
-            grouped[d].append(record.record_id)
+            grouped[ms_to_date(raw, tz=tz)].append(record.record_id)
     return grouped
 
 
-def _apply(bitable: BitableClient, table_id: str, rows: list[BoardRow]) -> tuple[int, int]:
-    """先删涉及日期的旧记录，再写新记录。返回 (删除数, 写入数)。"""
+def _apply(
+    bitable: BitableClient, table_id: str, rows: list[BoardRow], *, tz: tzinfo
+) -> tuple[int, int]:
+    """先删涉及日期的旧记录，再写新记录。返回 (删除数, 写入数)。
+
+    ``tz`` 是业务时区：交易日期写成那一天在业务时区的零点，删旧行也按同一时区取日期。
+    """
     affected_dates = {r.order_date for r in rows}
-    existing = _existing_by_date(bitable, table_id)
+    existing = _existing_by_date(bitable, table_id, tz=tz)
 
     deleted = 0
     for d in affected_dates:
@@ -278,7 +291,7 @@ def _apply(bitable: BitableClient, table_id: str, rows: list[BoardRow]) -> tuple
     written = 0
     for row in rows:
         payload = dict(row.fields)
-        payload[schema.BOARD_ORDER_DATE] = _to_timestamp_ms(row.order_date)
+        payload[schema.BOARD_ORDER_DATE] = date_to_ms(row.order_date, tz=tz)
         # 汇总类表没有需要读回来的系统字段，不用 reread 省一个往返
         bitable.create_record(table_id, payload, reread=False)
         written += 1
@@ -351,7 +364,9 @@ def main(argv: list[str] | None = None) -> int:
 
     bitable = BitableClient(settings.base_app_token)
     print("\n先删涉及日期的旧记录，再写新记录…")
-    deleted, written = _apply(bitable, settings.table_daily_board, rows)
+    tz = ZoneInfo(settings.business_timezone)
+    print(f"交易日期按 {settings.business_timezone} 的零点写入。")
+    deleted, written = _apply(bitable, settings.table_daily_board, rows, tz=tz)
     print(f"删除 {deleted} 条，写入 {written} 条。")
     return 0
 
