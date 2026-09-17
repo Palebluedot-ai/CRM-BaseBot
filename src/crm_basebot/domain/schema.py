@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 from ..lark.bitable import (
-    FIELD_TYPE_AUTO_NUMBER,
     FIELD_TYPE_DATETIME,
     FIELD_TYPE_NUMBER,
     FIELD_TYPE_SINGLE_LINK,
@@ -19,15 +18,23 @@ from ..lark.bitable import (
 )
 
 # ---------- 表 1：渠道登记 ----------
+#
+# 列对齐 2026-09-17 给的模板「Referral Registration」：Referral Code、Name、Email、
+# Start Date、Commission Rate、Payout Frequency、Submitted On、Sales In Charge。
+# 模板里没有的地址、收款信息先留着，机器人的登记表单还在收这两项。
 
 TABLE_REFERRAL_NAME = "Referral Information"
 
-REFERRAL_NO = "渠道编号"
-REFERRAL_NAME = "渠道名称"
-REFERRAL_EMAIL = "邮箱"
+REFERRAL_NO = "渠道编号"  # Referral Code
+REFERRAL_NAME = "渠道名称"  # Name
+REFERRAL_EMAIL = "邮箱"  # Email
 REFERRAL_ADDRESS = "地址"
 REFERRAL_PAYMENT = "收款信息"
-REFERRAL_RATE = "分佣比例"
+REFERRAL_START_DATE = "开始日期"  # Start Date
+REFERRAL_RATE = "分佣比例"  # Commission Rate，百分数，20 表示 20%
+REFERRAL_PAYOUT = "结算频率"  # Payout Frequency：Monthly / Quarterly
+REFERRAL_SUBMITTED_ON = "提交日期"  # Submitted On
+REFERRAL_SALES_NAME = "负责销售"  # Sales In Charge，姓名。OpenID 补上之前先靠它对人
 REFERRAL_OWNER = "归属销售"
 REFERRAL_OWNER_OPEN_ID = "登记人OpenID"
 REFERRAL_STATUS = "状态"
@@ -38,18 +45,25 @@ STATUS_ACTIVE = "生效"
 STATUS_DISABLED = "停用"
 
 REFERRAL_FIELDS: dict[str, int] = {
-    REFERRAL_NO: FIELD_TYPE_AUTO_NUMBER,
+    # 文本，不是自动编号：现成的 R001-R101 是从模板导进来的，自动编号列写不进去。
+    # 机器人新登记时读最大号 +1，在写锁的临界区里串行，不会撞号（2026-09-17 定的）。
+    REFERRAL_NO: FIELD_TYPE_TEXT,
     REFERRAL_NAME: FIELD_TYPE_TEXT,
     REFERRAL_EMAIL: FIELD_TYPE_TEXT,
     REFERRAL_ADDRESS: FIELD_TYPE_TEXT,
     REFERRAL_PAYMENT: FIELD_TYPE_TEXT,
+    REFERRAL_START_DATE: FIELD_TYPE_DATETIME,
     REFERRAL_RATE: FIELD_TYPE_NUMBER,
+    REFERRAL_PAYOUT: FIELD_TYPE_SINGLE_SELECT,
+    REFERRAL_SUBMITTED_ON: FIELD_TYPE_DATETIME,
+    REFERRAL_SALES_NAME: FIELD_TYPE_TEXT,
     REFERRAL_OWNER: FIELD_TYPE_USER,
     REFERRAL_OWNER_OPEN_ID: FIELD_TYPE_TEXT,
     REFERRAL_STATUS: FIELD_TYPE_SINGLE_SELECT,
 }
 
-# R + 3 位自增数字。递增由飞书系统保证，多个销售同时提交也不会撞号。
+# R + 3 位自增的自动编号规则。渠道编号已经改成文本列，这条规则不再用于建表，
+# 留着是给 sync_base 的建字段函数和它的测试用。
 REFERRAL_NO_AUTO_SERIAL = {
     "type": "custom",
     "options": [
@@ -59,12 +73,16 @@ REFERRAL_NO_AUTO_SERIAL = {
 }
 
 # ---------- 表 2：渠道介绍的客户 ----------
+#
+# 列对齐模板「Referred Clients」：Referral Code、Client Name、UID、Sales In Charge。
+# 模板里的 Name of Referral 不单独存，关联字段会显示渠道表的主字段「R001 名称」。
 
 TABLE_CLIENT_NAME = "Referred Client"
 
-CLIENT_UID = "客户UID"
-CLIENT_NAME = "客户名称"
-CLIENT_REFERRAL_LINK = "所属渠道"
+CLIENT_UID = "客户UID"  # UID
+CLIENT_NAME = "客户名称"  # Client Name
+CLIENT_REFERRAL_LINK = "所属渠道"  # Referral Code，存成指向渠道表的关联
+CLIENT_SALES_NAME = "负责销售"  # Sales In Charge，姓名
 CLIENT_OWNER = "归属销售"
 CLIENT_OWNER_OPEN_ID = "登记人OpenID"
 
@@ -73,6 +91,7 @@ CLIENT_FIELDS: dict[str, int] = {
     CLIENT_UID: FIELD_TYPE_TEXT,
     CLIENT_NAME: FIELD_TYPE_TEXT,
     CLIENT_REFERRAL_LINK: FIELD_TYPE_SINGLE_LINK,
+    CLIENT_SALES_NAME: FIELD_TYPE_TEXT,
     CLIENT_OWNER: FIELD_TYPE_USER,
     CLIENT_OWNER_OPEN_ID: FIELD_TYPE_TEXT,
 }

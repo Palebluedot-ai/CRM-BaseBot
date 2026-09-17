@@ -119,14 +119,17 @@ def _is_json_native(value: Any) -> bool:
 
 
 def test_只读字段从不出现在写入_payload_里(written):
-    """自动编号、公式、查找引用这类字段由系统维护，写进去接口会拒绝整条记录。"""
+    """自动编号、公式、查找引用这类字段由系统维护，写进去接口会拒绝整条记录。
+
+    渠道编号 2026-09-17 起改成了文本列，现在六张表都没有只读字段；这条守的是以后
+    有人给哪张表加了公式或查找引用列，写入代码别把它带上。
+    """
     for table_id, payloads in written.items():
         read_only = {
             name
             for name, type_code in DECLARED_FIELDS[table_id].items()
             if type_code in READ_ONLY_FIELD_TYPES
         }
-        assert read_only or table_id != TBL_REFERRAL, "渠道表本来就该有只读的自动编号字段"
         for fields in payloads:
             assert not (read_only & set(fields)), f"{table_id} 的写入里混进了只读字段"
 

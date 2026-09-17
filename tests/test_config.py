@@ -31,8 +31,10 @@ def _settings(**overrides):
     return Settings(_env_file=None, **base)
 
 
-def test_编号开关默认打开():
-    assert _settings().referral_auto_number is True
+def test_编号开关默认关闭():
+    """渠道编号是文本列：真实数据的 R001-R101 是现成的，自动编号列写不进去，
+    机器人接着从最大号 +1 往下编（2026-09-17 定的）。"""
+    assert _settings().referral_auto_number is False
 
 
 @pytest.mark.parametrize("raw,expected", [("false", False), ("true", True)])

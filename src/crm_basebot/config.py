@@ -34,10 +34,10 @@ class Settings(BaseSettings):
     domain: str = Field(default="https://open.feishu.cn", alias="LARK_DOMAIN")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
-    # 渠道编号是否交给 Bitable 的自动编号字段生成。
-    # 关掉就走后端串行递增（读最大号 +1，在写锁的临界区内）。
-    # 用 scripts/verify_numbering.py --probe 实测后决定，改这里不用改代码。
-    referral_auto_number: bool = Field(default=True, alias="REFERRAL_AUTO_NUMBER")
+    # 渠道编号默认由后端串行递增：读最大号 +1，在写锁的临界区内。
+    # 渠道编号是文本列，现成的 R001-R101 从模板导入（2026-09-17 定的）。只有把那一列
+    # 重建成 Bitable 的自动编号字段时才改成 true，改之前用 scripts/verify_numbering.py 实测。
+    referral_auto_number: bool = Field(default=False, alias="REFERRAL_AUTO_NUMBER")
 
     # 对账把交易归到哪个月，按这个时区算。Bitable 日期字段存的是 UTC 毫秒时间戳，
     # 直接按 UTC 取月份的话，本地每个月 1 号 0 点到 8 点的交易会掉进上个月。

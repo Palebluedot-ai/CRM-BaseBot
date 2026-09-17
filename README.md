@@ -37,6 +37,7 @@ uv run python scripts/sync_base.py --apply  # 执行
 uv run python scripts/seed_dev_data.py --open-id ou_xxx   # 预演种子数据
 uv run python scripts/seed_dev_data.py --open-id ou_xxx --yes-this-is-a-dev-base
 uv run python scripts/verify_numbering.py --probe   # 实测 R+3 位编号
+uv run python scripts/import_registrations.py --file "Template .xlsx"        # 渠道和客户从模板导入，先预演，加 --apply 真写
 uv run python scripts/import_daily_board.py --file 交易明细.xlsx --dry-run   # 生产：导入内部系统导出的交易明细，先预演
 uv run python -m crm_basebot.app            # 启动机器人
 ```

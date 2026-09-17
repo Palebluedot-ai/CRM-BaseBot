@@ -81,6 +81,7 @@ from crm_basebot.domain.audit import (  # noqa: E402
     AuditLog,
 )
 from crm_basebot.domain.dates import date_to_ms  # noqa: E402
+from crm_basebot.domain.referral import format_referral_no  # noqa: E402
 from crm_basebot.lark.bitable import BitableClient, Record  # noqa: E402
 from crm_basebot.lark.values import extract_text, to_number, to_uid  # noqa: E402
 from crm_basebot.startup import load_settings, require_settings  # noqa: E402
@@ -628,7 +629,7 @@ def _seed_referrals(
     existing = {extract_text(r.fields.get(schema.REFERRAL_NAME)) for r in scan.seed_records}
     created = skipped = 0
 
-    for referral in build_referrals():
+    for index, referral in enumerate(build_referrals(), start=1):
         if referral.name in existing:
             skipped += 1
             continue
@@ -645,7 +646,8 @@ def _seed_referrals(
             schema.REFERRAL_RATE: referral.rate_percent,
             schema.REFERRAL_STATUS: referral.status,
         }
-        # 渠道编号是自动编号字段，服务端生成，写进去会被拒
+        # 渠道编号是文本列，种子按顺序自己编
+        fields[schema.REFERRAL_NO] = format_referral_no(index)
         fields.update(_owner_fields(open_id, schema.REFERRAL_OWNER, schema.REFERRAL_OWNER_OPEN_ID))
         bitable.create_record(scan.table_id, fields)
 
