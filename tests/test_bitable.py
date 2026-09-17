@@ -18,6 +18,8 @@ from typing import Any
 
 import pytest
 from lark_oapi.api.bitable.v1 import (
+    BatchCreateAppTableRecordResponse,
+    BatchDeleteAppTableRecordResponse,
     CreateAppTableRecordResponse,
     DeleteAppTableRecordResponse,
     GetAppTableRecordResponse,
@@ -52,6 +54,8 @@ class FakeEndpoint:
     get = _next
     create = _next
     delete = _next
+    batch_create = _next
+    batch_delete = _next
 
 
 class FakeSdkClient:
@@ -313,3 +317,70 @@ def test_删除不因为没有_data_体而判失败():
 def test_空_app_token_立刻报错():
     with pytest.raises(ValueError, match="app_token"):
         BitableClient("", client=FakeSdkClient())
+
+
+# ---------- 批量写 ----------
+
+
+def _batch_created(count: int):
+    records = [{"record_id": f"rec{i}", "fields": {}} for i in range(count)]
+    return BatchCreateAppTableRecordResponse({"code": 0, "data": {"records": records}})
+
+
+def _batch_deleted(results: list[tuple[str, bool]]):
+    records = [{"record_id": record_id, "deleted": ok} for record_id, ok in results]
+    return BatchDeleteAppTableRecordResponse({"code": 0, "data": {"records": records}})
+
+
+def test_批量新增按500条一批发出去():
+    endpoint = FakeEndpoint([_batch_created(500), _batch_created(500), _batch_created(201)])
+    records = [{"用户ID": f"57780920776867{i:04d}"} for i in range(1201)]
+
+    written = client(app_table_record=endpoint).batch_create_records(TABLE_ID, records)
+
+    assert written == 1201
+    assert [len(r.request_body.records) for r in endpoint.requests] == [500, 500, 201]
+    assert endpoint.requests[0].request_body.records[0].fields == records[0]
+    assert endpoint.requests[2].request_body.records[-1].fields == records[-1]
+
+
+def test_批量新增回来的条数对不上时报错():
+    endpoint = FakeEndpoint([_batch_created(499)])
+
+    with pytest.raises(BitableError, match="500"):
+        client(app_table_record=endpoint).batch_create_records(
+            TABLE_ID, [{"n": i} for i in range(500)]
+        )
+
+
+def test_批量删除按500条一批并带上record_id():
+    ids = [f"rec{i}" for i in range(501)]
+    endpoint = FakeEndpoint(
+        [_batch_deleted([(i, True) for i in ids[:500]]), _batch_deleted([(ids[500], True)])]
+    )
+
+    deleted = client(app_table_record=endpoint).batch_delete_records(TABLE_ID, ids)
+
+    assert deleted == 501
+    assert [r.request_body.records for r in endpoint.requests] == [ids[:500], ids[500:]]
+
+
+def test_批量删除有记录没删掉时报错并点名():
+    endpoint = FakeEndpoint([_batch_deleted([("rec1", True), ("rec2", False)])])
+
+    with pytest.raises(BitableError, match="rec2"):
+        client(app_table_record=endpoint).batch_delete_records(TABLE_ID, ["rec1", "rec2"])
+
+
+def test_批量写空列表不发请求():
+    endpoint = FakeEndpoint([])
+    bitable = client(app_table_record=endpoint)
+
+    assert bitable.batch_create_records(TABLE_ID, []) == 0
+    assert bitable.batch_delete_records(TABLE_ID, []) == 0
+    assert endpoint.requests == []
+
+
+def test_批大小超过上限在本地就被拦下():
+    with pytest.raises(ValueError, match="500"):
+        client().batch_create_records(TABLE_ID, [{}], batch_size=501)

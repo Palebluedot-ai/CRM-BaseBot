@@ -1,16 +1,19 @@
 """日读看板 xlsx 导入的核心约束。
 
-三件事一旦破了，佣金就会算错，且**在看板还没进 Base 之前**就错了 —— 下游没有
-任何机会修复：
+看板 xlsx 是佣金的唯一数据来源。这里的约束一旦破了，钱在进 Base 之前就算错了，
+下游没有机会修复：
 
-1. **user_id 遇到浮点数必须报错**。18-19 位 UID 一过 float，低位就没了。
-2. **表头映射覆盖必填字段**。少一个必填列直接拒绝，而不是继续按空值算钱。
-3. **交易日期 + 总收入 缺一不可**。缺任何一个的行会被跳过而不是当 0 算。
+1. **表头逐字以真实导出为准**。2026-09-17 那份「OTC组销售明细」的 18 列表头就是
+   合同，缺一列直接拒绝，而不是拿着空值往下算。
+2. **用户ID 遇到浮点数必须报错**。18-19 位的用户ID 一过 float，低位就没了。
+3. **用户ID、交易日期、总收入缺一不可**。缺了的行跳过；总收入是 0 不算缺。
+4. **一次写一批**。一行一个请求的话，1.2 万行会吃光免费版的月度调用额度。
 """
 
 from __future__ import annotations
 
 import importlib.util
+import logging
 import sys
 from datetime import date, datetime
 from pathlib import Path
@@ -36,12 +39,64 @@ def _load_module():
 
 importer = _load_module()
 
+# 2026-09-17 内部系统导出的「OTC组销售明细」xlsx 表头，逐字照抄，顺序也照抄。
+# 故意写成字面量而不是从 schema 读：schema 被改错了，这里要能红。
+REAL_HEADERS = [
+    "站点",
+    "用户ID",
+    "交易日期",
+    "销售",
+    "客户名称",
+    "KYC日期",
+    "销售分组",
+    "用户类型",
+    "现货手续费_剔除做市商",
+    "现货交易额_剔除做市商",
+    "合约手续费_剔除做市商",
+    "合约交易额_剔除做市商",
+    "opt手续费",
+    "opt_pnl",
+    "opt收入",
+    "opt交易额",
+    "总收入(opt+现货+合约)",
+    "总交易额(opt+现货+合约)",
+]
 
-def _make_xlsx(tmp_path, headers, rows) -> Path:
-    """造一个 xlsx。headers 是表头行，rows 是数据行的 tuple 列表。"""
+# 一行和真实导出同形态的数据：日期是文本，没发生的金额是字符串 "0"。值是编的。
+BASE_ROW = {
+    "站点": "新加坡站",
+    "用户ID": "577809207768677761",
+    "交易日期": "2026-09-10",
+    "销售": "测试销售",
+    "客户名称": "PLUTO STUDIO LIMITED",
+    "KYC日期": "2025-03-02",
+    "销售分组": "SG组",
+    "用户类型": "平台介绍客户",
+    "现货手续费_剔除做市商": 372.17,
+    "现货交易额_剔除做市商": 465212.5,
+    "合约手续费_剔除做市商": "0",
+    "合约交易额_剔除做市商": "0",
+    "opt手续费": "0",
+    "opt_pnl": 868.38,
+    "opt收入": 868.38,
+    "opt交易额": "0",
+    "总收入(opt+现货+合约)": 1240.55,
+    "总交易额(opt+现货+合约)": 465212.5,
+}
+
+SGT = ZoneInfo("Asia/Singapore")
+UID_X = "577809207768677761"
+
+
+def _row(headers=REAL_HEADERS, overrides=None) -> list:
+    values = {**BASE_ROW, **(overrides or {})}
+    return [values.get(h) for h in headers]
+
+
+def _make_xlsx(tmp_path, rows, headers=REAL_HEADERS) -> Path:
     wb = Workbook()
     ws = wb.active
-    ws.append(headers)
+    ws.append(list(headers))
     for row in rows:
         ws.append(row)
     path = tmp_path / "board.xlsx"
@@ -49,185 +104,201 @@ def _make_xlsx(tmp_path, headers, rows) -> Path:
     return path
 
 
-# ---------- 表头映射 ----------
+# ---------- 表头 ----------
 
 
-def test_识别中英文混合的表头(tmp_path):
-    """看板 xlsx 的表头就是 user_id / client_name 这种英中混合，导入脚本必须认。"""
-    path = _make_xlsx(
-        tmp_path,
-        [
-            "站点",
-            "user_id",
-            "client_name",
-            "销售分组",
-            "销售",
-            "交易日期",
-            "总收入（opt+现货）",
-            "opt手续费",
-            "现货手续费剔除做市商",
-            "opt_pnl",
-        ],
-        [
-            (
-                "HashKey SG",
-                "577809207768677761",
-                "PLUTO",
-                "机构组A",
-                "王小明",
-                date(2026, 9, 10),
-                1234.56,
-                0.5,
-                0.3,
-                400.0,
-            ),
-        ],
-    )
-
-    rows = importer.parse_workbook(path)
-
-    assert len(rows) == 1
-    fields = rows[0].fields
-    assert fields[schema.BOARD_CLIENT_UID] == "577809207768677761"
-    assert fields[schema.BOARD_CLIENT_NAME] == "PLUTO"
-    assert fields[schema.BOARD_TOTAL_REVENUE] == 1234.56
+def test_看板字段和真实导出的表头逐字一致():
+    """Base 里的列就是 Excel 的列，名字和顺序都一样，拿着 Excel 能在 Base 里找到同一列。"""
+    assert list(schema.DAILY_BOARD_FIELDS) == REAL_HEADERS
 
 
-def test_缺必填列直接报错(tmp_path):
-    """user_id 少了下游没法算 —— 让脚本在导入前就炸。"""
-    path = _make_xlsx(
-        tmp_path,
-        ["站点", "client_name", "交易日期", "总收入（opt+现货）"],
-        [("HashKey", "X", date(2026, 9, 10), 100.0)],
-    )
+def test_导入脚本认的表头就是看板的列():
+    assert list(importer.EXPECTED_HEADERS) == REAL_HEADERS
 
-    with pytest.raises(importer.BoardImportError, match="必填列"):
+
+def test_缺任何一列都拒绝导入并点名缺的列(tmp_path):
+    headers = [h for h in REAL_HEADERS if h != "用户类型"]
+    path = _make_xlsx(tmp_path, [_row(headers)], headers=headers)
+
+    with pytest.raises(importer.BoardImportError, match="用户类型"):
         importer.parse_workbook(path)
 
 
-def test_未识别的列被忽略而不是报错(tmp_path):
-    """上游可能加辅助列。不该因为多了一列就整份拒绝 —— 但必须至少 warn 一下，
-    这里只验证行为不炸，warn 由 logger 输出。"""
-    path = _make_xlsx(
-        tmp_path,
-        ["站点", "user_id", "client_name", "交易日期", "总收入（opt+现货）", "未来某列"],
-        [("HashKey", "577809207768677761", "PLUTO", date(2026, 9, 10), 100.0, "随便")],
-    )
+def test_全角括号和首尾空格的表头也认(tmp_path):
+    headers = list(REAL_HEADERS)
+    headers[headers.index("总收入(opt+现货+合约)")] = "总收入（opt+现货+合约）"
+    headers[headers.index("用户ID")] = " 用户ID "
+    path = _make_xlsx(tmp_path, [_row()], headers=headers)
 
-    rows = importer.parse_workbook(path)
-    assert len(rows) == 1
+    (row,) = importer.parse_workbook(path)
+    assert row.fields[schema.BOARD_TOTAL_REVENUE] == 1240.55
+    assert row.fields[schema.BOARD_CLIENT_UID] == UID_X
 
 
-# ---------- user_id 精度 ----------
+def test_多出来的列被忽略(tmp_path):
+    headers = [*REAL_HEADERS, "备注"]
+    path = _make_xlsx(tmp_path, [[*_row(), "随便写的"]], headers=headers)
+
+    (row,) = importer.parse_workbook(path)
+    assert "备注" not in row.fields
 
 
-def test_user_id_是浮点数直接拒绝(tmp_path):
-    """浮点形态的 UID 说明源头把它当数字存了，精度已损。"""
-    path = _make_xlsx(
-        tmp_path,
-        ["站点", "user_id", "client_name", "交易日期", "总收入（opt+现货）"],
-        [("HashKey", 5.77809e17, "PLUTO", date(2026, 9, 10), 100.0)],
-    )
+# ---------- 一行里的值 ----------
+
+
+def test_真实形态的一行能完整读进来(tmp_path):
+    path = _make_xlsx(tmp_path, [_row()])
+
+    (row,) = importer.parse_workbook(path)
+    fields = row.fields
+
+    assert set(fields) == set(REAL_HEADERS)
+    assert fields["用户ID"] == UID_X
+    assert fields["交易日期"] == date(2026, 9, 10)
+    assert fields["KYC日期"] == date(2025, 3, 2)
+    assert fields["站点"] == "新加坡站"
+    assert fields["用户类型"] == "平台介绍客户"
+    assert fields["合约手续费_剔除做市商"] == 0.0, "文本 0 要转成数字 0"
+    assert fields["现货手续费_剔除做市商"] == 372.17
+    assert fields["总收入(opt+现货+合约)"] == 1240.55
+    assert row.order_date == date(2026, 9, 10)
+
+
+def test_总收入为0的行不会被当成缺失丢掉(tmp_path):
+    """真实导出里有几百行总收入是 0。它们不产生佣金，但要算进记录笔数和客户数。"""
+    path = _make_xlsx(tmp_path, [_row(overrides={"总收入(opt+现货+合约)": "0"})])
+
+    (row,) = importer.parse_workbook(path)
+    assert row.fields[schema.BOARD_TOTAL_REVENUE] == 0.0
+
+
+def test_opt_pnl为空时不写这一列(tmp_path):
+    path = _make_xlsx(tmp_path, [_row(overrides={"opt_pnl": None})])
+
+    (row,) = importer.parse_workbook(path)
+    assert schema.BOARD_OPT_PNL not in row.fields
+
+
+def test_千分位逗号的金额也认(tmp_path):
+    path = _make_xlsx(tmp_path, [_row(overrides={"总交易额(opt+现货+合约)": "1,465,212.50"})])
+
+    (row,) = importer.parse_workbook(path)
+    assert row.fields[schema.BOARD_TOTAL_VOLUME] == 1465212.5
+
+
+# ---------- 用户ID 精度 ----------
+
+
+def test_用户ID是浮点数直接拒绝(tmp_path):
+    """浮点形态的用户ID 说明源头把这一列当数字存了，精度已损。"""
+    path = _make_xlsx(tmp_path, [_row(overrides={"用户ID": 5.77809e17})])
+
+    with pytest.raises(importer.BoardImportError, match="用户ID"):
+        importer.parse_workbook(path)
+
+
+def test_数字格式的短用户ID转成字符串(tmp_path):
+    """五到七位的 ID 存成数字也不丢精度，转成字符串照常用。"""
+    path = _make_xlsx(tmp_path, [_row(overrides={"用户ID": 1234567})])
+
+    (row,) = importer.parse_workbook(path)
+    assert row.fields[schema.BOARD_CLIENT_UID] == "1234567"
+
+
+def test_数字格式的长用户ID一定会被拒绝(tmp_path):
+    """xlsx 的数字单元格底层就是 float64。18-19 位的 ID 一旦存成数字，写进文件那一刻
+    低位就没了，读回来是浮点数；连 openpyxl 自己写整数也是这样。所以这条路只能拒绝。"""
+    path = _make_xlsx(tmp_path, [_row(overrides={"用户ID": 2141293991366272768})])
 
     with pytest.raises(importer.BoardImportError, match="浮点数"):
         importer.parse_workbook(path)
 
 
-def test_18位整数user_id保精度(tmp_path):
-    """整数走的是 str(int)，Python int 是任意精度，不会掉低位。"""
+def test_短用户ID也照常读(tmp_path):
+    """真实导出里 HK组和支付组有五到七位的用户ID，不能当成坏数据。"""
+    path = _make_xlsx(tmp_path, [_row(overrides={"用户ID": "1234567"})])
+
+    (row,) = importer.parse_workbook(path)
+    assert row.fields[schema.BOARD_CLIENT_UID] == "1234567"
+
+
+# ---------- 日期 ----------
+
+
+def test_交易日期支持文本和datetime(tmp_path):
     path = _make_xlsx(
         tmp_path,
-        ["站点", "user_id", "client_name", "交易日期", "总收入（opt+现货）"],
-        # openpyxl 会把 18 位整数存成 int 或 float 视 Excel 内部形式而定；
-        # 这里用字符串写入避免 openpyxl 自作主张
-        [("HashKey", "577809207768677761", "PLUTO", date(2026, 9, 10), 100.0)],
-    )
-
-    rows = importer.parse_workbook(path)
-    assert rows[0].fields[schema.BOARD_CLIENT_UID] == "577809207768677761"
-
-
-# ---------- 日期解析 ----------
-
-
-def test_交易日期支持datetime和字符串(tmp_path):
-    path = _make_xlsx(
-        tmp_path,
-        ["站点", "user_id", "client_name", "交易日期", "总收入（opt+现货）"],
         [
-            ("HK", "577809207768677761", "A", datetime(2026, 9, 10, 12, 0), 100.0),
-            ("HK", "577809207768677762", "B", "2026-09-11", 200.0),
-            ("HK", "577809207768677763", "C", "2026/09/12", 300.0),
+            _row(overrides={"交易日期": datetime(2026, 9, 10, 12, 0)}),
+            _row(overrides={"交易日期": "2026/09/11"}),
+            _row(overrides={"交易日期": "2026-09-12"}),
         ],
     )
 
-    rows = importer.parse_workbook(path)
-    dates = {r.order_date for r in rows}
-    assert dates == {date(2026, 9, 10), date(2026, 9, 11), date(2026, 9, 12)}
+    assert {r.order_date for r in importer.parse_workbook(path)} == {
+        date(2026, 9, 10),
+        date(2026, 9, 11),
+        date(2026, 9, 12),
+    }
 
 
-def test_日期无法解析直接报错(tmp_path):
-    path = _make_xlsx(
-        tmp_path,
-        ["站点", "user_id", "client_name", "交易日期", "总收入（opt+现货）"],
-        [("HK", "577809207768677761", "A", "昨天", 100.0)],
-    )
+def test_交易日期写错时报错并点名列(tmp_path):
+    path = _make_xlsx(tmp_path, [_row(overrides={"交易日期": "昨天"})])
 
     with pytest.raises(importer.BoardImportError, match="交易日期"):
         importer.parse_workbook(path)
 
 
-# ---------- 空/缺失行 ----------
+def test_KYC日期可以为空(tmp_path):
+    """真实导出里有一百多行没有 KYC日期。"""
+    path = _make_xlsx(tmp_path, [_row(overrides={"KYC日期": None})])
+
+    (row,) = importer.parse_workbook(path)
+    assert schema.BOARD_KYC_DATE not in row.fields
+
+
+def test_KYC日期写错时报错并点名列(tmp_path):
+    path = _make_xlsx(tmp_path, [_row(overrides={"KYC日期": "待补"})])
+
+    with pytest.raises(importer.BoardImportError, match="KYC日期"):
+        importer.parse_workbook(path)
+
+
+# ---------- 空行和缺值 ----------
 
 
 def test_全空行被跳过(tmp_path):
-    path = _make_xlsx(
-        tmp_path,
-        ["站点", "user_id", "client_name", "交易日期", "总收入（opt+现货）"],
-        [
-            ("HK", "577809207768677761", "A", date(2026, 9, 10), 100.0),
-            (None, None, None, None, None),
-        ],
-    )
+    path = _make_xlsx(tmp_path, [_row(), [None] * len(REAL_HEADERS)])
 
     assert len(importer.parse_workbook(path)) == 1
 
 
-def test_only_date_只保留指定日期(tmp_path):
+def test_缺用户ID的行被跳过且日志里不带客户信息(tmp_path, caplog):
+    """跳过要留痕，但日志会被转发和截图，不该把客户名称打出来。"""
+    path = _make_xlsx(tmp_path, [_row(), _row(overrides={"用户ID": None})])
+
+    with caplog.at_level(logging.WARNING):
+        rows = importer.parse_workbook(path)
+
+    assert len(rows) == 1
+    assert "用户ID" in caplog.text
+    assert "PLUTO" not in caplog.text
+
+
+def test_only_date只保留指定日期(tmp_path):
     path = _make_xlsx(
         tmp_path,
-        ["站点", "user_id", "client_name", "交易日期", "总收入（opt+现货）"],
         [
-            ("HK", "577809207768677761", "A", date(2026, 9, 10), 100.0),
-            ("HK", "577809207768677762", "B", date(2026, 9, 11), 200.0),
+            _row(overrides={"交易日期": "2026-09-10"}),
+            _row(overrides={"交易日期": "2026-09-11", "用户ID": "577809207768677762"}),
         ],
     )
 
-    rows = importer.parse_workbook(path, only_date=date(2026, 9, 11))
-    assert len(rows) == 1
-    assert rows[0].fields[schema.BOARD_CLIENT_UID] == "577809207768677762"
+    (row,) = importer.parse_workbook(path, only_date=date(2026, 9, 11))
+    assert row.fields[schema.BOARD_CLIENT_UID] == "577809207768677762"
 
 
-# ---------- 表头别名 ----------
-
-
-def test_中文表头也认(tmp_path):
-    """有的导出会把 user_id 中文化。两种表头都要能进。"""
-    path = _make_xlsx(
-        tmp_path,
-        ["站点", "客户UID", "客户名称", "交易日期", "总收入"],
-        [("HK", "577809207768677761", "A", date(2026, 9, 10), 100.0)],
-    )
-
-    rows = importer.parse_workbook(path)
-    assert len(rows) == 1
-    assert rows[0].fields[schema.BOARD_CLIENT_UID] == "577809207768677761"
-
-
-# ---------- 写进 Base 的日期，以及先删后写认不认界面里填的日期 ----------
-
-SGT = ZoneInfo("Asia/Singapore")
-UID_X = "577809207768677761"
+# ---------- 写进 Base ----------
 
 
 def _board_row(day: date, uid: str = UID_X) -> importer.BoardRow:
@@ -236,6 +307,7 @@ def _board_row(day: date, uid: str = UID_X) -> importer.BoardRow:
         fields={
             schema.BOARD_CLIENT_UID: uid,
             schema.BOARD_ORDER_DATE: day,
+            schema.BOARD_KYC_DATE: date(2025, 3, 2),
             schema.BOARD_TOTAL_REVENUE: 100.0,
         },
     )
@@ -245,11 +317,22 @@ def _sgt_midnight_ms(day: date) -> int:
     return int(datetime(day.year, day.month, day.day, tzinfo=SGT).timestamp() * 1000)
 
 
-def test_交易日期写成业务时区那天的零点(fake_bitable):
+def test_两个日期列都写成业务时区那天的零点(fake_bitable):
     importer._apply(fake_bitable, TBL_BOARD, [_board_row(date(2026, 9, 10))], tz=SGT)
 
     (record,) = fake_bitable.tables[TBL_BOARD].records.values()
     assert record[schema.BOARD_ORDER_DATE] == _sgt_midnight_ms(date(2026, 9, 10))
+    assert record[schema.BOARD_KYC_DATE] == _sgt_midnight_ms(date(2025, 3, 2))
+
+
+def test_读进来的一行写进Base时列名都是看板表的列(tmp_path, fake_bitable):
+    path = _make_xlsx(tmp_path, [_row()])
+    importer._apply(fake_bitable, TBL_BOARD, importer.parse_workbook(path), tz=SGT)
+
+    ((table_id, fields),) = fake_bitable.writes
+    assert table_id == TBL_BOARD
+    assert set(fields) <= set(schema.DAILY_BOARD_FIELDS)
+    assert fields[schema.BOARD_CLIENT_UID] == UID_X
 
 
 def test_先删后写认得界面里手工填的日期(fake_bitable):
@@ -281,3 +364,25 @@ def test_先删后写只碰涉及的日期(fake_bitable):
     importer._apply(fake_bitable, TBL_BOARD, [_board_row(date(2026, 9, 10))], tz=SGT)
 
     assert kept in fake_bitable.tables[TBL_BOARD].records
+
+
+def test_写入和删除都按批发送(fake_bitable):
+    """一行一个请求的话，1.2 万行的导出一次就是 1.2 万次调用，免费版一个月基线才 1 万次。"""
+    day = date(2026, 9, 10)
+    for _ in range(600):
+        fake_bitable.tables[TBL_BOARD].add_existing(
+            {schema.BOARD_ORDER_DATE: _sgt_midnight_ms(day), schema.BOARD_CLIENT_UID: UID_X}
+        )
+
+    deleted, written = importer._apply(
+        fake_bitable, TBL_BOARD, [_board_row(day) for _ in range(1201)], tz=SGT
+    )
+
+    assert (deleted, written) == (600, 1201)
+    assert fake_bitable.batch_delete_calls == [(TBL_BOARD, 500), (TBL_BOARD, 100)]
+    assert fake_bitable.batch_create_calls == [
+        (TBL_BOARD, 500),
+        (TBL_BOARD, 500),
+        (TBL_BOARD, 201),
+    ]
+    assert len(fake_bitable.tables[TBL_BOARD].records) == 1201

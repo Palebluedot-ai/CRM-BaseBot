@@ -77,47 +77,65 @@ CLIENT_FIELDS: dict[str, int] = {
     CLIENT_OWNER_OPEN_ID: FIELD_TYPE_TEXT,
 }
 
-# ---------- 表 3：日读看板（销售收入日读，每日由脚本导入） ----------
+# ---------- 表 3：日读看板（每日交易明细，脚本从 xlsx 导入） ----------
 #
-# 这张表**替换**了原来的「Transaction Details」交易明细。原表是同事从内部系统按
-# 单笔订单粒度导出的，本项目只读；新表是从「销售收入日读看板」xlsx 导入的按
-# (客户, 日期) 已经聚合过的数据，粒度更粗，字段更多（区分了 opt 和现货、手续费、
-# opt_pnl 等），且**佣金基数从「Pnl(USD)」改成「总收入(opt+现货)」**。改动理由：
-# 使用方 2026-09-09 确认按毛收入结算，看板是唯一权威口径。
+# 列名和列顺序**逐字照抄**内部系统导出的交易明细 xlsx 表头，
+# 以 2026-09-17 的「OTC组销售明细」为准。导入时表头原样对应 Base 的列，不做改名：
+# 看板长什么样，Base 就长什么样，拿着 Excel 能在 Base 里找到同一列。
+# 导出多一列不影响，少一列导入直接拒绝。
 #
-# 由 scripts/import_daily_board.py 每天导入。字段名与 xlsx 里的表头对齐，
-# 需要跨列改名的两个（user_id -> 客户UID, client_name -> 客户名称）在导入脚本里
-# 显式做映射，好和客户表 join。
+# 粒度是「一个用户在一个交易日」，但同一用户同一天可能有多行（那份导出里有 402 组），
+# 没有行主键，所以导入按交易日期整批替换，见 scripts/import_daily_board.py。
+#
+# 佣金基数是「总收入(opt+现货+合约)」。那份导出里它恒等于
+# opt收入 + 现货手续费_剔除做市商 + 合约手续费_剔除做市商，合约两列目前全是 0。
 
 TABLE_DAILY_BOARD_NAME = "Daily Revenue Board"
 
 BOARD_STATION = "站点"
-BOARD_CLIENT_UID = "客户UID"  # xlsx 里叫 user_id
-BOARD_CLIENT_NAME = "客户名称"  # xlsx 里叫 client_name
-BOARD_SALES_GROUP = "销售分组"
-BOARD_SALES_NAME = "销售"
+BOARD_CLIENT_UID = "用户ID"  # 和客户表的「客户UID」join
 BOARD_ORDER_DATE = "交易日期"
-BOARD_TOTAL_REVENUE = "总收入(opt+现货)"  # 佣金基数
+BOARD_SALES_NAME = "销售"
+BOARD_CLIENT_NAME = "客户名称"
+BOARD_KYC_DATE = "KYC日期"
+BOARD_SALES_GROUP = "销售分组"
+BOARD_USER_TYPE = "用户类型"
+BOARD_SPOT_FEE_EX_MM = "现货手续费_剔除做市商"
+BOARD_SPOT_VOLUME_EX_MM = "现货交易额_剔除做市商"
+BOARD_CONTRACT_FEE_EX_MM = "合约手续费_剔除做市商"
+BOARD_CONTRACT_VOLUME_EX_MM = "合约交易额_剔除做市商"
 BOARD_OPT_FEE = "opt手续费"
-BOARD_SPOT_FEE_EX_MM = "现货手续费剔除做市商"
 BOARD_OPT_PNL = "opt_pnl"
+BOARD_OPT_REVENUE = "opt收入"
+BOARD_OPT_VOLUME = "opt交易额"
+BOARD_TOTAL_REVENUE = "总收入(opt+现货+合约)"  # 佣金基数
+BOARD_TOTAL_VOLUME = "总交易额(opt+现货+合约)"
 
+# 顺序就是 xlsx 的列顺序：sync_base 按这个顺序建列，导入脚本按这份清单核对表头。
 DAILY_BOARD_FIELDS: dict[str, int] = {
     BOARD_STATION: FIELD_TYPE_TEXT,
-    # 必须是文本。看板里的 user_id 是 18-19 位数字，存成数字字段会在服务端就被
-    # float64 抹平精度，join 客户表时静默错配。见 lark/values.py。
+    # 必须是文本。用户ID 大多是 18-19 位数字，存成数字字段会在服务端就被 float64
+    # 抹平精度，join 客户表时静默错配。见 lark/values.py。
     BOARD_CLIENT_UID: FIELD_TYPE_TEXT,
-    BOARD_CLIENT_NAME: FIELD_TYPE_TEXT,
-    BOARD_SALES_GROUP: FIELD_TYPE_TEXT,
-    BOARD_SALES_NAME: FIELD_TYPE_TEXT,
     BOARD_ORDER_DATE: FIELD_TYPE_DATETIME,
-    BOARD_TOTAL_REVENUE: FIELD_TYPE_NUMBER,
-    BOARD_OPT_FEE: FIELD_TYPE_NUMBER,
+    BOARD_SALES_NAME: FIELD_TYPE_TEXT,
+    BOARD_CLIENT_NAME: FIELD_TYPE_TEXT,
+    BOARD_KYC_DATE: FIELD_TYPE_DATETIME,
+    BOARD_SALES_GROUP: FIELD_TYPE_TEXT,
+    BOARD_USER_TYPE: FIELD_TYPE_TEXT,
     BOARD_SPOT_FEE_EX_MM: FIELD_TYPE_NUMBER,
+    BOARD_SPOT_VOLUME_EX_MM: FIELD_TYPE_NUMBER,
+    BOARD_CONTRACT_FEE_EX_MM: FIELD_TYPE_NUMBER,
+    BOARD_CONTRACT_VOLUME_EX_MM: FIELD_TYPE_NUMBER,
+    BOARD_OPT_FEE: FIELD_TYPE_NUMBER,
     BOARD_OPT_PNL: FIELD_TYPE_NUMBER,
+    BOARD_OPT_REVENUE: FIELD_TYPE_NUMBER,
+    BOARD_OPT_VOLUME: FIELD_TYPE_NUMBER,
+    BOARD_TOTAL_REVENUE: FIELD_TYPE_NUMBER,
+    BOARD_TOTAL_VOLUME: FIELD_TYPE_NUMBER,
 }
 
-# 算佣金真正依赖的三个字段。类型给 None 表示只要求存在 —— 客户UID 可能是文本，
+# 算佣金真正依赖的三个字段。类型给 None 表示只要求存在 —— 用户ID 可能是文本，
 # 也可能是查找引用，两种都能安全取值，但绝不能是数字。
 DAILY_BOARD_REQUIRED_FIELDS: dict[str, int | None] = {
     BOARD_ORDER_DATE: None,

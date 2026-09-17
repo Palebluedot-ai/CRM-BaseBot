@@ -7,7 +7,7 @@
 没有任何办法直接读到公司租户里那张真实的销售收入日读看板 —— 阶段 A 得自己造数据。
 
 那手工导出 CSV 再导进来行不行？不行，而且是这个项目里最贵的一个坑：Excel 只保留
-15 位有效数字，18-19 位的 user_id 一过 Excel 就被抹掉低位，
+15 位有效数字，18-19 位的用户ID 一过 Excel 就被抹掉低位，
 ``577809207768677761`` 变成 ``577809207768678000``。抹完之后它看起来仍然是个合法的
 长数字，join 时静默匹配到别的客户。测试数据从第一天起就是坏的，而且坏得看不出来。
 
@@ -66,7 +66,8 @@ from __future__ import annotations
 import argparse
 import sys
 from dataclasses import dataclass
-from datetime import datetime, tzinfo
+from datetime import date, datetime, timedelta, tzinfo
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -90,7 +91,7 @@ from crm_basebot.startup import load_settings, require_settings  # noqa: E402
 SEED_PREFIX = "SEED-"
 
 # 每张表用哪个字段承载标记。挑的都是自由文本字段，不影响任何计算 ——
-# 对账只读交易日期、客户UID、总收入 三个字段。
+# 对账只读交易日期、用户ID、总收入 三个字段。
 SEED_MARKER_FIELD: dict[str, str] = {
     schema.TABLE_REFERRAL_NAME: schema.REFERRAL_NAME,
     schema.TABLE_CLIENT_NAME: schema.CLIENT_NAME,
@@ -138,18 +139,26 @@ class SeedClient:
 
 @dataclass(frozen=True)
 class SeedBoardRow:
-    """一行日读看板种子数据。字段和 xlsx 表头对齐（跨列改名的走 import 脚本）。"""
+    """一行日读看板种子数据，列和真实导出的 xlsx 表头一一对应，见 board_payload。"""
 
     order_date: str
     uid: str
     client_name: str
-    revenue: float  # 总收入(opt+现货) —— 佣金基数
+    revenue: float  # 总收入(opt+现货+合约)，佣金基数
     station: str
-    sales_group: str
     sales_name: str
+    kyc_date: str
+    sales_group: str
+    user_type: str
+    spot_fee: float
+    spot_volume: float
+    contract_fee: float
+    contract_volume: float
     opt_fee: float
-    spot_fee_ex_mm: float
-    opt_pnl: float
+    opt_pnl: float | None
+    opt_revenue: float
+    opt_volume: float
+    total_volume: float
 
     @property
     def period(self) -> str:
@@ -259,7 +268,7 @@ UNMAPPED_CLIENTS: dict[str, str] = {
     "577809207768715026": f"{SEED_PREFIX}未登记的南山家办",
 }
 
-# (交易日期, 客户UID, 总收入)
+# (交易日期, 用户ID, 总收入)
 #
 # 三件事是刻意设计出来的，不是随手编的：
 #
@@ -347,25 +356,56 @@ _DAMAGED_BOARD_ROWS: tuple[tuple[str, str, float], ...] = (
     ("2026-01-22", "577809207768681000", 905.60),
 )
 
-# 佣金只看总收入，但看板还有站点/销售分组/销售/手续费/opt_pnl 这几列，
-# 得填上 —— 空着的话，哪天有人写了个依赖它们的报表，会以为线上数据也长这样。
-_STATIONS = ("HashKey SG", "HashKey HK")
-_SALES_GROUPS = (f"{SEED_PREFIX}机构组A", f"{SEED_PREFIX}机构组B")
+# 佣金只看总收入，但看板的其他列也得填上：空着的话，哪天有人写了个依赖它们的报表，
+# 会以为线上数据也长这样。分类列用真实导出里出现过的取值；销售是假人，带种子标记。
+_STATIONS = ("新加坡站", "香港站", "中东站")
+_SALES_GROUPS = ("SG组", "HK组", "支付组")
+_USER_TYPES = ("平台介绍客户", "自主开发客户")
 _SALES_NAMES = (f"{SEED_PREFIX}王小明", f"{SEED_PREFIX}李小华")
+
+_CENT = Decimal("0.01")
+
+
+def _kyc_date_for(uid: str) -> str:
+    """同一个客户每一行的 KYC日期都一样：按 UID 尾号在 2025 年里挑一天。"""
+    return (date(2025, 1, 10) + timedelta(days=int(uid[-3:]) % 300)).isoformat()
 
 
 def build_board_rows(*, with_damaged_uid: bool = False) -> list[SeedBoardRow]:
+    """按 _BOARD_ROWS 里的总收入，拆出看板其余各列。
+
+    拆法照 2026-09-17 真实导出里一行不差的几条关系：
+
+        总收入 = opt收入 + 现货手续费_剔除做市商 + 合约手续费_剔除做市商
+        总交易额 = opt交易额 + 现货交易额_剔除做市商 + 合约交易额_剔除做市商
+        opt收入 = opt_pnl；opt_pnl 为空时 opt收入 = opt手续费
+
+    合约两列在真实导出里全是 0，这里也是 0。总收入为负的行把负数放在现货手续费上，
+    真实导出里的负数也出在那一列。金额用 Decimal 拆，加回去分毫不差。
+    """
     names = {c.uid: c.name for c in build_clients()} | UNMAPPED_CLIENTS | DAMAGED_UIDS
 
     source = _BOARD_ROWS + (_DAMAGED_BOARD_ROWS if with_damaged_uid else ())
 
     rows: list[SeedBoardRow] = []
     for index, (order_date, uid, revenue) in enumerate(source):
-        # opt / 现货手续费按收入的很小比例摊，opt_pnl 用收入的一部分，都是配平
-        # 用的数据 —— 佣金不看这几列，但看板列不能空着。
-        opt_fee = round(abs(revenue) * 0.0006, 4)
-        spot_fee = round(abs(revenue) * 0.0004, 4)
-        opt_pnl = round(revenue * 0.35, 4)
+        total = Decimal(str(revenue))
+        if total >= 0:
+            spot_fee = (total * Decimal("0.3")).quantize(_CENT, rounding=ROUND_HALF_UP)
+            opt_revenue = total - spot_fee
+        else:
+            spot_fee = total
+            opt_revenue = Decimal("0")
+
+        if opt_revenue > 0 and index % 4 == 0:
+            opt_pnl = None
+            opt_fee = opt_revenue
+        else:
+            opt_pnl = opt_revenue
+            opt_fee = (opt_revenue * Decimal("0.02")).quantize(_CENT, rounding=ROUND_HALF_UP)
+
+        spot_volume = (abs(spot_fee) * 1250).quantize(_CENT)
+        opt_volume = (opt_revenue * 800).quantize(_CENT)
         rows.append(
             SeedBoardRow(
                 order_date=order_date,
@@ -373,11 +413,19 @@ def build_board_rows(*, with_damaged_uid: bool = False) -> list[SeedBoardRow]:
                 client_name=names[uid],
                 revenue=revenue,
                 station=_STATIONS[index % len(_STATIONS)],
-                sales_group=_SALES_GROUPS[index % len(_SALES_GROUPS)],
                 sales_name=_SALES_NAMES[index % len(_SALES_NAMES)],
-                opt_fee=opt_fee,
-                spot_fee_ex_mm=spot_fee,
-                opt_pnl=opt_pnl,
+                kyc_date=_kyc_date_for(uid),
+                sales_group=_SALES_GROUPS[index % len(_SALES_GROUPS)],
+                user_type=_USER_TYPES[index % len(_USER_TYPES)],
+                spot_fee=float(spot_fee),
+                spot_volume=float(spot_volume),
+                contract_fee=0.0,
+                contract_volume=0.0,
+                opt_fee=float(opt_fee),
+                opt_pnl=None if opt_pnl is None else float(opt_pnl),
+                opt_revenue=float(opt_revenue),
+                opt_volume=float(opt_volume),
+                total_volume=float(spot_volume + opt_volume),
             )
         )
     return rows
@@ -438,6 +486,36 @@ def is_seed_value(value: Any) -> bool:
 def board_row_key(order_ms: int, uid: str, revenue: float) -> tuple[int, str, float]:
     """看板行的自然键。同一天同一个客户可能有多行（历史修正），所以带上收入区分。"""
     return (order_ms, uid, round(revenue, 4))
+
+
+def board_payload(row: SeedBoardRow, *, tz: tzinfo) -> dict[str, Any]:
+    """一行种子数据写进 Base 的字段。列名全部来自 schema，和导入脚本写的是同一套列。
+
+    日期列换成业务时区那天零点的毫秒时间戳；opt_pnl 为空就不写这一列，和导入真实
+    数据时一样。
+    """
+    fields: dict[str, Any] = {
+        schema.BOARD_STATION: row.station,
+        schema.BOARD_CLIENT_UID: row.uid,
+        schema.BOARD_ORDER_DATE: to_timestamp_ms(row.order_date, tz=tz),
+        schema.BOARD_SALES_NAME: row.sales_name,
+        schema.BOARD_CLIENT_NAME: row.client_name,
+        schema.BOARD_KYC_DATE: to_timestamp_ms(row.kyc_date, tz=tz),
+        schema.BOARD_SALES_GROUP: row.sales_group,
+        schema.BOARD_USER_TYPE: row.user_type,
+        schema.BOARD_SPOT_FEE_EX_MM: row.spot_fee,
+        schema.BOARD_SPOT_VOLUME_EX_MM: row.spot_volume,
+        schema.BOARD_CONTRACT_FEE_EX_MM: row.contract_fee,
+        schema.BOARD_CONTRACT_VOLUME_EX_MM: row.contract_volume,
+        schema.BOARD_OPT_FEE: row.opt_fee,
+        schema.BOARD_OPT_REVENUE: row.opt_revenue,
+        schema.BOARD_OPT_VOLUME: row.opt_volume,
+        schema.BOARD_TOTAL_REVENUE: row.revenue,
+        schema.BOARD_TOTAL_VOLUME: row.total_volume,
+    }
+    if row.opt_pnl is not None:
+        fields[schema.BOARD_OPT_PNL] = row.opt_pnl
+    return fields
 
 
 # ---------- 以下开始碰真实 API ----------
@@ -646,22 +724,7 @@ def _seed_board_rows(
         if not apply:
             continue
 
-        bitable.create_record(
-            scan.table_id,
-            {
-                schema.BOARD_ORDER_DATE: order_ms,
-                schema.BOARD_STATION: row.station,
-                schema.BOARD_CLIENT_NAME: row.client_name,
-                schema.BOARD_CLIENT_UID: row.uid,
-                schema.BOARD_SALES_GROUP: row.sales_group,
-                schema.BOARD_SALES_NAME: row.sales_name,
-                schema.BOARD_TOTAL_REVENUE: row.revenue,
-                schema.BOARD_OPT_FEE: row.opt_fee,
-                schema.BOARD_SPOT_FEE_EX_MM: row.spot_fee_ex_mm,
-                schema.BOARD_OPT_PNL: row.opt_pnl,
-            },
-            reread=False,
-        )
+        bitable.create_record(scan.table_id, board_payload(row, tz=tz), reread=False)
 
     return created, skipped
 

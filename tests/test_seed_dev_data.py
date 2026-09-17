@@ -194,6 +194,58 @@ def test_board_row_client_names_match_the_client_table():
         assert row.client_name == known[row.uid]
 
 
+def test_board_rows_follow_the_real_export_arithmetic():
+    """列之间的关系照真实导出造：2026-09-17 那份 1.2 万行里，这几条恒等式没有一行例外。
+
+    总收入 = opt收入 + 现货手续费_剔除做市商 + 合约手续费_剔除做市商
+    总交易额 = opt交易额 + 现货交易额_剔除做市商 + 合约交易额_剔除做市商
+    opt收入 = opt_pnl；opt_pnl 为空时 opt收入 = opt手续费
+    """
+    from decimal import Decimal
+
+    def d(value: float) -> Decimal:
+        return Decimal(str(value))
+
+    for row in seed.build_board_rows(with_damaged_uid=True):
+        assert d(row.revenue) == d(row.opt_revenue) + d(row.spot_fee) + d(row.contract_fee)
+        assert d(row.total_volume) == (
+            d(row.opt_volume) + d(row.spot_volume) + d(row.contract_volume)
+        )
+        if row.opt_pnl is None:
+            assert d(row.opt_revenue) == d(row.opt_fee)
+        else:
+            assert d(row.opt_revenue) == d(row.opt_pnl)
+        assert row.contract_fee == 0 and row.contract_volume == 0, "真实导出里合约两列全是 0"
+
+
+def test_board_rows_cover_both_filled_and_empty_opt_pnl():
+    rows = seed.build_board_rows()
+    assert any(r.opt_pnl is None for r in rows), "真实导出里 opt_pnl 有空值，种子也要有"
+    assert any(r.opt_pnl is not None for r in rows)
+
+
+def test_board_rows_use_the_real_category_values():
+    rows = seed.build_board_rows()
+    assert {r.station for r in rows} <= {"中东站", "新加坡站", "香港站"}
+    assert {r.sales_group for r in rows} <= {"HK组", "SG组", "支付组"}
+    assert {r.user_type for r in rows} == {"平台介绍客户", "自主开发客户"}
+
+
+def test_board_payload_fills_every_board_column():
+    rows = seed.build_board_rows()
+    full = next(r for r in rows if r.opt_pnl is not None)
+    no_pnl = next(r for r in rows if r.opt_pnl is None)
+
+    payload = seed.board_payload(full, tz=BUSINESS_TZ)
+    assert set(payload) == set(schema.DAILY_BOARD_FIELDS)
+    assert set(seed.board_payload(no_pnl, tz=BUSINESS_TZ)) == set(schema.DAILY_BOARD_FIELDS) - {
+        schema.BOARD_OPT_PNL
+    }
+    assert isinstance(payload[schema.BOARD_ORDER_DATE], int)
+    assert isinstance(payload[schema.BOARD_KYC_DATE], int)
+    assert payload[schema.BOARD_CLIENT_UID] == full.uid
+
+
 # ---------- --with-damaged-uid：让 Excel 损伤检测响一次 ----------
 
 
@@ -348,23 +400,15 @@ def test_marker_fields_are_not_used_by_the_commission_calculation():
 # ---------- 日读看板表的字段（sync_base.py 建，seed 只往里写） ----------
 
 
-def test_daily_board_schema_has_every_field_the_import_maps_to():
-    """schema.DAILY_BOARD_FIELDS 必须覆盖 import_daily_board.COLUMN_MAP 的所有目标。"""
-    # 用 importlib 而不是 import：scripts/ 不是包
-    import importlib.util
-    import sys
-    from pathlib import Path
-
+def test_import_script_expects_exactly_the_board_columns():
+    """导入脚本认的表头和 sync_base 建的列是同一份清单，seed 往里写的也是这一份。"""
     path = Path(__file__).resolve().parent.parent / "scripts" / "import_daily_board.py"
     spec = importlib.util.spec_from_file_location("import_daily_board", path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
 
-    mapped_targets = set(module.COLUMN_MAP.values())
-    declared = set(schema.DAILY_BOARD_FIELDS)
-    extra = mapped_targets - declared
-    assert not extra, f"COLUMN_MAP 映射到了未声明的字段：{extra}"
+    assert tuple(module.EXPECTED_HEADERS) == tuple(schema.DAILY_BOARD_FIELDS)
 
 
 def test_board_uid_field_is_text_not_number():

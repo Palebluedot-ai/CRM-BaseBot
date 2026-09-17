@@ -38,7 +38,7 @@ SNAPSHOT_PATH = Path(__file__).resolve().parent.parent / "schema_snapshot.json"
 UID_SAMPLE_LIMIT = 1000
 
 # 探查时重点盯的字段：名字里带这些词的，单独拎出来提醒
-UID_HINTS = ("uid", "user_id", "客户号", "客户 id", "客户id")
+UID_HINTS = ("uid", "user_id", "用户id", "客户号", "客户 id", "客户id")
 REFERRAL_NO_HINTS = ("编号", "referral no", "referral_no", "渠道号")
 # 佣金基数候选：日读看板里叫「总收入」，同时兼容旧的 Pnl 命名
 PROFIT_HINTS = ("pnl", "profit", "收益", "利润", "总收入", "收入合计")

@@ -57,6 +57,9 @@ class FakeBitable:
         self.read_back_count = 0
         # 被删掉的 (table_id, record_id)，按删除顺序。删除是最该被盯住的写操作。
         self.deleted: list[tuple[str, str]] = []
+        # 批量写每发一次记一笔 (table_id, 这一批的条数)，钉住「按批发、每批多大」。
+        self.batch_create_calls: list[tuple[str, int]] = []
+        self.batch_delete_calls: list[tuple[str, int]] = []
         # 记录 update_record 的调用，便于测试断言主字段回填的实际写入
         self.updates: list[tuple[str, str, dict[str, Any]]] = []
 
@@ -91,6 +94,28 @@ class FakeBitable:
     def delete_record(self, table_id: str, record_id: str) -> None:
         del self.table(table_id).records[record_id]
         self.deleted.append((table_id, record_id))
+
+    def batch_create_records(
+        self, table_id: str, records: list[dict[str, Any]], *, batch_size: int = 500
+    ) -> int:
+        for start in range(0, len(records), batch_size):
+            chunk = records[start : start + batch_size]
+            self.batch_create_calls.append((table_id, len(chunk)))
+            for fields in chunk:
+                self.write_count += 1
+                self.writes.append((table_id, dict(fields)))
+                self.table(table_id).add_existing(dict(fields))
+        return len(records)
+
+    def batch_delete_records(
+        self, table_id: str, record_ids: list[str], *, batch_size: int = 500
+    ) -> int:
+        for start in range(0, len(record_ids), batch_size):
+            chunk = record_ids[start : start + batch_size]
+            self.batch_delete_calls.append((table_id, len(chunk)))
+            for record_id in chunk:
+                self.delete_record(table_id, record_id)
+        return len(record_ids)
 
     def get_record(self, table_id: str, record_id: str) -> Record:
         return Record(record_id=record_id, fields=dict(self.table(table_id).records[record_id]))

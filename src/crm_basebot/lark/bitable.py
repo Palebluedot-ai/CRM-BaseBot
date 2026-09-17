@@ -26,6 +26,10 @@ from typing import Any
 import lark_oapi as lark
 from lark_oapi.api.bitable.v1 import (
     AppTableRecord,
+    BatchCreateAppTableRecordRequest,
+    BatchCreateAppTableRecordRequestBody,
+    BatchDeleteAppTableRecordRequest,
+    BatchDeleteAppTableRecordRequestBody,
     CreateAppTableRecordRequest,
     DeleteAppTableRecordRequest,
     GetAppTableRecordRequest,
@@ -48,6 +52,10 @@ MAX_SEARCH_PAGE_SIZE = 500
 
 # 「列出数据表」「列出字段」两个接口的分页上限
 MAX_LIST_PAGE_SIZE = 100
+
+# 批量写一次发多少条。平台的批量新增一次最多 1000 条、批量删除一次最多 500 条，
+# 统一按 500 切，调用方不用记哪个接口是多少。
+MAX_BATCH_SIZE = 500
 
 # Bitable 字段类型码，只列我们会碰到的
 FIELD_TYPE_TEXT = 1
@@ -155,6 +163,11 @@ def _next_page_token(data: Any, what: str) -> str | None:
         return None
 
     return token
+
+
+def _check_batch_size(batch_size: int) -> None:
+    if not 0 < batch_size <= MAX_BATCH_SIZE:
+        raise ValueError(f"batch_size 要在 1 到 {MAX_BATCH_SIZE} 之间，给的是 {batch_size}")
 
 
 class BitableClient:
@@ -374,6 +387,86 @@ class BitableClient:
         with _WRITE_LOCK:
             response = self._client.bitable.v1.app_table_record.delete(request)
             _check(response, f"删除记录 record_id={record_id}", require_data=False)
+
+    def batch_create_records(
+        self,
+        table_id: str,
+        records: list[dict[str, Any]],
+        *,
+        batch_size: int = MAX_BATCH_SIZE,
+    ) -> int:
+        """批量新增，返回写入条数。
+
+        导入看板一次就是成千上万行。一行一个请求的话，2026-09-17 那份 1.2 万行的导出
+        就要 1.2 万次调用，而免费版一个月的基线额度才 1 万次；按 500 条一批只要 25 次。
+
+        每一批单独拿写锁，和单条写是同一把锁，不会和机器人的写入撞 ``1254291``。
+        不回读，批量写的调用方都用不着系统字段。中途某一批失败时，前面的批已经写进去了，
+        报错里带着已写条数；看板导入按日期先删后写，重跑一次就能盖掉写了一半的数据。
+        """
+        _check_batch_size(batch_size)
+        written = 0
+        for start in range(0, len(records), batch_size):
+            chunk = records[start : start + batch_size]
+            body = (
+                BatchCreateAppTableRecordRequestBody.builder()
+                .records([AppTableRecord.builder().fields(fields).build() for fields in chunk])
+                .build()
+            )
+            request = (
+                BatchCreateAppTableRecordRequest.builder()
+                .app_token(self._app_token)
+                .table_id(table_id)
+                .request_body(body)
+                .build()
+            )
+            with _WRITE_LOCK:
+                response = self._client.bitable.v1.app_table_record.batch_create(request)
+                data = _check(response, f"批量新增记录 table_id={table_id}")
+            created = data.records or []
+            if len(created) != len(chunk):
+                raise BitableError(
+                    f"批量新增 table_id={table_id} 这一批发了 {len(chunk)} 条，"
+                    f"平台只回了 {len(created)} 条；在这一批之前已写入 {written} 条"
+                )
+            written += len(chunk)
+        return written
+
+    def batch_delete_records(
+        self,
+        table_id: str,
+        record_ids: list[str],
+        *,
+        batch_size: int = MAX_BATCH_SIZE,
+    ) -> int:
+        """批量删除，返回删除条数。为什么要批量、怎么切，同 ``batch_create_records``。
+
+        平台对每一条回报删没删掉。有一条没删掉就报错并点名，不当成功处理。
+        """
+        _check_batch_size(batch_size)
+        deleted = 0
+        for start in range(0, len(record_ids), batch_size):
+            chunk = record_ids[start : start + batch_size]
+            body = BatchDeleteAppTableRecordRequestBody.builder().records(chunk).build()
+            request = (
+                BatchDeleteAppTableRecordRequest.builder()
+                .app_token(self._app_token)
+                .table_id(table_id)
+                .request_body(body)
+                .build()
+            )
+            with _WRITE_LOCK:
+                response = self._client.bitable.v1.app_table_record.batch_delete(request)
+                data = _check(response, f"批量删除记录 table_id={table_id}", require_data=False)
+            results = (data.records if data is not None else None) or []
+            failed = [item.record_id for item in results if item.deleted is False]
+            if failed:
+                raise BitableError(
+                    f"批量删除 table_id={table_id} 有 {len(failed)} 条没删掉，例如 {failed[:5]}；"
+                    f"在这一批之前已删除 {deleted} 条"
+                )
+            deleted += len(chunk)
+        return deleted
 
     # ---------- schema 快照 ----------
 
