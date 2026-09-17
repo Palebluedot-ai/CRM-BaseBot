@@ -111,6 +111,10 @@ BOARD_OPT_VOLUME = "opt交易额"
 BOARD_TOTAL_REVENUE = "总收入(opt+现货+合约)"  # 佣金基数
 BOARD_TOTAL_VOLUME = "总交易额(opt+现货+合约)"
 
+# 看板只放这个站点的记录（2026-09-17 定的）。导出里还有香港站、中东站，导入时一律不进 Base。
+# 筛的是「站点」这一列，不是「销售分组」：新加坡站的记录里也有 HK组、支付组的销售。
+BOARD_STATION_IN_SCOPE = "新加坡站"
+
 # 顺序就是 xlsx 的列顺序：sync_base 按这个顺序建列，导入脚本按这份清单核对表头。
 DAILY_BOARD_FIELDS: dict[str, int] = {
     BOARD_STATION: FIELD_TYPE_TEXT,

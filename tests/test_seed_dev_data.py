@@ -226,7 +226,7 @@ def test_board_rows_cover_both_filled_and_empty_opt_pnl():
 
 def test_board_rows_use_the_real_category_values():
     rows = seed.build_board_rows()
-    assert {r.station for r in rows} <= {"中东站", "新加坡站", "香港站"}
+    assert {r.station for r in rows} == {"新加坡站"}, "看板只放新加坡站的记录，种子数据也一样"
     assert {r.sales_group for r in rows} <= {"HK组", "SG组", "支付组"}
     assert {r.user_type for r in rows} == {"平台介绍客户", "自主开发客户"}
 

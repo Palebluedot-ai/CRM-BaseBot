@@ -8,6 +8,16 @@ xlsx 的表头以 2026-09-17 的「OTC组销售明细」导出为准：18 列逐
 导入直接拒绝并点名缺的是哪列；多出来的列忽略并提示。导出工具偶尔把括号写成全角、
 表头前后带空格，这类差异规整后再比，不因为一个括号的宽度拒掉整份文件。
 
+## 只导新加坡站
+
+导出里有香港站、新加坡站、中东站三个站点，看板只要新加坡站的记录（2026-09-17 定的）。
+其他站点的行解析完就丢掉，不进 Base。筛的是「站点」列，不是「销售分组」列：新加坡站
+的记录里也有 HK组、支付组的销售。
+
+先删后写替换的是导出覆盖到的**所有**日期，包括那天只有其他站点记录的日子：导出说这天
+新加坡站没有记录，Base 里这天的旧记录就该清掉。筛完一行新加坡站都不剩时拒绝导入，
+否则会把这些日期的记录删光。
+
 ## 为什么必须走 xlsx 不走 CSV
 
 用户ID 大多是 18-19 位数字。CSV 在源头几乎总是过一手 Excel，而 Excel 只保留 15 位
@@ -48,7 +58,8 @@ import argparse
 import logging
 import re
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, tzinfo
 from pathlib import Path
@@ -298,19 +309,48 @@ def _to_payload(row: BoardRow, *, tz: tzinfo) -> dict[str, Any]:
 
 
 def _apply(
-    bitable: BitableClient, table_id: str, rows: list[BoardRow], *, tz: tzinfo
+    bitable: BitableClient,
+    table_id: str,
+    rows: list[BoardRow],
+    *,
+    tz: tzinfo,
+    replace_dates: Iterable[date] | None = None,
 ) -> tuple[int, int]:
-    """先删涉及日期的旧记录，再写新记录，都按批发。返回 (删除数, 写入数)。
+    """先删要替换的日期上的旧记录，再写新记录，都按批发。返回 (删除数, 写入数)。
 
+    ``replace_dates`` 是要整天替换的日期，不传就取 rows 覆盖到的日期。
+    导入时传导出覆盖到的全部日期：某天导出里只有其他站点的行，这天的旧记录也要删掉。
     ``tz`` 是业务时区：日期列写成那一天在业务时区的零点，删旧行也按同一时区取日期。
     """
-    affected_dates = sorted({row.order_date for row in rows})
+    if replace_dates is None:
+        replace_dates = {row.order_date for row in rows}
+    days = sorted(set(replace_dates))
     existing = _existing_by_date(bitable, table_id, tz=tz)
-    stale = [record_id for day in affected_dates for record_id in existing.get(day, [])]
+    stale = [record_id for day in days for record_id in existing.get(day, [])]
 
     deleted = bitable.batch_delete_records(table_id, stale)
     written = bitable.batch_create_records(table_id, [_to_payload(row, tz=tz) for row in rows])
     return deleted, written
+
+
+def split_by_station(rows: list[BoardRow]) -> tuple[list[BoardRow], Counter[str]]:
+    """只留看板要的站点，顺带数出每个站点各有多少行，方便核对筛得对不对。"""
+    counts: Counter[str] = Counter(
+        row.fields.get(schema.BOARD_STATION, "（站点为空）") for row in rows
+    )
+    kept = [
+        row for row in rows if row.fields.get(schema.BOARD_STATION) == schema.BOARD_STATION_IN_SCOPE
+    ]
+    return kept, counts
+
+
+def _describe_stations(counts: Counter[str]) -> str:
+    in_scope = schema.BOARD_STATION_IN_SCOPE
+    text = f"{in_scope} {counts.get(in_scope, 0)} 行导入"
+    others = [f"{station} {n} 行" for station, n in counts.most_common() if station != in_scope]
+    if others:
+        text += f"；{'、'.join(others)}不导入"
+    return text
 
 
 def _print_summary(rows: list[BoardRow]) -> None:
@@ -331,8 +371,10 @@ def _print_summary(rows: list[BoardRow]) -> None:
     print(f"写入每批 {MAX_BATCH_SIZE} 条，约 {batches} 次调用；删除旧记录另算。")
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="把交易明细 xlsx 导入 Base 的日读看板表")
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="把交易明细 xlsx 里新加坡站的记录导入 Base 的日读看板表"
+    )
     parser.add_argument("--file", help="xlsx 文件路径。不传就用 .env 里的 DAILY_BOARD_XLSX")
     parser.add_argument("--date", help="只导这一天 YYYY-MM-DD。xlsx 里其他日期的行忽略")
     parser.add_argument(
@@ -340,13 +382,20 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="只解析和统计，不碰 Base。先用它核对表头和数据",
     )
-    args = parser.parse_args(argv)
+    return parser
 
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)-7s %(message)s")
 
     settings = load_settings()
     require_settings(settings, "LARK_BASE_APP_TOKEN", "TABLE_DAILY_BOARD")
+    return run(args, settings, BitableClient(settings.base_app_token))
 
+
+def run(args: argparse.Namespace, settings, bitable: BitableClient) -> int:
+    """入口的主体。settings 和 bitable 从外面传进来，测试里换成假件就能把整条路走一遍。"""
     xlsx_path = Path(args.file or settings.daily_board_xlsx or "")
     if not xlsx_path or str(xlsx_path) == ".":
         print(
@@ -377,16 +426,33 @@ def main(argv: list[str] | None = None) -> int:
         print("没有匹配的行可导入。")
         return 0
 
-    _print_summary(rows)
+    kept, counts = split_by_station(rows)
+    print(f"站点：{_describe_stations(counts)}")
+    if not kept:
+        found = "、".join(f"{station} {n} 行" for station, n in counts.most_common())
+        print(
+            "\n没有导入：这份导出里一行"
+            f"「{schema.BOARD_STATION_IN_SCOPE}」都没有，只有 {found}。\n"
+            "Base 没有动。看一眼是不是导错了文件，或者站点的写法变了。",
+            file=sys.stderr,
+        )
+        return 1
+
+    _print_summary(kept)
 
     if args.dry_run:
         print("\n--dry-run：只解析没写 Base。去掉这个开关才会真正导入。")
         return 0
 
     tz = ZoneInfo(settings.business_timezone)
-    bitable = BitableClient(settings.base_app_token)
-    print(f"\n先删涉及日期的旧记录，再写新记录。日期按 {settings.business_timezone} 的零点写入。")
-    deleted, written = _apply(bitable, settings.table_daily_board, rows, tz=tz)
+    print(
+        "\n先删导出覆盖到的日期上的旧记录，再写新记录。"
+        f"日期按 {settings.business_timezone} 的零点写入。"
+    )
+    covered = {row.order_date for row in rows}
+    deleted, written = _apply(
+        bitable, settings.table_daily_board, kept, tz=tz, replace_dates=covered
+    )
     print(f"删除 {deleted} 条，写入 {written} 条。")
     return 0
 

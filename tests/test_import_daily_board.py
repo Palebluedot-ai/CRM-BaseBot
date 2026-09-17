@@ -386,3 +386,105 @@ def test_写入和删除都按批发送(fake_bitable):
         (TBL_BOARD, 201),
     ]
     assert len(fake_bitable.tables[TBL_BOARD].records) == 1201
+
+
+# ---------- 只导新加坡站（2026-09-17 定的） ----------
+
+
+class RunSettings:
+    business_timezone = "Asia/Singapore"
+    table_daily_board = TBL_BOARD
+    daily_board_xlsx = ""
+
+
+def _run(path: Path, bitable, *extra: str) -> int:
+    args = importer.build_parser().parse_args(["--file", str(path), *extra])
+    return importer.run(args, RunSettings(), bitable)
+
+
+def _sg_record(day: date) -> dict:
+    return {schema.BOARD_ORDER_DATE: _sgt_midnight_ms(day), schema.BOARD_STATION: "新加坡站"}
+
+
+def test_只有新加坡站的行写进Base(tmp_path, fake_bitable):
+    """导出里还有香港站和中东站，看板只要新加坡站。"""
+    path = _make_xlsx(
+        tmp_path,
+        [
+            _row(overrides={"站点": "新加坡站", "用户ID": "577809207768677761"}),
+            _row(overrides={"站点": "香港站", "用户ID": "577809207768677762"}),
+            _row(overrides={"站点": "中东站", "用户ID": "577809207768677763"}),
+        ],
+    )
+
+    assert _run(path, fake_bitable) == 0
+
+    records = list(fake_bitable.tables[TBL_BOARD].records.values())
+    assert [r[schema.BOARD_CLIENT_UID] for r in records] == ["577809207768677761"]
+    assert {r[schema.BOARD_STATION] for r in records} == {"新加坡站"}
+
+
+def test_站点两边带空格也算新加坡站(tmp_path, fake_bitable):
+    path = _make_xlsx(tmp_path, [_row(overrides={"站点": " 新加坡站 "})])
+
+    assert _run(path, fake_bitable) == 0
+    assert len(fake_bitable.tables[TBL_BOARD].records) == 1
+
+
+def test_导出覆盖到的日期整天替换_只有别的站点的日子也清掉旧记录(tmp_path, fake_bitable):
+    """导出是它覆盖的每一天的权威。某天导出里只剩香港站，说明这天新加坡站没有记录，
+    Base 里这天的旧记录就得删掉，不然更正过的数据会留着旧账。导出没覆盖的日子不动。"""
+    table = fake_bitable.tables[TBL_BOARD]
+    old_0910 = table.add_existing(_sg_record(date(2026, 9, 10)))
+    old_0911 = table.add_existing(_sg_record(date(2026, 9, 11)))
+    untouched_0909 = table.add_existing(_sg_record(date(2026, 9, 9)))
+    path = _make_xlsx(
+        tmp_path,
+        [
+            _row(overrides={"站点": "香港站", "交易日期": "2026-09-10"}),
+            _row(overrides={"站点": "新加坡站", "交易日期": "2026-09-11"}),
+        ],
+    )
+
+    assert _run(path, fake_bitable) == 0
+
+    assert old_0910 not in table.records
+    assert old_0911 not in table.records
+    assert untouched_0909 in table.records
+    assert len(table.records) == 2, "留下 9 月 9 日的旧记录和 9 月 11 日新写的一条"
+
+
+def test_一行新加坡站都没有就拒绝导入且不碰Base(tmp_path, fake_bitable, capsys):
+    """站点改了写法、或者导错了文件，筛完一行不剩。这时照常先删后写，会把 Base 里
+    这些日期的记录删光，所以宁可停下。"""
+    table = fake_bitable.tables[TBL_BOARD]
+    old = table.add_existing(_sg_record(date(2026, 9, 10)))
+    path = _make_xlsx(tmp_path, [_row(overrides={"站点": "香港站", "交易日期": "2026-09-10"})])
+
+    assert _run(path, fake_bitable) == 1
+
+    assert old in table.records
+    assert fake_bitable.deleted == []
+    assert fake_bitable.write_count == 0
+    err = capsys.readouterr().err
+    assert "新加坡站" in err
+    assert "香港站" in err
+
+
+def test_预演列出各站点的行数且不碰Base(tmp_path, fake_bitable, capsys):
+    path = _make_xlsx(
+        tmp_path,
+        [
+            _row(overrides={"站点": "新加坡站"}),
+            _row(overrides={"站点": "香港站"}),
+            _row(overrides={"站点": "香港站"}),
+        ],
+    )
+
+    assert _run(path, fake_bitable, "--dry-run") == 0
+
+    out = capsys.readouterr().out
+    assert "新加坡站 1 行" in out
+    assert "香港站 2 行" in out
+    assert fake_bitable.tables[TBL_BOARD].scan_count == 0
+    assert fake_bitable.write_count == 0

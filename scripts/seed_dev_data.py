@@ -358,7 +358,8 @@ _DAMAGED_BOARD_ROWS: tuple[tuple[str, str, float], ...] = (
 
 # 佣金只看总收入，但看板的其他列也得填上：空着的话，哪天有人写了个依赖它们的报表，
 # 会以为线上数据也长这样。分类列用真实导出里出现过的取值；销售是假人，带种子标记。
-_STATIONS = ("新加坡站", "香港站", "中东站")
+# 站点只有新加坡站，看板只放新加坡站的记录。销售分组三种都放：真实导出里新加坡站的
+# 记录也分属 HK组、SG组、支付组。
 _SALES_GROUPS = ("SG组", "HK组", "支付组")
 _USER_TYPES = ("平台介绍客户", "自主开发客户")
 _SALES_NAMES = (f"{SEED_PREFIX}王小明", f"{SEED_PREFIX}李小华")
@@ -412,7 +413,7 @@ def build_board_rows(*, with_damaged_uid: bool = False) -> list[SeedBoardRow]:
                 uid=uid,
                 client_name=names[uid],
                 revenue=revenue,
-                station=_STATIONS[index % len(_STATIONS)],
+                station=schema.BOARD_STATION_IN_SCOPE,
                 sales_name=_SALES_NAMES[index % len(_SALES_NAMES)],
                 kyc_date=_kyc_date_for(uid),
                 sales_group=_SALES_GROUPS[index % len(_SALES_GROUPS)],
