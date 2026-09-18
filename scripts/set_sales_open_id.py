@@ -84,7 +84,8 @@ def run(args: argparse.Namespace, settings, bitable: BitableClient) -> int:
 
     print(f"名册共 {len(roster)} 人：")
     for record_id, name, open_id in roster:
-        print(f"  {name or '(无名)':<20}{open_id or '(OpenID 为空)':<26}{record_id}")
+        # open_id 有 35 个字符，列宽给它留够，否则会和 record_id 挤在一起看不清
+        print(f"  {name or '(无名)':<20}{open_id or '(OpenID 为空)':<38}{record_id}")
 
     if args.list:
         return 0
