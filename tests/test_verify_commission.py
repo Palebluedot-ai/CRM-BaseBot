@@ -98,7 +98,7 @@ def test_一致的链路报零差异(fake_bitable, capsys):
 
 def test_挂错客户会被发现(fake_bitable, capsys):
     channel = _channel(fake_bitable, "R001", "ABC Capital", 20.0)
-    client = _client(fake_bitable, UID_A, "PLUTO STUDIO", channel)
+    _client(fake_bitable, UID_A, "PLUTO STUDIO", channel)  # 这个 UID 的正确客户记录
     other = _client(fake_bitable, UID_B, "SOMEONE ELSE", channel)
     _board_row(fake_bitable, uid=UID_A, revenue=1000.0, rate=20.0, amount=200.0, link=other)
 
