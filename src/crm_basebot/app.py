@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from zoneinfo import ZoneInfo
 
 import lark_oapi as lark
 
@@ -44,6 +45,8 @@ def build_handlers() -> BotHandlers:
 
     bitable = BitableClient(settings.base_app_token)
     audit = AuditLog(bitable, settings.table_audit)
+    # 卡片上选的日期、写进库的日期字段都按业务时区落成日历日，见 domain/dates.py。
+    tz = ZoneInfo(settings.business_timezone)
 
     # 主字段回填走后台线程，不进卡片回调 3 秒预算。见 ReferralService.__init__
     # 里对 background 的说明。
@@ -65,12 +68,14 @@ def build_handlers() -> BotHandlers:
             audit,
             auto_number=settings.referral_auto_number,
             background=_in_background,
+            tz=tz,
         ),
         clients=ReferredClientService(
             bitable, settings.table_client, settings.table_referral, audit
         ),
         commission_query=commission_query,
         background=_in_background,
+        tz=tz,
     )
 
 

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import date
 from typing import Any
 
 import lark_oapi as lark
@@ -29,6 +30,7 @@ from crm_basebot.bot.auth import Sales
 from crm_basebot.domain import schema
 from crm_basebot.domain.audit import AuditLog
 from crm_basebot.domain.commission import CommissionRow
+from crm_basebot.domain.dates import DEFAULT_BUSINESS_TIMEZONE, date_to_ms
 from crm_basebot.domain.referral import ReferralInput, ReferralService
 from crm_basebot.domain.referred_client import ClientInput, ReferredClientService
 from crm_basebot.jobs.reconcile import _write_rows
@@ -38,6 +40,7 @@ from .conftest import TBL_AUDIT, TBL_CLIENT, TBL_COMMISSION, TBL_REFERRAL
 
 ALICE = "ou_alice000000000000000000000000"
 UID = "577809207768677761"
+START_DATE = date(2026, 1, 15)
 
 alice = Sales(open_id=ALICE, name="Alice", role=schema.ROLE_SALES, is_active=True)
 
@@ -70,9 +73,9 @@ def written(fake_bitable, services):
         ReferralInput(
             name="北极星资本",
             email="ops@polaris.example",
-            address="Hong Kong",
-            payment_info="HSBC 004-123456",
+            start_date=START_DATE,
             commission_rate=12.5,
+            payout_frequency=schema.PAYOUT_MONTHLY,
         ),
     )
     clients.create(alice, ClientInput(uid=UID, name="普罗米修斯资本", referral_no=no))
@@ -184,7 +187,13 @@ def test_关掉自动编号时才自己写编号(fake_bitable):
     service = ReferralService(fake_bitable, TBL_REFERRAL, audit, auto_number=False)
     service.create(
         alice,
-        ReferralInput(name="鲸落数字", email="", address="", payment_info="x", commission_rate=20),
+        ReferralInput(
+            name="鲸落数字",
+            email="",
+            start_date=START_DATE,
+            commission_rate=20,
+            payout_frequency=schema.PAYOUT_MONTHLY,
+        ),
     )
 
     (fields,) = [f for t, f in fake_bitable.writes if t == TBL_REFERRAL]
@@ -220,6 +229,13 @@ def test_日期字段是毫秒整数(written):
         # 秒和毫秒差三个数量级，写错量级会落到 1970 年
         assert now_ms - 60_000 <= at <= now_ms + 60_000
 
+    (referral,) = written[TBL_REFERRAL]
+    start = referral[schema.REFERRAL_START_DATE]
+    assert isinstance(start, int) and not isinstance(start, bool)
+    assert start == date_to_ms(START_DATE, tz=DEFAULT_BUSINESS_TIMEZONE)
+    # 提交日期是登记当天，只校验量级：断言具体值会在跨零点时闪断
+    assert isinstance(referral[schema.REFERRAL_SUBMITTED_ON], int)
+
     (commission,) = written[TBL_COMMISSION]
     computed_at = commission[schema.COMM_COMPUTED_AT]
     assert isinstance(computed_at, int)
@@ -240,11 +256,24 @@ def test_审计写入不额外回读(fake_bitable, services):
 
     referrals.create(
         alice,
-        ReferralInput(name="恒星资本", email="", address="", payment_info="x", commission_rate=15),
+        ReferralInput(
+            name="恒星资本",
+            email="",
+            start_date=START_DATE,
+            commission_rate=15,
+            payout_frequency=schema.PAYOUT_MONTHLY,
+        ),
     )
 
     # 只有渠道表那一次写入需要读回自动编号
     assert fake_bitable.read_back_count == 1
+
+
+def test_渠道写入里没有地址和收款信息(written):
+    """这两列模板里没有，登记表单不再收（2026-09-18 定的）。"""
+    (fields,) = written[TBL_REFERRAL]
+    assert schema.REFERRAL_ADDRESS not in fields
+    assert schema.REFERRAL_PAYMENT not in fields
 
 
 # ---------- 佣金汇总表 ----------

@@ -12,6 +12,15 @@ Bitable 日期字段存的是 UTC 毫秒时间戳，界面上按看的人所在�
 from __future__ import annotations
 
 from datetime import date, datetime, tzinfo
+from zoneinfo import ZoneInfo
+
+from ..config import Settings
+
+# 没显式传时区时的默认值，直接取 Settings 里那个字段的默认（Asia/Singapore），
+# 免得在这里再抄一遍字面量 —— 两份默认值迟早会不一致。生产路径（app.py）总是把
+# .env 里的 BUSINESS_TIMEZONE 显式传进来；这个常量只服务于单测和一次性脚本，
+# 它们不该为了一个默认值去凑齐 LARK_APP_ID 之类的环境变量才能实例化 Settings。
+DEFAULT_BUSINESS_TIMEZONE = ZoneInfo(Settings.model_fields["business_timezone"].default)
 
 
 def date_to_ms(day: date, *, tz: tzinfo) -> int:
@@ -22,3 +31,12 @@ def date_to_ms(day: date, *, tz: tzinfo) -> int:
 def ms_to_date(ms: int | float, *, tz: tzinfo) -> date:
     """毫秒时间戳 -> 在 ``tz`` 里的日历日。"""
     return datetime.fromtimestamp(float(ms) / 1000, tz=tz).date()
+
+
+def today_in(tz: tzinfo) -> date:
+    """``tz`` 里的今天。
+
+    登记日期这类「此刻」的日历日一律从这里取：``date.today()`` 拿的是机器所在时区的
+    今天，服务器时区一变，记下来的日期就会差一天。
+    """
+    return datetime.now(tz).date()

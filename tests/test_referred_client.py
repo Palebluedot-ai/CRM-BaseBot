@@ -4,6 +4,7 @@
 """
 
 import logging
+from datetime import date
 
 import pytest
 
@@ -26,6 +27,8 @@ admin = Sales(open_id=ADMIN, name="Admin", role=schema.ROLE_ADMIN, is_active=Tru
 UID_18 = "577809207768677761"
 UID_19 = "2141293991366272768"
 
+START_DATE = date(2026, 1, 15)
+
 
 @pytest.fixture
 def services(fake_bitable):
@@ -41,9 +44,9 @@ def _referral(referrals, sales, name="ABC Capital"):
         ReferralInput(
             name=name,
             email="a@b.com",
-            address="HK",
-            payment_info="bank",
+            start_date=START_DATE,
             commission_rate=20,
+            payout_frequency=schema.PAYOUT_MONTHLY,
         ),
     )
     return no

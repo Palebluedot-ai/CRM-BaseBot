@@ -21,7 +21,8 @@ from ..lark.bitable import (
 #
 # 列对齐 2026-09-17 给的模板「Referral Registration」：Referral Code、Name、Email、
 # Start Date、Commission Rate、Payout Frequency、Submitted On、Sales In Charge。
-# 模板里没有的地址、收款信息先留着，机器人的登记表单还在收这两项。
+# 模板里没有的地址、收款信息两列留在 Base（历史行有值，删列是破坏性的），但机器人的
+# 登记表单不再收这两项，改成按模板收开始日期和结算频率（2026-09-18 定的）。
 
 TABLE_REFERRAL_NAME = "Referral Information"
 
@@ -44,12 +45,20 @@ REFERRAL_STATUS = "状态"
 STATUS_ACTIVE = "生效"
 STATUS_DISABLED = "停用"
 
+# 结算频率只有这两种，取值就是模板 Payout Frequency 里的原文。不翻译成中文：
+# 导入的历史行存的是 Monthly / Quarterly，翻译会让同一列里出现中英两套值，
+# 单选字段会多出两个永远没人选的选项。
+PAYOUT_MONTHLY = "Monthly"
+PAYOUT_QUARTERLY = "Quarterly"
+PAYOUT_OPTIONS: tuple[str, ...] = (PAYOUT_MONTHLY, PAYOUT_QUARTERLY)
+
 REFERRAL_FIELDS: dict[str, int] = {
     # 文本，不是自动编号：现成的 R001-R101 是从模板导进来的，自动编号列写不进去。
     # 机器人新登记时读最大号 +1，在写锁的临界区里串行，不会撞号（2026-09-17 定的）。
     REFERRAL_NO: FIELD_TYPE_TEXT,
     REFERRAL_NAME: FIELD_TYPE_TEXT,
     REFERRAL_EMAIL: FIELD_TYPE_TEXT,
+    # 机器人的登记表单不再写这两列，留给人手工补；列本身不删，见文件开头的说明。
     REFERRAL_ADDRESS: FIELD_TYPE_TEXT,
     REFERRAL_PAYMENT: FIELD_TYPE_TEXT,
     REFERRAL_START_DATE: FIELD_TYPE_DATETIME,

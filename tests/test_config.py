@@ -3,6 +3,8 @@
 重点是编号开关能真的切换实现 —— 实测结果出来后改 .env 就够，不用动代码。
 """
 
+from datetime import date
+
 import pytest
 from pydantic import ValidationError
 
@@ -58,7 +60,13 @@ def test_开关关掉时走后端递增(fake_bitable):
 
     no, _ = service.create(
         alice,
-        ReferralInput(name="X", email="", address="", payment_info="p", commission_rate=10),
+        ReferralInput(
+            name="X",
+            email="",
+            start_date=date(2026, 1, 15),
+            commission_rate=10,
+            payout_frequency=schema.PAYOUT_MONTHLY,
+        ),
     )
     assert no == "R004"
 

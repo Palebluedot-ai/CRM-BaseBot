@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..domain import schema
+
 ACTION_OPEN_REFERRAL_FORM = "open_referral_form"
 ACTION_OPEN_CLIENT_FORM = "open_client_form"
 ACTION_SUBMIT_REFERRAL = "submit_referral"
@@ -23,9 +25,9 @@ ACTION_QUERY_COMMISSION = "query_commission"
 # 表单项标识，回调的 form_value 里用它取值
 F_REFERRAL_NAME = "referral_name"
 F_REFERRAL_EMAIL = "referral_email"
-F_REFERRAL_ADDRESS = "referral_address"
-F_REFERRAL_PAYMENT = "referral_payment"
+F_REFERRAL_START_DATE = "referral_start_date"
 F_REFERRAL_RATE = "referral_rate"
+F_REFERRAL_PAYOUT = "referral_payout"
 F_CLIENT_UID = "client_uid"
 F_CLIENT_NAME = "client_name"
 F_CLIENT_REFERRAL = "client_referral"
@@ -62,6 +64,55 @@ def _submit(name: str, action: str, text: str = "提交") -> dict[str, Any]:
         "form_action_type": "submit",
         "behaviors": [{"type": "callback", "value": {"action": action}}],
     }
+
+
+def _date_picker(name: str, placeholder: str, *, required: bool = True) -> dict[str, Any]:
+    """日期选择器。
+
+    和下拉一样没有 ``label`` 属性，标题只能用富文本组件顶上。回传的是**毫秒时间戳**
+    而不是 ``YYYY-MM-DD`` 文本，解析在 ``handlers._form_date`` 里做。
+    """
+    return {
+        "tag": "date_picker",
+        "name": name,
+        "placeholder": {"tag": "plain_text", "content": placeholder},
+        "required": required,
+        "width": "fill",
+        "margin": "0px 0px 8px 0px",
+    }
+
+
+def _select(
+    name: str,
+    placeholder: str,
+    options: list[tuple[str, str]],
+    *,
+    required: bool = True,
+) -> dict[str, Any]:
+    """单选下拉。``options`` 是 [(给人看的文字, 回传给我们的值)]。
+
+    两者分开传是有意的：标签想写「Monthly（按月）」，但写进 Base 的必须是模板原文
+    ``Monthly``，否则单选列里会多出一堆同义选项。
+    """
+    return {
+        "tag": "select_static",
+        "name": name,
+        "placeholder": {"tag": "plain_text", "content": placeholder},
+        "required": required,
+        "width": "fill",
+        "options": [
+            {"text": {"tag": "plain_text", "content": label}, "value": value}
+            for label, value in options
+        ],
+        "margin": "0px 0px 8px 0px",
+    }
+
+
+# 结算频率下拉的选项：标签带中文提示，值保持模板原文。
+PAYOUT_CHOICES: list[tuple[str, str]] = [
+    (f"{schema.PAYOUT_MONTHLY}（按月）", schema.PAYOUT_MONTHLY),
+    (f"{schema.PAYOUT_QUARTERLY}（按季）", schema.PAYOUT_QUARTERLY),
+]
 
 
 def _menu_button(text: str, action: str, *, primary: bool = False) -> dict[str, Any]:
@@ -112,14 +163,19 @@ def referral_form_card() -> dict[str, Any]:
                     "elements": [
                         _input(F_REFERRAL_NAME, "渠道名称", "例如 ABC Capital"),
                         _input(F_REFERRAL_EMAIL, "邮箱", "contact@example.com"),
-                        _input(F_REFERRAL_ADDRESS, "地址", "用于合同和付款", required=False),
-                        _input(F_REFERRAL_PAYMENT, "收款信息", "银行账户或钱包地址"),
+                        # 日期选择器和下拉都没有 label，标题得用富文本单独顶一行，
+                        # 否则用户看到一个没有任何说明的控件。
+                        _text("**开始日期**"),
+                        _date_picker(F_REFERRAL_START_DATE, "选择合作开始日期"),
                         _input(F_REFERRAL_RATE, "分佣比例 (%)", "例如 20 表示 20%"),
+                        _text("**结算频率**"),
+                        _select(F_REFERRAL_PAYOUT, "选择结算频率", list(PAYOUT_CHOICES)),
                         _submit("referral_submit", ACTION_SUBMIT_REFERRAL, "提交登记"),
                     ],
                 },
                 _text(
-                    "<font color='grey'>编号由系统自动生成，归属人自动记为你本人。</font>",
+                    "<font color='grey'>编号由系统自动生成，提交日期记为今天，"
+                    "归属人自动记为你本人。</font>",
                     size="notation",
                 ),
             ]
@@ -136,14 +192,7 @@ def client_form_card(referral_options: list[tuple[str, str]]) -> dict[str, Any]:
         )
 
     options = [
-        {
-            "text": {
-                "tag": "plain_text",
-                "content": f"{no} {name}".strip() if name else f"{no}（未命名）",
-            },
-            "value": no,
-        }
-        for no, name in referral_options
+        (f"{no} {name}".strip() if name else f"{no}（未命名）", no) for no, name in referral_options
     ]
 
     return {
@@ -161,18 +210,7 @@ def client_form_card(referral_options: list[tuple[str, str]]) -> dict[str, Any]:
                         # 下拉选择组件没有 label 属性（只有输入框有），标题只能单独用
                         # 一个富文本组件顶上，官方示例也是这么做的。
                         _text("**所属渠道**"),
-                        {
-                            "tag": "select_static",
-                            "name": F_CLIENT_REFERRAL,
-                            "placeholder": {
-                                "tag": "plain_text",
-                                "content": "选择一个你名下的渠道",
-                            },
-                            "required": True,
-                            "width": "fill",
-                            "options": options,
-                            "margin": "0px 0px 8px 0px",
-                        },
+                        _select(F_CLIENT_REFERRAL, "选择一个你名下的渠道", options),
                         _input(F_CLIENT_UID, "客户UID", "例如 577809207768677761"),
                         _input(F_CLIENT_NAME, "客户名称", "例如 PLUTO STUDIO LIMITED"),
                         _submit("client_submit", ACTION_SUBMIT_CLIENT, "提交登记"),

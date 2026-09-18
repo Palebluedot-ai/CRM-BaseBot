@@ -1,12 +1,15 @@
 """渠道登记流程。"""
 
+import json
 import logging
+from datetime import date
 
 import pytest
 
 from crm_basebot.bot.auth import Sales
 from crm_basebot.domain import schema
 from crm_basebot.domain.audit import AuditLog
+from crm_basebot.domain.dates import DEFAULT_BUSINESS_TIMEZONE, date_to_ms, today_in
 from crm_basebot.domain.referral import (
     ReferralInput,
     ReferralService,
@@ -21,6 +24,8 @@ from .conftest import TBL_AUDIT, TBL_REFERRAL
 ALICE = "ou_alice000000000000000000000000"
 BOB = "ou_bob00000000000000000000000000"
 
+START_DATE = date(2026, 1, 15)
+
 alice = Sales(open_id=ALICE, name="Alice", role=schema.ROLE_SALES, is_active=True)
 bob = Sales(open_id=BOB, name="Bob", role=schema.ROLE_SALES, is_active=True)
 
@@ -31,13 +36,13 @@ def service(fake_bitable):
     return ReferralService(fake_bitable, TBL_REFERRAL, audit, auto_number=True)
 
 
-def _valid(name="ABC Capital", rate=20.0):
+def _valid(name="ABC Capital", rate=20.0, *, start_date=START_DATE, payout=schema.PAYOUT_MONTHLY):
     return ReferralInput(
         name=name,
         email="contact@abc.com",
-        address="Hong Kong",
-        payment_info="HSBC 001-234567-001",
+        start_date=start_date,
         commission_rate=rate,
+        payout_frequency=payout,
     )
 
 
@@ -195,11 +200,72 @@ def test_邮箱格式检查(service):
             ReferralInput(
                 name="X",
                 email="not-an-email",
-                address="",
-                payment_info="p",
+                start_date=START_DATE,
                 commission_rate=10,
+                payout_frequency=schema.PAYOUT_MONTHLY,
             ),
         )
+
+
+# ---------- 表单字段落库 ----------
+
+
+def test_开始日期按业务时区零点落库(fake_bitable, service):
+    """和导入脚本、看板同一口径：写成业务时区那一天的零点，不是 UTC 零点。"""
+    _, record_id = service.create(alice, _valid())
+
+    stored = fake_bitable.tables[TBL_REFERRAL].records[record_id]
+    assert stored[schema.REFERRAL_START_DATE] == date_to_ms(
+        START_DATE, tz=DEFAULT_BUSINESS_TIMEZONE
+    )
+
+
+def test_结算频率原样落库(fake_bitable, service):
+    """写的是模板原文 Monthly / Quarterly，不是下拉标签里的中文。"""
+    _, record_id = service.create(alice, _valid(payout=schema.PAYOUT_QUARTERLY))
+
+    stored = fake_bitable.tables[TBL_REFERRAL].records[record_id]
+    assert stored[schema.REFERRAL_PAYOUT] == "Quarterly"
+
+
+def test_提交日期记为登记当天(fake_bitable, service):
+    """模板里的 Submitted On 在导入的历史行上都有值，机器人登记的行也不能空着。"""
+    _, record_id = service.create(alice, _valid())
+
+    stored = fake_bitable.tables[TBL_REFERRAL].records[record_id]
+    expected = date_to_ms(today_in(DEFAULT_BUSINESS_TIMEZONE), tz=DEFAULT_BUSINESS_TIMEZONE)
+    assert stored[schema.REFERRAL_SUBMITTED_ON] == expected
+
+
+def test_登记表单不再写地址和收款信息(fake_bitable, service):
+    """这两列模板里没有，机器人不再收，只留给人手工补（2026-09-18 定的）。"""
+    _, record_id = service.create(alice, _valid())
+
+    stored = fake_bitable.tables[TBL_REFERRAL].records[record_id]
+    assert schema.REFERRAL_ADDRESS not in stored
+    assert schema.REFERRAL_PAYMENT not in stored
+
+
+@pytest.mark.parametrize("payout", ["monthly", "按月", "", "Yearly"])
+def test_结算频率只能是模板里的两种(service, payout):
+    """单选列里多出一个没人选的选项就删不掉了，所以在这里拦住。"""
+    with pytest.raises(ValidationError, match="结算频率"):
+        service.create(alice, _valid(payout=payout))
+
+
+def test_开始日期为空被拒(service):
+    """类型上不该发生，但值是从卡片回调里取的，真能是 None。"""
+    with pytest.raises(ValidationError, match="开始日期"):
+        service.create(alice, _valid(start_date=None))
+
+
+def test_审计里记下开始日期和结算频率(fake_bitable, service):
+    service.create(alice, _valid(payout=schema.PAYOUT_QUARTERLY))
+
+    (row,) = fake_bitable.tables[TBL_AUDIT].records.values()
+    detail = json.loads(row[schema.AUDIT_DETAIL])
+    assert detail["开始日期"] == START_DATE.isoformat()
+    assert detail["结算频率"] == schema.PAYOUT_QUARTERLY
 
 
 # ---------- 审计 ----------

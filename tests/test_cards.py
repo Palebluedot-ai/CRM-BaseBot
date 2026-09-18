@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from crm_basebot.bot import cards
+from crm_basebot.domain import schema
 
 # header.template 的合法取值，来自「标题组件」文档。写错了标题会退化成 default。
 VALID_TEMPLATES = {
@@ -254,7 +255,7 @@ def test_输入框带_label_和_placeholder():
     """input 是文档里明确支持 label 的组件，表单里的输入项都该有标题。"""
     card = cards.referral_form_card()
     inputs = components(card, "input")
-    assert len(inputs) == 5
+    assert len(inputs) == 3
 
     for node in inputs:
         assert node["label"]["tag"] == "plain_text"
@@ -263,10 +264,48 @@ def test_输入框带_label_和_placeholder():
         assert isinstance(node["required"], bool)
 
 
-def test_地址是选填其余必填():
+def test_表单不再收地址和收款信息():
+    """模板（2026-09-17）里没有这两项；表单按模板收开始日期和结算频率（2026-09-18 定的）。"""
     card = cards.referral_form_card()
-    optional = {n["name"] for n in components(card, "input") if not n["required"]}
-    assert optional == {cards.F_REFERRAL_ADDRESS}
+    labels = [n["label"]["content"] for n in components(card, "input")]
+    assert labels == ["渠道名称", "邮箱", "分佣比例 (%)"]
+
+
+# ---------- 日期选择器 ----------
+
+
+def test_开始日期是必填的日期选择器():
+    """回传的是毫秒时间戳而不是 YYYY-MM-DD 文本，这一项必须有值。"""
+    card = cards.referral_form_card()
+    (picker,) = components(card, "date_picker")
+
+    assert picker["name"] == cards.F_REFERRAL_START_DATE
+    assert picker["required"] is True
+    assert picker["placeholder"]["tag"] == "plain_text"
+    assert picker["placeholder"]["content"]
+    # 日期选择器和下拉一样没有 label 属性，写了也不渲染
+    assert "label" not in picker
+
+    form = components(card, "form")[0]
+    titles = [n["content"] for n in components(form, "markdown")]
+    assert any("开始日期" in text for text in titles), "日期选择器上面要有一行说明它是什么"
+
+
+def test_结算频率下拉的取值是模板原文():
+    """值必须写 Monthly / Quarterly：导入的历史行就是这两个字符串，翻译会让单选列出现两套值。"""
+    card = cards.referral_form_card()
+    (select,) = components(card, "select_static")
+
+    assert select["name"] == cards.F_REFERRAL_PAYOUT
+    assert select["required"] is True
+    assert [option["value"] for option in select["options"]] == [
+        schema.PAYOUT_MONTHLY,
+        schema.PAYOUT_QUARTERLY,
+    ]
+
+    form = components(card, "form")[0]
+    titles = [n["content"] for n in components(form, "markdown")]
+    assert any("结算频率" in text for text in titles), "下拉框上面要有一行说明它是什么"
 
 
 # ---------- 主菜单 ----------

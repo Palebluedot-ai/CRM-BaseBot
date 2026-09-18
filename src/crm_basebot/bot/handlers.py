@@ -19,6 +19,7 @@ import logging
 import re
 import threading
 from collections.abc import Callable
+from datetime import date, tzinfo
 from typing import Any
 
 import lark_oapi as lark
@@ -32,6 +33,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
     P2CardActionTriggerResponse,
 )
 
+from ..domain.dates import DEFAULT_BUSINESS_TIMEZONE, ms_to_date
 from ..domain.referral import ReferralInput, ValidationError
 from ..domain.referred_client import ClientInput
 from ..lark.values import to_number
@@ -53,6 +55,9 @@ class BotHandlers:
     ``background`` 是后台任务的执行器，用于卡片回调超预算时把实际写入丢到后台
     去跑（见 ``_submit_client``）。默认起一个 daemon 线程；测试里传
     ``lambda fn: fn()`` 走同步，避免线程竞态。
+
+    ``tz`` 是业务时区：卡片上选的日期要按它落成日历日（见 ``_form_date``）。默认值
+    和 ``domain/dates.py`` 里的一致，生产在 app.py 里注入 ``BUSINESS_TIMEZONE``。
     """
 
     def __init__(
@@ -64,6 +69,7 @@ class BotHandlers:
         clients,
         commission_query=None,
         background: Callable[[Callable[[], None]], None] = _run_in_thread,
+        tz: tzinfo = DEFAULT_BUSINESS_TIMEZONE,
     ) -> None:
         self._client = client
         self._directory = directory
@@ -73,6 +79,7 @@ class BotHandlers:
         # 生产 app.py 一定会注入；测试有的场景不需要。
         self._commission_query = commission_query
         self._background = background
+        self._tz = tz
 
     # ---------- 收到消息：弹主菜单 ----------
 
@@ -147,21 +154,33 @@ class BotHandlers:
         if rate is None:
             raise ValidationError("分佣比例要填数字，例如 20")
 
+        # 日期选择器不给值的话（理论上必填项不会，但平台确实有回 null 的版本），
+        # 这里给出人话的报错，而不是让 date_to_ms 在领域层炸成「系统出错了」。
+        start_date = _form_date(form, cards.F_REFERRAL_START_DATE, tz=self._tz)
+        if start_date is None:
+            raise ValidationError("开始日期要选一个日期")
+
+        # 下拉给的中文标签不回传，回传的是 value，正好是写进 Base 的原文（Monthly /
+        # Quarterly）；不是这两个值的话，领域层的 validated() 会拦下来。
+        payout_frequency = _select_value(form.get(cards.F_REFERRAL_PAYOUT))
+
         referral_no, _ = self._referrals.create(
             sales,
             ReferralInput(
                 name=_form_text(form, cards.F_REFERRAL_NAME),
                 email=_form_text(form, cards.F_REFERRAL_EMAIL),
-                address=_form_text(form, cards.F_REFERRAL_ADDRESS),
-                payment_info=_form_text(form, cards.F_REFERRAL_PAYMENT),
+                start_date=start_date,
                 commission_rate=rate,
+                payout_frequency=payout_frequency,
             ),
         )
 
         return _card_response(
             cards.success_card(
                 "渠道已登记",
-                f"编号 **{referral_no}**，已生效。\n\n接下来可以把这个渠道介绍的客户登记进来。",
+                f"编号 **{referral_no}**，已生效。\n\n"
+                f"开始日期 {start_date.isoformat()}，结算频率 {payout_frequency}。\n\n"
+                "接下来可以把这个渠道介绍的客户登记进来。",
             ),
             toast=f"已登记 {referral_no}",
         )
@@ -323,10 +342,46 @@ def _form_text(form: dict[str, Any], key: str) -> str:
 
 
 def _select_value(raw: Any) -> str:
-    """下拉组件的回传值可能是裸字符串，也可能包成 {"value": ...}。"""
+    """下拉组件的回传值可能是裸字符串，也可能包成 ``{"value": ...}``。"""
     if isinstance(raw, dict):
         return str(raw.get("value", ""))
     return str(raw or "")
+
+
+_ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _form_date(form: dict[str, Any], key: str, *, tz: tzinfo) -> date | None:
+    """从 form_value 里取日期选择器的值，转成业务时区的日历日；取不到返回 None。
+
+    飞书日期选择器回传的是**毫秒时间戳**，可能是字符串也可能是数字，也可能被包成
+    ``{"value": ...}``。时间戳按业务时区取日历日：界面里手工填的日期就是那一天的业务
+    时区零点，和 ``domain/dates.py`` 写库的口径一致。顺手也认 ``YYYY-MM-DD`` 文本，
+    少一种「明明填了合法日期却报错」的情况。
+
+    解析不出来一律返回 None，由调用方决定报什么错 —— 校验失败要说人话。
+    """
+    raw = form.get(key)
+    if isinstance(raw, dict):
+        raw = raw.get("value")
+    if raw is None:
+        return None
+
+    text = str(raw).strip()
+    if not text:
+        return None
+
+    if _ISO_DATE_PATTERN.match(text):
+        try:
+            return date.fromisoformat(text)
+        except ValueError:  # 形似而非法，比如 2026-02-30
+            return None
+
+    try:
+        ms = int(float(text))
+    except ValueError:
+        return None
+    return ms_to_date(ms, tz=tz)
 
 
 _PERIOD_PATTERN = re.compile(r"^\d{4}-\d{2}$")

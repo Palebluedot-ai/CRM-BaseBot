@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 from typing import Any
 
 import lark_oapi as lark
@@ -24,6 +25,7 @@ from crm_basebot.bot.auth import SalesDirectory
 from crm_basebot.bot.handlers import BotHandlers
 from crm_basebot.domain import schema
 from crm_basebot.domain.audit import AuditLog
+from crm_basebot.domain.dates import DEFAULT_BUSINESS_TIMEZONE, date_to_ms
 from crm_basebot.domain.referral import ReferralService
 from crm_basebot.domain.referred_client import ReferredClientService
 
@@ -32,6 +34,10 @@ from .conftest import TBL_AUDIT, TBL_CLIENT, TBL_REFERRAL, TBL_SALES
 ALICE = "ou_alice000000000000000000000000"
 STRANGER = "ou_stranger0000000000000000000"
 UID = "577809207768677761"
+
+# 日期选择器回传的是毫秒时间戳字符串，按真实回调的形状造值
+START_DATE = date(2026, 1, 15)
+START_DATE_MS = str(date_to_ms(START_DATE, tz=DEFAULT_BUSINESS_TIMEZONE))
 
 
 class _StubResponse:
@@ -123,9 +129,9 @@ def referral_form(**overrides) -> dict[str, Any]:
     form = {
         cards.F_REFERRAL_NAME: "北极星资本",
         cards.F_REFERRAL_EMAIL: "ops@polaris.example",
-        cards.F_REFERRAL_ADDRESS: "Hong Kong",
-        cards.F_REFERRAL_PAYMENT: "HSBC 004-123456",
+        cards.F_REFERRAL_START_DATE: START_DATE_MS,
         cards.F_REFERRAL_RATE: "20",
+        cards.F_REFERRAL_PAYOUT: schema.PAYOUT_MONTHLY,
     }
     form.update(overrides)
     return form
@@ -182,23 +188,91 @@ def test_交互后仍然是_2_0_结构的卡片(handlers):
 # ---------- 表单值的边界 ----------
 
 
-def test_选填项回传_null_不会把回调打挂(handlers):
-    """地址是选填的。平台对没填的项可能给 null，而不是干脆不给这个 key。
+def test_文本项回传_null_不会把回调打挂(handlers):
+    """邮箱是选填的。平台对没填的项可能给 null，而不是干脆不给这个 key。
 
     ``form.get(key, "")`` 挡不住 null —— 默认值只在 key 缺失时生效。None 一路
     传到 ``.strip()`` 才炸，在 3 秒回调里就是一句「系统出错了」，看不出是哪个字段。
     """
-    payload = submit_referral(handlers, referral_form(**{cards.F_REFERRAL_ADDRESS: None}))
+    payload = submit_referral(handlers, referral_form(**{cards.F_REFERRAL_EMAIL: None}))
 
     assert payload["toast"]["type"] == "success"
     assert payload["card"]["data"]["header"]["title"]["content"] == "渠道已登记"
 
 
-def test_选填项整个缺失也能提交(handlers):
+def test_文本项整个缺失也能提交(handlers):
     form = referral_form()
-    del form[cards.F_REFERRAL_ADDRESS]
+    del form[cards.F_REFERRAL_EMAIL]
 
     assert submit_referral(handlers, form)["toast"]["type"] == "success"
+
+
+def _referral_fields(fake_bitable) -> dict[str, Any]:
+    """渠道表收到的第一份写入 payload。"""
+    (_, written) = next(
+        (table_id, fields) for table_id, fields in fake_bitable.writes if table_id == TBL_REFERRAL
+    )
+    return written
+
+
+def test_日期时间戳落成业务时区的日历日(fake_bitable, handlers):
+    """选择器给的是毫秒时间戳，写进 Base 的是业务时区那一天的零点，和导入脚本同口径。"""
+    submit_referral(handlers)
+
+    assert _referral_fields(fake_bitable)[schema.REFERRAL_START_DATE] == date_to_ms(
+        START_DATE, tz=DEFAULT_BUSINESS_TIMEZONE
+    )
+
+
+def test_日期包成字典也认(fake_bitable, handlers):
+    submit_referral(
+        handlers, referral_form(**{cards.F_REFERRAL_START_DATE: {"value": START_DATE_MS}})
+    )
+
+    assert _referral_fields(fake_bitable)[schema.REFERRAL_START_DATE] == date_to_ms(
+        START_DATE, tz=DEFAULT_BUSINESS_TIMEZONE
+    )
+
+
+def test_日期回传_YYYY_MM_DD_文本也认(fake_bitable, handlers):
+    """少一种「明明填了合法日期却报错」的情况。"""
+    submit_referral(handlers, referral_form(**{cards.F_REFERRAL_START_DATE: "2026-01-15"}))
+
+    assert _referral_fields(fake_bitable)[schema.REFERRAL_START_DATE] == date_to_ms(
+        START_DATE, tz=DEFAULT_BUSINESS_TIMEZONE
+    )
+
+
+@pytest.mark.parametrize("missing", [None, "", "不是日期"])
+def test_日期取不到时给出人话报错(handlers, missing):
+    payload = submit_referral(handlers, referral_form(**{cards.F_REFERRAL_START_DATE: missing}))
+
+    assert payload["card"]["data"]["header"]["title"]["content"] == "没能完成"
+    assert "开始日期" in json.dumps(payload, ensure_ascii=False)
+
+
+def test_结算频率原样写进_Base(fake_bitable, handlers):
+    submit_referral(handlers, referral_form(**{cards.F_REFERRAL_PAYOUT: schema.PAYOUT_QUARTERLY}))
+
+    assert _referral_fields(fake_bitable)[schema.REFERRAL_PAYOUT] == schema.PAYOUT_QUARTERLY
+
+
+def test_结算频率包成字典也认(fake_bitable, handlers):
+    """和客户登记的渠道下拉一样：回传值可能是裸字符串，也可能包一层。"""
+    submit_referral(
+        handlers,
+        referral_form(**{cards.F_REFERRAL_PAYOUT: {"value": schema.PAYOUT_QUARTERLY}}),
+    )
+
+    assert _referral_fields(fake_bitable)[schema.REFERRAL_PAYOUT] == schema.PAYOUT_QUARTERLY
+
+
+@pytest.mark.parametrize("bad", [None, "", "按月", "monthly"])
+def test_结算频率不是模板原文时给出人话报错(handlers, bad):
+    payload = submit_referral(handlers, referral_form(**{cards.F_REFERRAL_PAYOUT: bad}))
+
+    assert payload["card"]["data"]["header"]["title"]["content"] == "没能完成"
+    assert "结算频率" in json.dumps(payload, ensure_ascii=False)
 
 
 def test_必填项回传_null_给出人话报错(handlers):

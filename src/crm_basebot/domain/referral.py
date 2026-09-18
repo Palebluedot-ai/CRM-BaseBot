@@ -15,12 +15,14 @@ import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date, tzinfo
 
 from ..bot.auth import Sales
 from ..lark.bitable import _WRITE_LOCK, BitableClient
 from ..lark.values import extract_text
 from . import schema
 from .audit import ACTION_CREATE_REFERRAL, AuditLog
+from .dates import DEFAULT_BUSINESS_TIMEZONE, date_to_ms, today_in
 
 logger = logging.getLogger(__name__)
 
@@ -33,11 +35,18 @@ class ValidationError(ValueError):
 
 @dataclass(frozen=True)
 class ReferralInput:
+    """机器人登记表单收上来的内容。
+
+    字段和模板「Referral Registration」对齐：渠道名称、邮箱、开始日期、分佣比例、
+    结算频率。地址和收款信息模板里没有，表单也不再收（2026-09-18 定的）；提交日期
+    由服务端记成登记当天，不需要销售填。
+    """
+
     name: str
     email: str
-    address: str
-    payment_info: str
+    start_date: date
     commission_rate: float
+    payout_frequency: str
 
     def validated(self) -> ReferralInput:
         if not self.name.strip():
@@ -46,15 +55,25 @@ class ReferralInput:
         if self.email and "@" not in self.email:
             raise ValidationError(f"邮箱格式不对：{self.email}")
 
+        if self.start_date is None:
+            # 类型上不该发生，但调用方的值是从卡片回调里取的，真能传来 None。
+            raise ValidationError("开始日期不能为空")
+
         if not 0 < self.commission_rate <= 100:
             raise ValidationError(f"分佣比例要在 0 到 100 之间，你填的是 {self.commission_rate}")
+
+        if self.payout_frequency not in schema.PAYOUT_OPTIONS:
+            raise ValidationError(
+                f"结算频率只能是 {' 或 '.join(schema.PAYOUT_OPTIONS)}，"
+                f"你填的是「{self.payout_frequency}」"
+            )
 
         return ReferralInput(
             name=self.name.strip(),
             email=self.email.strip(),
-            address=self.address.strip(),
-            payment_info=self.payment_info.strip(),
+            start_date=self.start_date,
             commission_rate=self.commission_rate,
+            payout_frequency=self.payout_frequency,
         )
 
 
@@ -101,11 +120,15 @@ class ReferralService:
         *,
         auto_number: bool = True,
         background: Callable[[Callable[[], None]], None] = _run_sync,
+        tz: tzinfo = DEFAULT_BUSINESS_TIMEZONE,
     ) -> None:
         self._bitable = bitable
         self._table_id = table_id
         self._audit = audit
         self._auto_number = auto_number
+        # 日期字段按业务时区写成那一天的零点，和导入脚本、看板同一口径（domain/dates.py）。
+        # 默认值让单测和一次性脚本不用凑齐环境变量；生产在 app.py 里注入 .env 的值。
+        self._tz = tz
         # 主字段回填往返有 2 次（list_fields + update_record），加上 create 的
         # 3 次一共 5 次，压不进卡片回调 3 秒预算 —— 客户端会显示成「延时未
         # 响应」（就是那个小火箭占位）。所以生产走后台线程，主字段的展示
@@ -142,9 +165,12 @@ class ReferralService:
         fields: dict[str, object] = {
             schema.REFERRAL_NAME: clean.name,
             schema.REFERRAL_EMAIL: clean.email,
-            schema.REFERRAL_ADDRESS: clean.address,
-            schema.REFERRAL_PAYMENT: clean.payment_info,
+            schema.REFERRAL_START_DATE: date_to_ms(clean.start_date, tz=self._tz),
             schema.REFERRAL_RATE: clean.commission_rate,
+            schema.REFERRAL_PAYOUT: clean.payout_frequency,
+            # 提交日期 = 登记当天。模板里的 Submitted On 在导入的历史行上都有值，
+            # 机器人登记的行留空会让这一列半空着，报表上分不出「还没记」和「忘了记」。
+            schema.REFERRAL_SUBMITTED_ON: date_to_ms(today_in(self._tz), tz=self._tz),
             schema.REFERRAL_OWNER: [{"id": sales.open_id}],
             schema.REFERRAL_OWNER_OPEN_ID: sales.open_id,
             # 登记即生效，没有「待审核」这一步（2026-09-04 定的）
@@ -159,7 +185,9 @@ class ReferralService:
             detail={
                 "渠道名称": clean.name,
                 "邮箱": clean.email,
+                "开始日期": clean.start_date.isoformat(),
                 "分佣比例": clean.commission_rate,
+                "结算频率": clean.payout_frequency,
             },
         )
 
