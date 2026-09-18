@@ -26,3 +26,7 @@ build/
 
 # macOS
 .DS_Store
+
+# 主目录里手工放进来的临时产物，不是项目内容
+/CRM-BaseBot-*.zip
+/UID

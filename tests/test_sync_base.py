@@ -10,12 +10,15 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+from datetime import date
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import lark_oapi as lark
 import pytest
 
 from crm_basebot.domain import schema
+from crm_basebot.domain.dates import date_to_ms
 from crm_basebot.lark.bitable import (
     FIELD_TYPE_AUTO_NUMBER,
     FIELD_TYPE_FORMULA,
@@ -23,6 +26,10 @@ from crm_basebot.lark.bitable import (
     FIELD_TYPE_TEXT,
     FIELD_TYPE_USER,
 )
+
+from .conftest import TBL_BOARD
+
+SGT = ZoneInfo("Asia/Singapore")
 
 
 def _load(name: str):
@@ -228,3 +235,40 @@ def test_本笔佣金公式逐字符就是线上那一版():
     expression, data_type = schema.DAILY_BOARD_DERIVED_FORMULAS[schema.BOARD_ROW_COMMISSION]
     assert expression == ('IF(ISBLANK([分佣比例]), "", [总收入(opt+现货+合约)] * [分佣比例] / 100)')
     assert data_type == schema.FORMULA_DATA_TYPE_NUMBER
+
+
+def test_月份列是_yyyy_MM_文本():
+    """视图和仪表盘都没法按「派生维度」分组，得先有月份列才能做按月报表。"""
+    expression, data_type = schema.DAILY_BOARD_DERIVED_FORMULAS[schema.BOARD_MONTH]
+    assert expression == 'TEXT([交易日期], "yyyy-MM")'
+    assert data_type == schema.FORMULA_DATA_TYPE_TEXT
+
+
+def test_月份自检在错月时报警(fake_bitable, capsys):
+    """公式里的 TEXT() 按**平台**时区算（实测 UTC+8），业务时区不是 UTC+8 就会错月。
+
+    错月不报任何别的错：只是把 8 月的钱算进 7 月，报表上看不出来。所以自检必须自己发现。
+    """
+    fake_bitable.tables[TBL_BOARD].add_existing(
+        {
+            schema.BOARD_ORDER_DATE: date_to_ms(date(2026, 8, 1), tz=SGT),
+            schema.BOARD_MONTH: "2026-07",  # 错月
+        }
+    )
+
+    sync_base._verify_formulas(fake_bitable, TBL_BOARD, tz=SGT, sample=10)
+
+    assert "对不上" in capsys.readouterr().out
+
+
+def test_月份自检通过时不报警(fake_bitable, capsys):
+    fake_bitable.tables[TBL_BOARD].add_existing(
+        {
+            schema.BOARD_ORDER_DATE: date_to_ms(date(2026, 8, 1), tz=SGT),
+            schema.BOARD_MONTH: "2026-08",
+        }
+    )
+
+    sync_base._verify_formulas(fake_bitable, TBL_BOARD, tz=SGT, sample=10)
+
+    assert "和业务时区一致" in capsys.readouterr().out

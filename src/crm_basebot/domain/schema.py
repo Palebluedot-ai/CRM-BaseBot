@@ -195,6 +195,7 @@ BOARD_REFERRAL_NO = "渠道编号"  # 公式：渠道的 Referral Code
 BOARD_REFERRAL_NAME = "渠道名称"  # 公式：渠道的 Name
 BOARD_CLIENT_RATE = "分佣比例"  # 公式：渠道的 Commission Rate，百分数
 BOARD_ROW_COMMISSION = "本笔佣金"  # 公式：这一笔该分出去的钱
+BOARD_MONTH = "月份"  # 公式：交易日期所属月份，形如 2026-07
 
 # 公式返回值的类型码。formula_type=2 的多维表格建公式字段时必须带上它，不带接口报错。
 # 只实测过这两个值。
@@ -208,6 +209,7 @@ DAILY_BOARD_DERIVED_FIELDS: dict[str, int] = {
     BOARD_REFERRAL_NAME: FIELD_TYPE_FORMULA,
     BOARD_CLIENT_RATE: FIELD_TYPE_FORMULA,
     BOARD_ROW_COMMISSION: FIELD_TYPE_FORMULA,
+    BOARD_MONTH: FIELD_TYPE_FORMULA,
 }
 
 # 公式：列名 -> (表达式, 返回类型)。
@@ -238,6 +240,18 @@ DAILY_BOARD_DERIVED_FORMULAS: dict[str, tuple[str, int]] = {
         f'IF(ISBLANK([{BOARD_CLIENT_RATE}]), "", '
         f"[{BOARD_TOTAL_REVENUE}] * [{BOARD_CLIENT_RATE}] / 100)",
         FORMULA_DATA_TYPE_NUMBER,
+    ),
+    # 交易日期所属月份，形如 2026-07。视图和仪表盘都没法「按派生维度分组」，得先有一个
+    # 月份列，才能做「7 月 → 每个渠道分多少钱、哪几个客户带来的」。
+    #
+    # **时区**：TEXT() 按平台时区算，实测是 UTC+8，和业务时区 Asia/Singapore 同一偏移，
+    # 所以月初那天（存的是业务时区零点 = 前一天 16:00 UTC）算出来仍是本月：实测
+    # 2026-08-01 得到 "2026-08" 而不是 "2026-07"。
+    # **业务时区若换成 UTC+8 以外的时区，这一列会错月** —— sync_base 的自检会拿业务时区
+    # 逐行比对并报警，别只改 .env 就完事。
+    BOARD_MONTH: (
+        f'TEXT([{BOARD_ORDER_DATE}], "yyyy-MM")',
+        FORMULA_DATA_TYPE_TEXT,
     ),
 }
 

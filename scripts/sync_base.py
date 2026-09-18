@@ -26,8 +26,10 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import tzinfo
 from itertools import islice
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -45,6 +47,7 @@ from lark_oapi.api.bitable.v1 import (  # noqa: E402
 )
 
 from crm_basebot.domain import schema  # noqa: E402
+from crm_basebot.domain.dates import ms_to_date  # noqa: E402
 from crm_basebot.lark.bitable import (  # noqa: E402
     FIELD_TYPE_AUTO_NUMBER,
     FIELD_TYPE_FORMULA,
@@ -53,7 +56,7 @@ from crm_basebot.lark.bitable import (  # noqa: E402
 )
 from crm_basebot.lark.client import get_client  # noqa: E402
 from crm_basebot.lark.field_types import type_name  # noqa: E402
-from crm_basebot.lark.values import link_ids, to_number  # noqa: E402
+from crm_basebot.lark.values import extract_text, link_ids, to_number  # noqa: E402
 from crm_basebot.startup import load_settings, require_settings  # noqa: E402
 
 # 我们负责维护的表。
@@ -273,31 +276,59 @@ def main(argv: list[str] | None = None) -> int:
             print("\n确认无误后加 --apply 真正执行。")
 
     if args.apply:
-        _verify_formulas(bitable, table_ids.get(schema.TABLE_DAILY_BOARD_NAME))
+        _verify_formulas(
+            bitable,
+            table_ids.get(schema.TABLE_DAILY_BOARD_NAME),
+            tz=ZoneInfo(settings.business_timezone),
+        )
 
     return 0
 
 
-def _verify_formulas(bitable: BitableClient, table_id: str | None, *, sample: int = 200) -> None:
-    """读回真实记录，确认看板上的公式真的在算。
+def _verify_formulas(
+    bitable: BitableClient, table_id: str | None, *, tz: tzinfo, sample: int = 200
+) -> None:
+    """读回真实记录，确认看板上的公式真的在算、月份列也没错月。
 
     平台**不校验**公式表达式：写错的公式照样建得出来，接口照样回 code=0，只是那一列永远
     是空的（2026-09-18 实测）。所以「建好了」这一步光看返回值不算数，得拿记录核对：
     挂了「客户」关联却一行都算不出佣金的，就是公式的问题。
+
+    「月份」还要单独对一遍时区：公式里的 TEXT() 按**平台**时区算（实测 UTC+8），业务时区
+    不是 UTC+8 时它会错月 —— 而错月不报任何错，只会在报表上把 8 月的钱算进 7 月。
     """
     if not table_id:
         return
 
-    columns = [schema.BOARD_CLIENT_LINK, schema.BOARD_ROW_COMMISSION]
-    scanned = linked = computed = 0
+    columns = [
+        schema.BOARD_CLIENT_LINK,
+        schema.BOARD_ROW_COMMISSION,
+        schema.BOARD_MONTH,
+        schema.BOARD_ORDER_DATE,
+    ]
+    scanned = linked = computed = month_checked = month_bad = 0
+    month_samples: list[str] = []
+
     for record in islice(bitable.iter_records(table_id, field_names=columns), sample):
         scanned += 1
+        fields = record.fields
+
+        raw_date = fields.get(schema.BOARD_ORDER_DATE)
+        month = extract_text(fields.get(schema.BOARD_MONTH))
+        if isinstance(raw_date, int | float) and not isinstance(raw_date, bool) and month:
+            month_checked += 1
+            expected = ms_to_date(raw_date, tz=tz).strftime("%Y-%m")
+            if month != expected:
+                month_bad += 1
+                if len(month_samples) < 3:
+                    month_samples.append(f"{month}≠{expected}")
+
         # 空关联读回来是 {"link_record_ids": None}，是真的，不是 None —— 判真假会把它当成
         # 「挂上了」，于是每一行都报「已挂、算得出佣金」，看着一切正常（这个坑踩过）。
-        if not link_ids(record.fields.get(schema.BOARD_CLIENT_LINK)):
+        if not link_ids(fields.get(schema.BOARD_CLIENT_LINK)):
             continue
         linked += 1
-        if to_number(record.fields.get(schema.BOARD_ROW_COMMISSION)) is not None:
+        if to_number(fields.get(schema.BOARD_ROW_COMMISSION)) is not None:
             computed += 1
 
     print(f"\n公式自检（抽查前 {scanned} 行）：")
@@ -321,6 +352,18 @@ def _verify_formulas(bitable: BitableClient, table_id: str | None, *, sample: in
             "  还没有行挂上关联，公式没法验证 —— 关联是 import_daily_board.py 写进去的"
             "（客户表为空、或者这些用户都没登记时，它也没得挂）。"
         )
+
+    if not month_checked:
+        return
+    if month_bad:
+        print(
+            f"  ! 「{schema.BOARD_MONTH}」和业务时区对不上：抽查 {month_checked} 行里 "
+            f"{month_bad} 行不符，例如 {month_samples}。"
+            "公式里的 TEXT() 按平台时区算（实测 UTC+8），业务时区换成别的就会错月 —— "
+            "改 .env 之后要跟着调整这一列的公式。"
+        )
+    else:
+        print(f"  「{schema.BOARD_MONTH}」抽查 {month_checked} 行，和业务时区一致。")
 
 
 if __name__ == "__main__":
