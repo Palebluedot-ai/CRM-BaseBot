@@ -31,6 +31,19 @@ class Settings(BaseSettings):
     # 日读看板 xlsx 的默认路径。import_daily_board.py 支持 --file 覆盖。
     daily_board_xlsx: str = Field(default="", alias="DAILY_BOARD_XLSX")
 
+    # 每日增量导入在哪个目录找导出文件（scripts/import_daily_incremental.py 挑最新的一份）。
+    # --from-mail 时下载的附件也落到这里。
+    daily_export_dir: str = Field(default="attachments", alias="DAILY_EXPORT_DIR")
+
+    # 邮件抓取（Microsoft Graph 的应用权限）。四个键齐了才能用 --from-mail；
+    # 只在需要读邮件时才要求，所以给默认空值而不是必填 —— 手工 --file 导入不该被它拦住。
+    ms_tenant_id: str = Field(default="", alias="MICROSOFT_GRAPH_TENANT_ID")
+    ms_client_id: str = Field(default="", alias="MICROSOFT_GRAPH_CLIENT_ID")
+    ms_client_secret: str = Field(default="", alias="MICROSOFT_GRAPH_CLIENT_SECRET")
+    ms_user_id: str = Field(default="", alias="MICROSOFT_GRAPH_USER_ID")
+    # 发件人留空就用 graph/mail.py 里的默认值（内部系统地址），改发件人只改 .env。
+    graph_sender: str = Field(default="", alias="GRAPH_SENDER")
+
     domain: str = Field(default="https://open.feishu.cn", alias="LARK_DOMAIN")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 

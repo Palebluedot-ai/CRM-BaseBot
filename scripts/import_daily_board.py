@@ -348,6 +348,11 @@ def _client_links(bitable: BitableClient, table_id: str) -> dict[str, str]:
     return links
 
 
+def client_links(bitable: BitableClient, table_id: str) -> dict[str, str]:
+    """客户UID -> 客户记录 id 的公开入口（增量导入脚本用它，语义见 ``_client_links``）。"""
+    return _client_links(bitable, table_id)
+
+
 def _apply(
     bitable: BitableClient,
     table_id: str,
@@ -377,6 +382,14 @@ def _apply(
         table_id, [_to_payload(row, tz=tz, client_links=links) for row in rows]
     )
     return deleted, written
+
+
+def existing_dates(bitable: BitableClient, table_id: str, *, tz: tzinfo) -> set[date]:
+    """看板里已经有数据的交易日集合（增量导入用它算「哪些天是新的」）。
+
+    只挑「交易日期」一列扫，比全字段读省得多；日期按业务时区取，和写入口径一致。
+    """
+    return set(_existing_by_date(bitable, table_id, tz=tz))
 
 
 def split_by_station(rows: list[BoardRow]) -> tuple[list[BoardRow], Counter[str]]:

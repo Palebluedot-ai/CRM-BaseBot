@@ -39,6 +39,8 @@ uv run python scripts/seed_dev_data.py --open-id ou_xxx --yes-this-is-a-dev-base
 uv run python scripts/verify_numbering.py --probe   # 实测 R+3 位编号
 uv run python scripts/import_registrations.py --file "Template .xlsx"        # 渠道和客户从模板导入，先预演，加 --apply 真写
 uv run python scripts/import_daily_board.py --file 交易明细.xlsx --dry-run   # 生产：导入内部系统导出的交易明细，先预演
+uv run python scripts/import_daily_incremental.py --from-mail --dry-run      # 日常：邮件取数 + 只导新加坡站的新增交易日
+./scripts/install-daily-import-launchd.sh                                   # 挂成每天 10:45 / 16:00 自动跑
 uv run python -m crm_basebot.app            # 启动机器人
 ```
 
@@ -65,6 +67,8 @@ uv run python -m crm_basebot.jobs.reconcile --period 2026-03 --write --replace  
 
 **只看新加坡站**：看板只放「站点」是新加坡站的记录，导入时香港站、中东站的行直接丢掉（2026-09-17 定的）。筛的是站点列，不是销售分组。
 
+**每天的数据是增量进来的**：内部系统每天把导出邮件发到指定邮箱，`scripts/import_daily_incremental.py` 去取最新那份附件，本地筛出新加坡站、算出「哪些交易日看板还没有」（通常就是新增的一天），只把那几天整天替换。所以日常跑批不会重写几个月的历史，也不会在仪表盘读数据的时候把表清空。历史被修订时要显式 `--refresh YYYY-MM-DD` 或用全量脚本回填。完整链路、Graph 应用权限怎么配、launchd 任务怎么装和回滚，见 [docs/PIPELINE.md](docs/PIPELINE.md)。
+
 **佣金规则**：`应付佣金 = max(0, 当月 总收入(opt+现货+合约) 合计 × 分佣比例)`。基数是日读看板里的毛收入，2026-09-09 定的，此前按 Pnl(USD) 算。整月合计为负的渠道佣金按 0 保底，不倒扣、也不结转到下个月 —— 这是业务规则，2026-08-30 明确定的，不是代码漏了处理负数。收入合计仍然如实记录负值，报表上看得见这个渠道当月是负的，汇总输出也会单独标注一行。细节见 `domain/commission.py` 的 `CommissionRow.payable`。
 
 **归月时区**：「当月」按 `.env` 里 `BUSINESS_TIMEZONE` 指定的时区算，默认 `Asia/Singapore`（2026-09-04 定的）。Bitable 日期字段存的是 UTC 时间戳，直接按 UTC 取月份的话，每个月 1 号 0 点到 8 点的交易会全部算进上个月。
@@ -76,6 +80,7 @@ uv run python -m crm_basebot.jobs.reconcile --period 2026-03 --write --replace  
 | [docs/LARK_APP_SETUP.md](docs/LARK_APP_SETUP.md) | 自建免费飞书组织、创建应用、开权限、开长连接 |
 | [docs/IT_APPROVAL.md](docs/IT_APPROVAL.md) | 向公司 IT 申请时的完整材料，力求一次过审 |
 | [docs/SCHEMA.md](docs/SCHEMA.md) | 表结构定义，以及每个设计选择的理由 |
+| [docs/PIPELINE.md](docs/PIPELINE.md) | 每日数据管线：邮件取数、增量导入、Graph 权限、launchd 任务 |
 | [docs/DASHBOARD.md](docs/DASHBOARD.md) | 按月佣金仪表盘怎么搭（界面步骤），佣金几列怎么算 |
 
 ## 三个必须知道的坑

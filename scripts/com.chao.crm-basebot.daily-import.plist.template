@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  每日增量导入看板。用 scripts/install-daily-import-launchd.sh 安装，
+  它会把 __XXX__ 占位符替换成这台机器上的真实路径。
+
+  为什么一天跑两次（10:45 / 16:00）：内部系统的邮件不一定准点，而脚本是幂等的
+  —— 没有新增交易日就一个写请求都不发。第二次只是兜住迟到的邮件。
+
+  WorkingDirectory 必须是仓库根目录：Settings 读的是相对路径 .env。
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.chao.crm-basebot.daily-import</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__SCRIPT__</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__WORKDIR__</string>
+
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict>
+      <key>Hour</key>
+      <integer>10</integer>
+      <key>Minute</key>
+      <integer>45</integer>
+    </dict>
+    <dict>
+      <key>Hour</key>
+      <integer>16</integer>
+      <key>Minute</key>
+      <integer>0</integer>
+    </dict>
+  </array>
+
+  <key>StandardOutPath</key>
+  <string>__LOGDIR__/daily-import-stdout.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__LOGDIR__/daily-import-stderr.log</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>LANG</key>
+    <string>en_US.UTF-8</string>
+    <!-- 只管日志时间戳和 launchd 的日历触发点；业务时区在 .env 的 BUSINESS_TIMEZONE -->
+    <key>TZ</key>
+    <string>Asia/Hong_Kong</string>
+    <key>PATH</key>
+    <string>__PATH__</string>
+  </dict>
+</dict>
+</plist>

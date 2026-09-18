@@ -30,3 +30,7 @@ build/
 # 主目录里手工放进来的临时产物，不是项目内容
 /CRM-BaseBot-*.zip
 /UID
+
+# 每日跑批的产物：抓下来的附件（*.xlsx 已在上面忽略）和 launchd 日志
+/attachments/
+/logs/
