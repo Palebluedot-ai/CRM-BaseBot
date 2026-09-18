@@ -10,12 +10,44 @@ from crm_basebot.lark.values import (
     MAX_EXACT_INT,
     PrecisionLossError,
     extract_text,
+    link_ids,
     to_number,
     to_uid,
 )
 
 UID_18 = "577809207768677761"
 UID_19 = "2141293991366272768"
+
+
+# ---------- 关联字段的返回形态 ----------
+#
+# 坑（2026-09-18 踩过）：空关联读回来是 {"link_record_ids": None}，它本身是真的。
+# 拿它判断「这行挂上渠道了吗」，会把**每一行**都报成已挂，看着一切正常，其实一行没挂。
+
+
+def test_空关联不算挂上了():
+    assert link_ids({"link_record_ids": None}) == []
+    assert link_ids({}) == []
+    assert link_ids(None) == []
+    assert link_ids([]) == []
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        ["rec001"],
+        {"link_record_ids": ["rec001"]},
+        [{"record_id": "rec001"}],
+        [{"id": "rec001"}],
+    ],
+)
+def test_几种返回形态都抽得出记录id(raw):
+    """写入时给列表，读回来可能是 link_record_ids，也可能是 record_id 对象。"""
+    assert link_ids(raw) == ["rec001"]
+
+
+def test_多条关联一条都不漏():
+    assert link_ids({"link_record_ids": ["a", "b"]}) == ["a", "b"]
 
 
 def test_真实uid确实超出float精确范围():

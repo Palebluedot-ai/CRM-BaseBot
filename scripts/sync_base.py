@@ -13,6 +13,11 @@ Base 里已经有同事在用的表，所以这个脚本的安全边界很明确
     uv run python scripts/sync_base.py            # 预演，打印将要做什么
     uv run python scripts/sync_base.py --apply    # 真的执行
 
+看板表除了 xlsx 里那 18 列，还会建 5 个「渠道反查列」：一个单向关联 + 四个公式，
+定义在 ``schema.DAILY_BOARD_DERIVED_FIELDS`` / ``DAILY_BOARD_DERIVED_FORMULAS``。
+**平台不校验公式表达式** —— 写错的公式照样建得出来，只是永远返回空值，所以 --apply
+之后会拿真实记录做一次公式自检。
+
 副产品是迁移能力：以后从测试组织搬到公司组织，换掉 .env 里的凭证跑一次
 --apply，结构就复刻过去了，不用手工点。
 """
@@ -21,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from itertools import islice
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -31,6 +37,7 @@ from lark_oapi.api.bitable.v1 import (  # noqa: E402
     AppFieldPropertyAutoSerialOptions,
     AppTableField,
     AppTableFieldProperty,
+    AppTableFieldPropertyType,
     CreateAppTableFieldRequest,
     CreateAppTableRequest,
     CreateAppTableRequestBody,
@@ -40,18 +47,24 @@ from lark_oapi.api.bitable.v1 import (  # noqa: E402
 from crm_basebot.domain import schema  # noqa: E402
 from crm_basebot.lark.bitable import (  # noqa: E402
     FIELD_TYPE_AUTO_NUMBER,
+    FIELD_TYPE_FORMULA,
     FIELD_TYPE_SINGLE_LINK,
     BitableClient,
 )
 from crm_basebot.lark.client import get_client  # noqa: E402
 from crm_basebot.lark.field_types import type_name  # noqa: E402
+from crm_basebot.lark.values import link_ids, to_number  # noqa: E402
 from crm_basebot.startup import load_settings, require_settings  # noqa: E402
 
 # 我们负责维护的表。
 TARGET_TABLES: dict[str, dict[str, int]] = {
     schema.TABLE_REFERRAL_NAME: schema.REFERRAL_FIELDS,
     schema.TABLE_CLIENT_NAME: schema.CLIENT_FIELDS,
-    schema.TABLE_DAILY_BOARD_NAME: schema.DAILY_BOARD_FIELDS,
+    # 看板 = xlsx 里那 18 列（导入的合同）+ 渠道反查列（关联和公式，导入不碰）。
+    schema.TABLE_DAILY_BOARD_NAME: {
+        **schema.DAILY_BOARD_FIELDS,
+        **schema.DAILY_BOARD_DERIVED_FIELDS,
+    },
     schema.TABLE_COMMISSION_NAME: schema.COMMISSION_FIELDS,
     schema.TABLE_AUDIT_NAME: schema.AUDIT_FIELDS,
     schema.TABLE_SALES_NAME: schema.SALES_FIELDS,
@@ -62,10 +75,17 @@ TARGET_TABLES: dict[str, dict[str, int]] = {
 # 建表顺序上 Referral 排在 Client 前面，所以轮到建这个字段时目标表一定已经有 id。
 LINK_TARGETS: dict[tuple[str, str], str] = {
     (schema.TABLE_CLIENT_NAME, schema.CLIENT_REFERRAL_LINK): schema.TABLE_REFERRAL_NAME,
+    (schema.TABLE_DAILY_BOARD_NAME, schema.BOARD_CLIENT_LINK): schema.TABLE_CLIENT_NAME,
 }
 
 
-def _build_field(name: str, type_code: int, *, link_table_id: str | None = None) -> AppTableField:
+def _build_field(
+    name: str,
+    type_code: int,
+    *,
+    link_table_id: str | None = None,
+    formula: tuple[str, int] | None = None,
+) -> AppTableField:
     builder = AppTableField.builder().field_name(name).type(type_code)
 
     if type_code == FIELD_TYPE_AUTO_NUMBER:
@@ -96,6 +116,18 @@ def _build_field(name: str, type_code: int, *, link_table_id: str | None = None)
             # multiple=False：一个客户只属于一个渠道。默认是 true，
             # 留着 true 的话有人在界面上多挂一个渠道，佣金归属就说不清了。
             AppTableFieldProperty.builder().table_id(link_table_id).multiple(False).build()
+        )
+
+    elif type_code == FIELD_TYPE_FORMULA:
+        if formula is None:
+            raise ValueError(f"公式字段「{name}」缺少表达式，无法建字段")
+        expression, data_type = formula
+        builder = builder.property(
+            AppTableFieldProperty.builder()
+            .formula_expression(expression)
+            # formula_type=2 的多维表格必须带返回类型，不带接口直接报错（实测）。
+            .type(AppTableFieldPropertyType.builder().data_type(data_type).build())
+            .build()
         )
 
     return builder.build()
@@ -136,12 +168,13 @@ def _create_field(
     type_code: int,
     *,
     link_table_id: str | None = None,
+    formula: tuple[str, int] | None = None,
 ) -> None:
     request = (
         CreateAppTableFieldRequest.builder()
         .app_token(app_token)
         .table_id(table_id)
-        .request_body(_build_field(name, type_code, link_table_id=link_table_id))
+        .request_body(_build_field(name, type_code, link_table_id=link_table_id, formula=formula))
         .build()
     )
     response = client.bitable.v1.app_table_field.create(request)
@@ -171,6 +204,12 @@ def main(argv: list[str] | None = None) -> int:
         target = LINK_TARGETS.get((table_name, field_name))
         return table_ids.get(target) if target else None
 
+    def formula_for(table_name: str, field_name: str) -> tuple[str, int] | None:
+        """公式字段的 (表达式, 返回类型)。只有看板的反查列是公式，其余返回 None。"""
+        if table_name != schema.TABLE_DAILY_BOARD_NAME:
+            return None
+        return schema.DAILY_BOARD_DERIVED_FORMULAS.get(field_name)
+
     for table_name, target_fields in TARGET_TABLES.items():
         table = existing_tables.get(table_name)
 
@@ -188,6 +227,7 @@ def main(argv: list[str] | None = None) -> int:
                         field_name,
                         type_code,
                         link_table_id=link_target_id(table_name, field_name),
+                        formula=formula_for(table_name, field_name),
                     )
                     print(f"    + {field_name} ({type_name(type_code)})")
             continue
@@ -206,6 +246,7 @@ def main(argv: list[str] | None = None) -> int:
                         field_name,
                         type_code,
                         link_table_id=link_target_id(table_name, field_name),
+                        formula=formula_for(table_name, field_name),
                     )
                     print(f"  + {table_name}.{field_name}")
             elif found.type != type_code:
@@ -217,22 +258,69 @@ def main(argv: list[str] | None = None) -> int:
 
     if not plan and not warnings:
         print("结构已经对齐，没什么要做的。")
-        return 0
+    else:
+        if plan:
+            print("\n计划执行：" if args.apply else "\n将要执行（预演）：")
+            for item in plan:
+                print(f"  · {item}")
 
-    if plan:
-        print("\n计划执行：" if args.apply else "\n将要执行（预演）：")
-        for item in plan:
-            print(f"  · {item}")
+        if warnings:
+            print("\n需要你决定：")
+            for item in warnings:
+                print(f"  ! {item}")
 
-    if warnings:
-        print("\n需要你决定：")
-        for item in warnings:
-            print(f"  ! {item}")
+        if not args.apply and plan:
+            print("\n确认无误后加 --apply 真正执行。")
 
-    if not args.apply and plan:
-        print("\n确认无误后加 --apply 真正执行。")
+    if args.apply:
+        _verify_formulas(bitable, table_ids.get(schema.TABLE_DAILY_BOARD_NAME))
 
     return 0
+
+
+def _verify_formulas(bitable: BitableClient, table_id: str | None, *, sample: int = 200) -> None:
+    """读回真实记录，确认看板上的公式真的在算。
+
+    平台**不校验**公式表达式：写错的公式照样建得出来，接口照样回 code=0，只是那一列永远
+    是空的（2026-09-18 实测）。所以「建好了」这一步光看返回值不算数，得拿记录核对：
+    挂了「客户」关联却一行都算不出佣金的，就是公式的问题。
+    """
+    if not table_id:
+        return
+
+    columns = [schema.BOARD_CLIENT_LINK, schema.BOARD_ROW_COMMISSION]
+    scanned = linked = computed = 0
+    for record in islice(bitable.iter_records(table_id, field_names=columns), sample):
+        scanned += 1
+        # 空关联读回来是 {"link_record_ids": None}，是真的，不是 None —— 判真假会把它当成
+        # 「挂上了」，于是每一行都报「已挂、算得出佣金」，看着一切正常（这个坑踩过）。
+        if not link_ids(record.fields.get(schema.BOARD_CLIENT_LINK)):
+            continue
+        linked += 1
+        if to_number(record.fields.get(schema.BOARD_ROW_COMMISSION)) is not None:
+            computed += 1
+
+    print(f"\n公式自检（抽查前 {scanned} 行）：")
+    if scanned == 0:
+        print("  看板还没有数据，公式无从验证 —— 先跑一次 import_daily_board.py 再看。")
+        return
+
+    print(
+        f"  挂了「{schema.BOARD_CLIENT_LINK}」关联的有 {linked} 行，"
+        f"其中算得出「{schema.BOARD_ROW_COMMISSION}」的 {computed} 行。"
+    )
+    if linked and not computed:
+        print(
+            "  ! 挂了关联却一行都没算出来，公式多半没生效。"
+            f"去 Base 里点开「{schema.BOARD_ROW_COMMISSION}」那一列，看公式是不是变成了错误值。"
+        )
+    elif linked:
+        print("  公式在算。")
+    else:
+        print(
+            "  还没有行挂上关联，公式没法验证 —— 关联是 import_daily_board.py 写进去的"
+            "（客户表为空、或者这些用户都没登记时，它也没得挂）。"
+        )
 
 
 if __name__ == "__main__":

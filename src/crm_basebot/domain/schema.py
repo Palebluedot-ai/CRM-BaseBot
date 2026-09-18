@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from ..lark.bitable import (
     FIELD_TYPE_DATETIME,
+    FIELD_TYPE_FORMULA,
     FIELD_TYPE_NUMBER,
     FIELD_TYPE_SINGLE_LINK,
     FIELD_TYPE_SINGLE_SELECT,
@@ -173,6 +174,71 @@ DAILY_BOARD_REQUIRED_FIELDS: dict[str, int | None] = {
     BOARD_ORDER_DATE: None,
     BOARD_CLIENT_UID: None,
     BOARD_TOTAL_REVENUE: FIELD_TYPE_NUMBER,
+}
+
+# ---------- 看板上的渠道反查列（2026-09-18 定的） ----------
+#
+# 需求：每一行交易都要看得出它归哪个渠道、比例多少、这一笔该分多少钱，而且要在 Base 里
+# 算 —— 改渠道比例时佣金列立刻跟着变，不靠脚本重跑。
+#
+# **匹配这一步 Base 自己做不到。** 多维表格的公式里没有 VLOOKUP / LOOKUP（实测：这类表达式
+# 建得出来但永远返回空值），跨表取值只有「关联字段 + 公式引用」一条路，而关联必须由写入方
+# 建立。所以分工是：
+#
+#   · 「客户」是单向关联列，导入脚本按「用户ID = 客户UID」写进去 —— 只做匹配，不算钱
+#   · 其余四列是公式，取值和乘法全在 Base 里算
+#
+# 两跳引用 `[客户].[所属渠道].[分佣比例]` 实测可用（2026-09-18 在 CRM-Dev 租户建临时表验证
+# 过整条链路），所以不用在客户表加中间列。
+BOARD_CLIENT_LINK = "客户"  # 单向关联 -> Referred Client
+BOARD_REFERRAL_NO = "渠道编号"  # 公式：渠道的 Referral Code
+BOARD_REFERRAL_NAME = "渠道名称"  # 公式：渠道的 Name
+BOARD_CLIENT_RATE = "分佣比例"  # 公式：渠道的 Commission Rate，百分数
+BOARD_ROW_COMMISSION = "本笔佣金"  # 公式：这一笔该分出去的钱
+
+# 公式返回值的类型码。formula_type=2 的多维表格建公式字段时必须带上它，不带接口报错。
+# 只实测过这两个值。
+FORMULA_DATA_TYPE_TEXT = 1
+FORMULA_DATA_TYPE_NUMBER = 2
+
+# 反查列：列名 -> 字段类型。sync_base 按这个建列，顺序也是这个。
+DAILY_BOARD_DERIVED_FIELDS: dict[str, int] = {
+    BOARD_CLIENT_LINK: FIELD_TYPE_SINGLE_LINK,
+    BOARD_REFERRAL_NO: FIELD_TYPE_FORMULA,
+    BOARD_REFERRAL_NAME: FIELD_TYPE_FORMULA,
+    BOARD_CLIENT_RATE: FIELD_TYPE_FORMULA,
+    BOARD_ROW_COMMISSION: FIELD_TYPE_FORMULA,
+}
+
+# 公式：列名 -> (表达式, 返回类型)。
+#
+# **平台不校验表达式**：写错的公式照样建得出来，只是永远返回空值（实测）。所以建完必须拿
+# 真实记录读回核对，见 scripts/sync_base.py 的公式自检。
+DAILY_BOARD_DERIVED_FORMULAS: dict[str, tuple[str, int]] = {
+    BOARD_REFERRAL_NO: (
+        f"[{BOARD_CLIENT_LINK}].[{CLIENT_REFERRAL_LINK}].[{REFERRAL_NO}]",
+        FORMULA_DATA_TYPE_TEXT,
+    ),
+    BOARD_REFERRAL_NAME: (
+        f"[{BOARD_CLIENT_LINK}].[{CLIENT_REFERRAL_LINK}].[{REFERRAL_NAME}]",
+        FORMULA_DATA_TYPE_TEXT,
+    ),
+    BOARD_CLIENT_RATE: (
+        f"[{BOARD_CLIENT_LINK}].[{CLIENT_REFERRAL_LINK}].[{REFERRAL_RATE}]",
+        FORMULA_DATA_TYPE_NUMBER,
+    ),
+    # 逐行如实，可以为负 —— 退款/冲销那一行就是负的。**不做**逐行 MAX(0, ...) 保底：
+    # 那样逐行相加会大于月度应付，和 Python 对账对不上。月度保底属于 reconcile
+    # 的业务规则（见 domain/commission.py），不在这里复制一份。
+    #
+    # ISBLANK 那层保护是为了没挂上关联的行（用户没登记渠道，或者挂的渠道没填比例）：
+    # 空值参与乘法会算出 0，而 0 在这一列是个错误陈述 —— 它等于宣称「这笔没有佣金」，
+    # 实际是「不知道有没有」。留空才是对的。实测：不加保护时 1,287 行显示 0.00。
+    BOARD_ROW_COMMISSION: (
+        f'IF(ISBLANK([{BOARD_CLIENT_RATE}]), "", '
+        f"[{BOARD_TOTAL_REVENUE}] * [{BOARD_CLIENT_RATE}] / 100)",
+        FORMULA_DATA_TYPE_NUMBER,
+    ),
 }
 
 # ---------- 表 4：佣金汇总（按月，后端写入） ----------

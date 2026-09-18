@@ -144,6 +144,33 @@ def to_number(value: Any) -> float | None:
         return None
 
 
+def link_ids(value: Any) -> list[str]:
+    """关联字段返回的 record_id 列表。
+
+    同一个关联字段有三种返回形态：写入时给 ``["recxxx"]``，读回来可能是
+    ``{"link_record_ids": [...]}``，也可能是 ``[{"record_id": "..."}]``。
+
+    **空关联不是 None，而是 ``{"link_record_ids": None}``** —— 直接判断真假会把
+    「没挂关联」当成「挂了关联」。这个坑在「抽查有多少行挂上了渠道」的自检里踩过一次
+    （2026-09-18）：全部行都报成已挂，看着一切正常，其实一行都没挂。
+    """
+    if isinstance(value, dict):
+        value = value.get("link_record_ids") or value.get("record_ids") or []
+    if not isinstance(value, list):
+        value = [value] if value else []
+
+    ids: list[str] = []
+    for item in value:
+        if isinstance(item, str):
+            if item:
+                ids.append(item)
+        elif isinstance(item, dict):
+            found = item.get("record_id") or item.get("id")
+            if found:
+                ids.append(str(found))
+    return ids
+
+
 # ---------- Excel 损伤诊断 ----------
 #
 # 为什么需要这个：交易明细是同事每天从内部系统导出再导入 Base 的。只要中间过了

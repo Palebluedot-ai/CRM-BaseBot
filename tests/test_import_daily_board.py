@@ -23,8 +23,9 @@ import pytest
 from openpyxl import Workbook
 
 from crm_basebot.domain import schema
+from crm_basebot.lark.values import PrecisionLossError
 
-from .conftest import TBL_BOARD
+from .conftest import TBL_BOARD, TBL_CLIENT
 
 
 def _load_module():
@@ -394,6 +395,7 @@ def test_写入和删除都按批发送(fake_bitable):
 class RunSettings:
     business_timezone = "Asia/Singapore"
     table_daily_board = TBL_BOARD
+    table_client = TBL_CLIENT
     daily_board_xlsx = ""
 
 
@@ -488,3 +490,83 @@ def test_预演列出各站点的行数且不碰Base(tmp_path, fake_bitable, cap
     assert "香港站 2 行" in out
     assert fake_bitable.tables[TBL_BOARD].scan_count == 0
     assert fake_bitable.write_count == 0
+
+
+# ---------- 顺手挂上「客户」关联（2026-09-18 定的） ----------
+#
+# 看板上那几列佣金公式靠这个关联反查渠道。Base 的公式没有 VLOOKUP/LOOKUP，
+# 匹配只能在这里做，「算钱」仍然全在 Base 里。
+
+
+def _client_row(bitable, uid, name="PLUTO STUDIO LIMITED") -> str:
+    return bitable.tables[TBL_CLIENT].add_existing(
+        {schema.CLIENT_UID: uid, schema.CLIENT_NAME: name}
+    )
+
+
+def test_用户ID_命中客户表就挂上关联(tmp_path, fake_bitable):
+    client_id = _client_row(fake_bitable, UID_X)
+    path = _make_xlsx(tmp_path, [_row(overrides={"站点": "新加坡站"})])
+
+    assert _run(path, fake_bitable) == 0
+
+    (record,) = fake_bitable.tables[TBL_BOARD].records.values()
+    assert record[schema.BOARD_CLIENT_LINK] == [client_id]
+
+
+def test_没登记的用户不挂关联也不报错(tmp_path, fake_bitable):
+    """新加坡站大部分是自主开发客户，挂不上是常态，不是错误。"""
+    path = _make_xlsx(
+        tmp_path, [_row(overrides={"站点": "新加坡站", "用户ID": "577809207768677799"})]
+    )
+
+    assert _run(path, fake_bitable) == 0
+
+    (record,) = fake_bitable.tables[TBL_BOARD].records.values()
+    assert schema.BOARD_CLIENT_LINK not in record
+
+
+def test_挂关联是精确匹配不含糊(tmp_path, fake_bitable):
+    """UID 是 18-19 位数字，少一位多一位都不能算命中 —— 错配就是把钱算到别人头上。"""
+    _client_row(fake_bitable, UID_X)
+    path = _make_xlsx(
+        tmp_path,
+        [
+            _row(overrides={"站点": "新加坡站", "用户ID": UID_X[:-1]}),
+            _row(overrides={"站点": "新加坡站", "用户ID": UID_X + "2"}),
+        ],
+    )
+
+    assert _run(path, fake_bitable) == 0
+
+    for record in fake_bitable.tables[TBL_BOARD].records.values():
+        assert schema.BOARD_CLIENT_LINK not in record
+
+
+def test_客户表里的UID存成数字时拒绝导入(tmp_path, fake_bitable):
+    """存成数字说明精度已经被抹平了。这时候挂错客户比不挂更糟，所以直接停下。"""
+    fake_bitable.tables[TBL_CLIENT].add_existing({schema.CLIENT_UID: 5.778092077686777e17})
+    path = _make_xlsx(tmp_path, [_row(overrides={"站点": "新加坡站"})])
+
+    with pytest.raises(PrecisionLossError):
+        _run(path, fake_bitable)
+
+    assert fake_bitable.write_count == 0
+
+
+def test_打印挂上关联的份数(tmp_path, fake_bitable, capsys):
+    """空着的那几列要能解释：是公式坏了，还是这个用户本来就没归属。"""
+    _client_row(fake_bitable, UID_X)
+    path = _make_xlsx(
+        tmp_path,
+        [
+            _row(overrides={"站点": "新加坡站"}),
+            _row(overrides={"站点": "新加坡站", "用户ID": "577809207768677799"}),
+        ],
+    )
+
+    assert _run(path, fake_bitable) == 0
+
+    out = capsys.readouterr().out
+    assert "客户关联：1/2 行挂上了" in out
+    assert "1 个用户不在客户表里" in out

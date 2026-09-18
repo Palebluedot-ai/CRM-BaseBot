@@ -18,6 +18,7 @@ import pytest
 from crm_basebot.domain import schema
 from crm_basebot.lark.bitable import (
     FIELD_TYPE_AUTO_NUMBER,
+    FIELD_TYPE_FORMULA,
     FIELD_TYPE_SINGLE_LINK,
     FIELD_TYPE_TEXT,
     FIELD_TYPE_USER,
@@ -141,3 +142,89 @@ def test_建日读看板表():
     sync_base 必须把它建出来。
     """
     assert schema.TABLE_DAILY_BOARD_NAME in sync_base.TARGET_TABLES
+
+
+# ---------- 看板的渠道反查列（关联 + 公式，2026-09-18 定的） ----------
+
+
+def test_看板反查列由_sync_base_负责建():
+    """生产迁移靠的就是这一步：换一份凭证跑 --apply，5 个列自动建出来，不用手工点。"""
+    board = sync_base.TARGET_TABLES[schema.TABLE_DAILY_BOARD_NAME]
+    for field_name in schema.DAILY_BOARD_DERIVED_FIELDS:
+        assert field_name in board
+
+
+def test_看板客户关联声明指向客户表():
+    assert (
+        sync_base.LINK_TARGETS[(schema.TABLE_DAILY_BOARD_NAME, schema.BOARD_CLIENT_LINK)]
+        == schema.TABLE_CLIENT_NAME
+    )
+
+
+def test_公式字段带上表达式和返回类型():
+    """``formula_type=2`` 的多维表格必须带 ``property.type.data_type``，不带接口报错（实测）。"""
+    expression, data_type = schema.DAILY_BOARD_DERIVED_FORMULAS[schema.BOARD_ROW_COMMISSION]
+    field = sync_base._build_field(
+        schema.BOARD_ROW_COMMISSION, FIELD_TYPE_FORMULA, formula=(expression, data_type)
+    )
+    payload = body(field)
+
+    assert payload["type"] == FIELD_TYPE_FORMULA
+    assert payload["property"]["formula_expression"] == expression
+    assert payload["property"]["type"]["data_type"] == data_type
+
+
+def test_没给表达式就在本地停下():
+    """少了表达式，接口只回一句「字段属性错误」，看不出是哪一环缺东西。"""
+    with pytest.raises(ValueError, match="表达式"):
+        sync_base._build_field(schema.BOARD_ROW_COMMISSION, FIELD_TYPE_FORMULA)
+
+
+def test_每个公式列都配了表达式():
+    for field_name, type_code in schema.DAILY_BOARD_DERIVED_FIELDS.items():
+        if type_code == FIELD_TYPE_FORMULA:
+            assert field_name in schema.DAILY_BOARD_DERIVED_FORMULAS
+
+
+def test_反查公式里的字段名和_schema_一致():
+    """公式里的 ``[字段名]`` 写错，平台**不报错**，只会静默出空值 —— 名字在这里钉死。
+
+    链路是 看板.客户 → 客户.所属渠道 → 渠道.<字段>，三段名字都必须和 schema 里的一致。
+    """
+    two_hop = f"[{schema.BOARD_CLIENT_LINK}].[{schema.CLIENT_REFERRAL_LINK}].[{schema.REFERRAL_NO}]"
+    assert schema.DAILY_BOARD_DERIVED_FORMULAS[schema.BOARD_REFERRAL_NO][0] == two_hop
+
+    rate, _ = schema.DAILY_BOARD_DERIVED_FORMULAS[schema.BOARD_CLIENT_RATE]
+    assert rate.endswith(f".[{schema.REFERRAL_RATE}]")
+
+    commission, _ = schema.DAILY_BOARD_DERIVED_FORMULAS[schema.BOARD_ROW_COMMISSION]
+    assert f"[{schema.BOARD_TOTAL_REVENUE}]" in commission
+    assert f"[{schema.BOARD_CLIENT_RATE}]" in commission
+
+
+def test_本笔佣金逐行如实不做保底():
+    """逐行 MAX(0, ...) 会让逐行相加大于月度应付，和 Python 对账对不上。
+    月度保底是 reconcile 的业务规则，不在公式里复制一份。"""
+    expression, _ = schema.DAILY_BOARD_DERIVED_FORMULAS[schema.BOARD_ROW_COMMISSION]
+    assert "MAX" not in expression.upper()
+
+
+def test_没挂渠道的行佣金留空而不是零():
+    """``0.00`` 在这一列是个错误陈述：它等于说「这笔没有佣金」。
+
+    没挂上关联（用户没登记渠道）实际是「不知道有没有」，得留空。
+    实测：不加保护时空值参与乘法会算出 0，当天 1,287 行全显示 0.00。
+    """
+    expression, _ = schema.DAILY_BOARD_DERIVED_FORMULAS[schema.BOARD_ROW_COMMISSION]
+    assert expression.startswith(f"IF(ISBLANK([{schema.BOARD_CLIENT_RATE}]),")
+
+
+def test_本笔佣金公式逐字符就是线上那一版():
+    """线上那一列（2026-09-18 建的）就是这个字符串。
+
+    故意写成字面量而不是拼 schema 常量：差一个字符就是另一个公式，而平台不校验表达式，
+    只会静默算成空列或错值。生产迁移建出来的必须和已核对过的那一版一模一样。
+    """
+    expression, data_type = schema.DAILY_BOARD_DERIVED_FORMULAS[schema.BOARD_ROW_COMMISSION]
+    assert expression == ('IF(ISBLANK([分佣比例]), "", [总收入(opt+现货+合约)] * [分佣比例] / 100)')
+    assert data_type == schema.FORMULA_DATA_TYPE_NUMBER

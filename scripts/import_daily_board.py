@@ -39,6 +39,16 @@ xlsx 的表头以 2026-09-17 的「OTC组销售明细」导出为准：18 列逐
 一行一个请求的话，1.2 万行就是 1.2 万次调用，免费版一个月的基线额度才 1 万次。
 删和写都按每批 500 条发，1.2 万行大约 25 次写入。
 
+## 顺手挂上「客户」关联（2026-09-18 定的）
+
+看板上有几列佣金公式（渠道编号 / 渠道名称 / 分佣比例 / 本笔佣金），它们靠「客户」这个
+单向关联列反查渠道。多维表格的公式没有 VLOOKUP / LOOKUP，跨表取值只有「关联 + 公式引用」
+一条路，而关联只能由写入方建立 —— 所以这个脚本按「用户ID = 客户UID」把关联挂上，
+**算钱仍然全在 Base 里**，脚本一个数都不算。
+
+用户ID 不在客户表里的行不挂（这是常态：新加坡站大部分是自主开发客户），Base 里那几列
+对它们就是空的。份数会打印出来。
+
 ## 日期按业务时区
 
 「交易日期」「KYC日期」是新加坡的日历日。写进 Base 时取 BUSINESS_TIMEZONE 那一天的
@@ -300,12 +310,42 @@ def _existing_by_date(
     return grouped
 
 
-def _to_payload(row: BoardRow, *, tz: tzinfo) -> dict[str, Any]:
-    """一行写进 Base 的字段：日期列换成业务时区那天零点的毫秒时间戳，其余原样。"""
-    return {
+def _to_payload(row: BoardRow, *, tz: tzinfo, client_links: dict[str, str]) -> dict[str, Any]:
+    """一行写进 Base 的字段：日期列换成业务时区那天零点的毫秒时间戳，其余原样。
+
+    ``client_links`` 是「客户UID -> 客户记录 id」。命中的行顺手把「客户」关联挂上 ——
+    Base 里那几列公式（渠道编号 / 渠道名称 / 分佣比例 / 本笔佣金）全靠这个关联反查。
+    挂不上的行（用户ID 不在客户表里）留空，公式自然也是空的。
+    """
+    payload: dict[str, Any] = {
         column: date_to_ms(value, tz=tz) if column in DATE_FIELDS else value
         for column, value in row.fields.items()
     }
+    uid = payload.get(schema.BOARD_CLIENT_UID)
+    record_id = client_links.get(str(uid)) if uid else None
+    if record_id:
+        payload[schema.BOARD_CLIENT_LINK] = [record_id]
+    return payload
+
+
+def _client_links(bitable: BitableClient, table_id: str) -> dict[str, str]:
+    """客户UID -> 客户记录 id。
+
+    多维表格的公式没有 VLOOKUP / LOOKUP，跨表取值只有「关联字段 + 公式引用」一条路，
+    而关联必须由写入方建立。所以「按 UID 找到是哪条客户记录」这一步只能在导入时做，
+    公式负责它后面的取数和乘法（2026-09-18 定的）。
+
+    UID 走 ``to_uid`` 而不是 extract_text：客户表那一列若被存成了数字，值已经不可信，
+    这时候**报错停下**比悄悄挂错客户要好 —— 挂错了佣金就记到别人头上，且没有任何提示。
+    """
+    links: dict[str, str] = {}
+    for record in bitable.iter_records(table_id, field_names=[schema.CLIENT_UID]):
+        uid = to_uid(record.fields.get(schema.CLIENT_UID))
+        if uid:
+            # 同一个 UID 挂在多条客户记录上时只认第一条：客户表本身按 UID 去重，
+            # 真出现重复行是登记侧的问题，不该在这里选一个「更对」的出来。
+            links.setdefault(uid, record.record_id)
+    return links
 
 
 def _apply(
@@ -315,12 +355,15 @@ def _apply(
     *,
     tz: tzinfo,
     replace_dates: Iterable[date] | None = None,
+    client_links: dict[str, str] | None = None,
 ) -> tuple[int, int]:
     """先删要替换的日期上的旧记录，再写新记录，都按批发。返回 (删除数, 写入数)。
 
     ``replace_dates`` 是要整天替换的日期，不传就取 rows 覆盖到的日期。
     导入时传导出覆盖到的全部日期：某天导出里只有其他站点的行，这天的旧记录也要删掉。
     ``tz`` 是业务时区：日期列写成那一天在业务时区的零点，删旧行也按同一时区取日期。
+    ``client_links`` 是「客户UID -> 客户记录 id」，命中的行会挂上「客户」关联，见
+    ``_to_payload``。
     """
     if replace_dates is None:
         replace_dates = {row.order_date for row in rows}
@@ -329,7 +372,10 @@ def _apply(
     stale = [record_id for day in days for record_id in existing.get(day, [])]
 
     deleted = bitable.batch_delete_records(table_id, stale)
-    written = bitable.batch_create_records(table_id, [_to_payload(row, tz=tz) for row in rows])
+    links = client_links or {}
+    written = bitable.batch_create_records(
+        table_id, [_to_payload(row, tz=tz, client_links=links) for row in rows]
+    )
     return deleted, written
 
 
@@ -371,6 +417,24 @@ def _print_summary(rows: list[BoardRow]) -> None:
     print(f"写入每批 {MAX_BATCH_SIZE} 条，约 {batches} 次调用；删除旧记录另算。")
 
 
+def _print_link_summary(rows: list[BoardRow], client_links: dict[str, str]) -> None:
+    """挂上「客户」关联的行数。
+
+    挂不上的行，Base 里那几列佣金公式会是空的 —— 那不是 bug，是「这个用户没登记在任何
+    渠道下」。把数量说出来，省得对着空列猜是公式坏了还是本来就没归属。
+    """
+    uids = {str(row.fields.get(schema.BOARD_CLIENT_UID) or "") for row in rows}
+    uids.discard("")
+    matched_uids = uids & set(client_links)
+    matched_rows = sum(
+        1 for row in rows if str(row.fields.get(schema.BOARD_CLIENT_UID) or "") in client_links
+    )
+    print(
+        f"客户关联：{matched_rows}/{len(rows)} 行挂上了（涉及 {len(matched_uids)} 个用户）；"
+        f"{len(uids) - len(matched_uids)} 个用户不在客户表里，佣金那几列对它们是空的。"
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="把交易明细 xlsx 里新加坡站的记录导入 Base 的日读看板表"
@@ -390,7 +454,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)-7s %(message)s")
 
     settings = load_settings()
-    require_settings(settings, "LARK_BASE_APP_TOKEN", "TABLE_DAILY_BOARD")
+    require_settings(settings, "LARK_BASE_APP_TOKEN", "TABLE_DAILY_BOARD", "TABLE_CLIENT")
     return run(args, settings, BitableClient(settings.base_app_token))
 
 
@@ -449,11 +513,20 @@ def run(args: argparse.Namespace, settings, bitable: BitableClient) -> int:
         "\n先删导出覆盖到的日期上的旧记录，再写新记录。"
         f"日期按 {settings.business_timezone} 的零点写入。"
     )
+    # 客户UID -> 记录 id 只读一次，写给每一行用。这一步是「匹配」，不是「算钱」：
+    # 算钱在 Base 的公式里。客户表为空也照常导入，只是所有行都挂不上关联。
+    client_links = _client_links(bitable, settings.table_client)
     covered = {row.order_date for row in rows}
     deleted, written = _apply(
-        bitable, settings.table_daily_board, kept, tz=tz, replace_dates=covered
+        bitable,
+        settings.table_daily_board,
+        kept,
+        tz=tz,
+        replace_dates=covered,
+        client_links=client_links,
     )
     print(f"删除 {deleted} 条，写入 {written} 条。")
+    _print_link_summary(kept, client_links)
     return 0
 
 
