@@ -103,6 +103,27 @@ def load_settings(env_file: Path | str | None = None) -> Settings:
         raise MissingConfigError(_invalid_message(exc)) from None
 
 
+def set_env_value(env_path: Path | str, key: str, value: str) -> None:
+    """把 ``KEY=value`` 写进环境文件（已存在就替换那一行，不动的行原样保留）。
+
+    两个地方要用它，都是「程序已经知道了这个值，没道理再让人手抄」：
+
+      · 建完 Base 拿到 token（迁移的 ``--create-base``）
+      · 建完表拿到 6 个 table_id（``sync_base.py --apply``）
+
+    注释和空行都留着 —— 环境文件是给人看的一页配置，不是程序重排过的产物。
+    """
+    path = Path(env_path)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    for index, line in enumerate(lines):
+        if line.strip().startswith(f"{key}="):
+            lines[index] = f"{key}={value}"
+            break
+    else:
+        lines.append(f"{key}={value}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def require_settings(settings: Settings, *env_keys: str) -> None:
     """确认这几个变量填了值。空的就抛 MissingConfigError，带上各自的取值方式。
 

@@ -154,13 +154,14 @@ cp .env.target.example .env.target       # 模板里每一项都写了「去哪�
   </div>
   <div class="card">
     <h3>方案 C · 只交接文件（不换凭证）</h3>
-    <p>原主人导出两个 xlsx，你用现成导入脚本灌进去。</p>
-    <pre><code>uv run python scripts/sync_base.py --apply
+    <p>原主人导出两个 <strong>xlsx</strong>，你用现成导入脚本灌进去。<strong>不要用 CSV</strong>：18–19 位的客户 UID 经 CSV/Excel 转手会被抹掉末尾几位 —— 那种 UID 之后永远算不出佣金，而且不报错。</p>
+    <pre><code>cp .env.target.example .env    # 填你的 App ID/Secret + Base token
+uv run python scripts/sync_base.py --apply
 uv run python scripts/import_registrations.py \
   --file 渠道客户.xlsx --apply
 uv run python scripts/import_daily_board.py \
   --file 看板.xlsx --apply</code></pre>
-    <p class="muted">注意：这份文件只导一次（没有 UID 的客户重复导入会堆重复行）。</p>
+    <p class="muted">table_id 不用手抄（sync_base 建完表自动写进 .env）。这份文件只导一次（没有 UID 的客户重复导入会堆重复行）。</p>
   </div>
 </div>
 <p class="muted">（方案 B：原主人把源端 <code>.env</code> 直接给你，你这边一条命令跑完 —— 与 A 相同，只是跑在哪台机器的区别。）</p>

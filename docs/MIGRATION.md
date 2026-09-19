@@ -96,10 +96,13 @@ uv run python scripts/import_daily_board.py --file out/board.xlsx --apply
 **三条注意**：
 
 1. 这两个文件**含真实客户数据**：`out/` 和 `*.xlsx` 都在 `.gitignore` 里，别提交；发文件走内部渠道。
-2. **只跑一次**：没有 UID 的客户靠「编号+客户名」匹配，重复跑可能堆出重复行
+2. **必须是 xlsx，不要 CSV**：18–19 位的客户 UID 经 CSV/Excel 转手会被抹掉末尾几位
+   （`lark/values.py` 的 `EXCEL_SIGNIFICANT_DIGITS` 就是为这个坑写的），那种 UID 之后永远算不出佣金，还不报错。
+3. **只跑一次**：没有 UID 的客户靠「编号+客户名」匹配，重复跑可能堆出重复行
    （导出命令会把你名下这类客户点出来）。方案 A 没有这个问题。
-3. 结构：目标端要先把表建出来（`uv run python scripts/sync_base.py --apply`），导入脚本才会
-   认得那些列 —— 这也是方案 C 比方案 A 多一步的地方。
+4. 结构：目标端要先把表建出来（`uv run python scripts/sync_base.py --apply`，6 个 table_id
+   会**自动写进 .env**，不用手抄），导入脚本才认得那些列 —— 这是方案 C 比方案 A 多的一步。
+   Base 本身在界面上建一个空的（3 秒），把 URL 里的 token 填进 `LARK_BASE_APP_TOKEN`。
 
 ## 三、搬完之后还需要人做的两件
 

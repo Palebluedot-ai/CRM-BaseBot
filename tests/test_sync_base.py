@@ -187,6 +187,42 @@ def test_没给表达式就在本地停下():
         sync_base._build_field(schema.BOARD_ROW_COMMISSION, FIELD_TYPE_FORMULA)
 
 
+def test_建完表把table_id写回环境文件(tmp_path):
+    """id 就在程序手上，没道理让人去界面里一个个抄 —— 抄错的报错还完全指不到错处。"""
+    from crm_basebot.structure import write_table_ids
+
+    env = tmp_path / ".env"
+    env.write_text("# 我的配置\nTABLE_REFERRAL=\nTABLE_CLIENT=\n", encoding="utf-8")
+
+    written = write_table_ids(
+        env, {schema.TABLE_REFERRAL_NAME: "tblA", schema.TABLE_CLIENT_NAME: "tblB"}
+    )
+
+    text = env.read_text(encoding="utf-8")
+    assert written == ["TABLE_REFERRAL", "TABLE_CLIENT"]
+    assert "TABLE_REFERRAL=tblA" in text
+    assert "TABLE_CLIENT=tblB" in text
+    assert "# 我的配置" in text  # 注释不能被重排掉
+
+
+def test_写table_id时只写真拿到的那些(tmp_path):
+    from crm_basebot.structure import write_table_ids
+
+    env = tmp_path / ".env"
+    env.write_text("TABLE_REFERRAL=\nTABLE_SALES=\n", encoding="utf-8")
+
+    written = write_table_ids(env, {schema.TABLE_SALES_NAME: "tblS"})
+
+    assert written == ["TABLE_SALES"]
+    assert env.read_text(encoding="utf-8").splitlines()[0] == "TABLE_REFERRAL="  # 没被动
+
+
+def test_环境文件的键名映射覆盖六张表():
+    from crm_basebot.structure import TABLE_ENV_KEYS
+
+    assert set(TABLE_ENV_KEYS) == set(sync_base.TARGET_TABLES)
+
+
 def test_每个公式列都配了表达式():
     for field_name, type_code in schema.DAILY_BOARD_DERIVED_FIELDS.items():
         if type_code == FIELD_TYPE_FORMULA:

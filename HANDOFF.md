@@ -101,14 +101,21 @@ uv run python scripts/migrate_base.py --target-env .env.target \
 
 **情况 C：什么凭证都不交换，只交接数据文件**
 
-原主人会导出两个 xlsx 给你（渠道+客户、看板）。你这边：
+原主人会导出两个 xlsx 给你（渠道+客户、看板）—— **是 xlsx，不是 CSV**：18–19 位的客户 UID
+用 CSV 转一手会被 Excel 抹掉末尾几位，那种 UID 之后永远算不出佣金，而且不报错。
+
+你这边（Base 用你自己界面建的，把 URL 里的 token 填进 `LARK_BASE_APP_TOKEN`）：
 
 ```bash
-uv run python scripts/sync_base.py --apply         # 先按 schema 把 6 张表建出来
-uv run python scripts/import_registrations.py --file <渠道客户.xlsx> --dry-run
-uv run python scripts/import_registrations.py --file <渠道客户.xlsx> --apply
-uv run python scripts/import_daily_board.py --file <看板.xlsx> --apply
+cp .env.target.example .env        # 前两行填你的 App ID / Secret，再填 Base token
+uv run python scripts/sync_base.py --apply         # 建 6 张表；6 个 table_id 会自动写进 .env
+uv run python scripts/import_registrations.py --file 渠道客户.xlsx --dry-run
+uv run python scripts/import_registrations.py --file 渠道客户.xlsx --apply
+uv run python scripts/import_daily_board.py --file 看板.xlsx --apply
 ```
+
+> `table_id` **不用手抄**：`sync_base.py --apply` 建完表就把它们写回 `.env` 了（早期版本是要
+> 人手抄的，抄错一位会得到 404 而看不出因果）。
 
 注意：这份文件**只导一次**（没有 UID 的客户重复导入可能会堆重复行），而且原主人那边得先有
 一个 Base（他导出用的就是他现在的），确保他导出的是最新数据。

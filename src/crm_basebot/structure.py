@@ -38,6 +38,8 @@ from lark_oapi.api.bitable.v1 import (
     ReqTable,
 )
 
+from pathlib import Path
+
 from .domain import schema
 from .lark.bitable import (
     FIELD_TYPE_AUTO_NUMBER,
@@ -46,6 +48,7 @@ from .lark.bitable import (
     BitableClient,
 )
 from .lark.field_types import type_name
+from .startup import set_env_value
 
 # 我们负责维护的表。
 TARGET_TABLES: dict[str, dict[str, int]] = {
@@ -68,6 +71,32 @@ LINK_TARGETS: dict[tuple[str, str], str] = {
     (schema.TABLE_CLIENT_NAME, schema.CLIENT_REFERRAL_LINK): schema.TABLE_REFERRAL_NAME,
     (schema.TABLE_DAILY_BOARD_NAME, schema.BOARD_CLIENT_LINK): schema.TABLE_CLIENT_NAME,
 }
+
+
+# 表名 -> .env 里的键名。建完表把 id 写回去用，别让人手抄（手抄错一位的报错完全看不出因果）。
+TABLE_ENV_KEYS: dict[str, str] = {
+    schema.TABLE_REFERRAL_NAME: "TABLE_REFERRAL",
+    schema.TABLE_CLIENT_NAME: "TABLE_CLIENT",
+    schema.TABLE_DAILY_BOARD_NAME: "TABLE_DAILY_BOARD",
+    schema.TABLE_COMMISSION_NAME: "TABLE_COMMISSION",
+    schema.TABLE_AUDIT_NAME: "TABLE_AUDIT",
+    schema.TABLE_SALES_NAME: "TABLE_SALES",
+}
+
+
+def write_table_ids(env_path: Path | str, table_ids: dict[str, str]) -> list[str]:
+    """把表名 -> id 写进环境文件，返回写过的键名。
+
+    调用时机是「结构刚对齐好、id 就在手上」—— 这时候让人去界面里一个个抄 id 是没必要的
+    摩擦，而抄错的后果（404「table not found」）还完全指不到真正的错处。
+    """
+    written: list[str] = []
+    for table_name, key in TABLE_ENV_KEYS.items():
+        table_id = table_ids.get(table_name)
+        if table_id:
+            set_env_value(env_path, key, table_id)
+            written.append(key)
+    return written
 
 
 class StructureError(RuntimeError):

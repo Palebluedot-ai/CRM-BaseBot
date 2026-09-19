@@ -21,7 +21,7 @@ from ..domain import schema
 from ..lark.bitable import BitableClient
 from ..lark.client import build_client
 from ..lark.values import extract_text
-from ..startup import MissingConfigError, load_settings
+from ..startup import MissingConfigError, load_settings, set_env_value
 from ..structure import StructureResult, ensure_structure
 from .copy import (
     CopySpec,
@@ -123,20 +123,8 @@ def load_target_settings(env_path: Path, *, require_token: bool = True) -> Setti
     return settings
 
 
-def set_env_value(env_path: Path, key: str, value: str) -> None:
-    """把 ``KEY=value`` 写进环境文件（已存在就替换那一行，不动的行原样保留）。
-
-    建完 Base 拿到 token 后要落盘 —— 不然下一次跑又得重新建一个。注释和空行都留着，
-    文件还是那个「人看的一页配置」，不是被程序重排过的产物。
-    """
-    lines = env_path.read_text(encoding="utf-8").splitlines()
-    for index, line in enumerate(lines):
-        if line.strip().startswith(f"{key}="):
-            lines[index] = f"{key}={value}"
-            break
-    else:
-        lines.append(f"{key}={value}")
-    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+# set_env_value 住在 crm_basebot.startup（它是「环境文件」这件事的共同出口，sync_base 也要用）。
+# 这里保留同名导入，是为了让 migration 的调用方（包括测试）从同一个地方拿到它。
 
 
 def create_target_base(client, name: str) -> str:

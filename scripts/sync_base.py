@@ -39,6 +39,7 @@ from crm_basebot.structure import (  # noqa: E402
     LINK_TARGETS,
     TARGET_TABLES,
     ensure_structure,
+    write_table_ids,
 )
 from crm_basebot.structure import build_field as _build_field  # noqa: E402
 
@@ -48,9 +49,14 @@ __all__ = ["LINK_TARGETS", "TARGET_TABLES", "_build_field", "_verify_formulas", 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="幂等对齐 Base 结构")
     parser.add_argument("--apply", action="store_true", help="真的执行，默认只预演")
+    parser.add_argument(
+        "--env",
+        default=".env",
+        help="环境文件，默认 .env；--apply 时会把 6 个 table_id 写回这个文件",
+    )
     args = parser.parse_args(argv)
 
-    settings = load_settings()
+    settings = load_settings(env_file=args.env)
     require_settings(settings, "LARK_BASE_APP_TOKEN")
 
     result = ensure_structure(
@@ -75,9 +81,9 @@ def main(argv: list[str] | None = None) -> int:
             print("\n确认无误后加 --apply 真正执行。")
 
     if args.apply:
-        print("\n表名 -> table_id（填 .env 或迁移时用）：")
-        for name, table_id in result.table_ids.items():
-            print(f"  {name:<26}{table_id}")
+        written = write_table_ids(args.env, result.table_ids)
+        print(f"\n已把 {len(written)} 个 table_id 写进 {args.env}：{'、'.join(written)}")
+        print("  （不用手抄了；想看全部表名和 id 也可以跑 scripts/inspect_base.py）")
         _verify_formulas(
             BitableClient(settings.base_app_token),
             result.table_ids.get(schema.TABLE_DAILY_BOARD_NAME),
