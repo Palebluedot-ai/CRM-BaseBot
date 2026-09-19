@@ -108,8 +108,13 @@ uv run python scripts/import_handover.py --dir . --apply
 
 ## 三、搬完之后还需要人做的两件
 
-这两件机器代劳不了，因为 **open_id 是飞书按应用签发的** —— 你在源端的 `ou_xxx` 在目标端
-是无效值，搬过去只会指向不存在的人。
+这两件机器代劳不了，因为 **open_id 是飞书按应用签发的** —— 委托人的账号里是一个**全新的
+应用和全新的 bot**，源端的 `ou_xxx` 在目标端是无效值，搬过去只会指向不存在的人。
+
+> **顺序不能反**：新 bot 上线**之前**收不到任何 open_id（消息没人接收）。所以先配应用侧
+> （机器人能力 + `im:message.p2p_msg:readonly` + `im:message:send_as_bot` + 订阅
+> `im.message.receive_v1` + 卡片回调，然后**发版**），再 `uv run python -m crm_basebot.app`
+> 把机器人跑起来，然后才是下面这两步。原主人那台机器上的机器人服务的是原账号。
 
 ```bash
 # ① 目标账号的每位销售，各给机器人发一条消息；服务端日志里会记下他的 open_id：

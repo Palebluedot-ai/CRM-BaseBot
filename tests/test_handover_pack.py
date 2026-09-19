@@ -64,10 +64,13 @@ def test_包里该有的都在(tmp_path):
 
     # 说明书要讲到那几件最要紧的事
     assert "不要转成 CSV" in readme
-    assert "不要转成 CSV" in readme and "15 位有效数字" in readme
+    assert "15 位有效数字" in readme
     assert "import_handover.py" in readme
     assert "只导一次" in readme
-    assert "open_id 是飞书**按应用**签发" in readme
+    # 顺序：新 bot 先跑起来，才收得到 open_id（这条顺序写反过一次，钉住）
+    assert "全新的应用、全新的 bot" in readme
+    assert "(b) 在本机把机器人跑起来" in readme
+    assert readme.index("(b) 在本机把机器人跑起来") < readme.index("(c) 每位销售各给机器人")
 
 
 def test_缺文件时提示先导出(tmp_path):

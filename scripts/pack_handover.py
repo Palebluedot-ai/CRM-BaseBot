@@ -90,18 +90,24 @@ README = """CRM-BaseBot 首次导入说明
     佣金合计 复算 = 看板 = 163,175.36 USD
 
 
-还要人做的两件（机器代劳不了）
+还要人做的两件，以及它们的**前置条件**
 ----------------------------------------------------------------
-open_id 是飞书**按应用**签发的，原账号的值在你账号里无效，所以名册和归属没随数据过来。
+先看清顺序：你这边是**全新的应用、全新的 bot**，而 open_id 是**按应用签发**的 ——
+在新 bot 跑起来之前，销售发的消息没有任何东西接收，也就拿不到任何 open_id。所以：
 
-  ① 每位销售各给机器人发一条消息，服务端日志会出现他的 open_id：
-       WARNING crm_basebot.bot.auth: 未登记的 open_id 尝试操作: ou_xxxx
-     填进名册：uv run python scripts/set_sales_open_id.py --name "某人" --open-id ou_xxxx --apply
-  ② 名册填好后回填归属：
-       uv run python scripts/backfill_owners.py --dry-run
-       uv run python scripts/backfill_owners.py --apply
+  (a) 先把应用侧配齐并**发版**：机器人能力、im:message.p2p_msg:readonly、
+      im:message:send_as_bot、订阅 im.message.receive_v1 + 卡片回调 card.action.trigger
+      （长连接方式，不需要公网地址）。照 docs/LARK_APP_SETUP.md 的清单配。
+  (b) 在本机把机器人跑起来：uv run python -m crm_basebot.app
+  (c) 每位销售各给机器人发一条消息，服务端日志会出现他的 open_id：
+        WARNING crm_basebot.bot.auth: 未登记的 open_id 尝试操作: ou_xxxx
+      填进名册：uv run python scripts/set_sales_open_id.py --name "某人" --open-id ou_xxxx --apply
+  (d) 名册填好后回填归属：
+        uv run python scripts/backfill_owners.py --dry-run
+        uv run python scripts/backfill_owners.py --apply
 
-在这两步之前，机器人里「我的渠道」是空的 —— 这不是数据丢失，是归属还没认领。
+在 (c)(d) 之前，机器人里「我的渠道」是空的 —— 这不是数据丢失，是归属还没认领。
+（原主人那台机器上的机器人服务的是原账号，和你这边没有关系。）
 
 
 之后的日常（不用再碰这个包）

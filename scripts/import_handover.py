@@ -177,13 +177,16 @@ def main(argv: list[str] | None = None) -> int:
     # ④ 汇总
     if args.apply:
         print("\n=== 接下来还要人做的 ===")
-        print("  ① 名册里的 OpenID 还是空的（open_id 按应用签发，跨账号无效）：")
+        print("  ① 先把**新 bot** 跑起来（你这边是全新应用；open_id 由它签发）：")
+        print("     应用侧配齐机器人能力 + 订阅 im.message.receive_v1 + 卡片回调并**发版**，")
+        print("     然后 uv run python -m crm_basebot.app")
+        print("  ② 名册里的 OpenID 还是空的（open_id 按应用签发，跨账号无效）：")
         print("     让每位销售各给机器人发一条消息，日志里会出现 ou_xxxx，然后：")
         print(
             '     uv run python scripts/set_sales_open_id.py --name "某人" '
             "--open-id ou_xxxx --apply"
         )
-        print("  ② 名册填好之后回填渠道/客户的归属：")
+        print("  ③ 名册填好之后回填渠道/客户的归属：")
         print("     uv run python scripts/backfill_owners.py --apply")
         print("\n=== 复核 ===")
         print("  uv run python scripts/verify_commission.py    # 期望：逐行一致，没有差异")

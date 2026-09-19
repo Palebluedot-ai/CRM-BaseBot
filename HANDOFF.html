@@ -171,6 +171,10 @@ uv run python scripts/verify_commission.py     # 期望结论：逐行一致，�
 <p><code>verify_commission.py</code> <strong>不看</strong> Base 的公式列，而是自己按「用户ID → 客户表 → 所属渠道 → 分佣比例」复算一遍再逐行对比。它报「逐行一致」就等于同时证明了三件事：关联没搬错、公式生效、钱算得对。</p>
 
 <h2 id="s6">6 · 还需要人做的两件（open_id）</h2>
+<div class="callout danger">
+  <strong>前置：新的机器人得先跑起来</strong>（见第 7 节）。<code>open_id</code> 是<strong>应用</strong>签发的 —— 委托人这边是一个<strong>全新的应用、全新的 bot</strong>，在它上线之前，销售发的消息没有任何东西接收，也就拿不到任何 open_id。<br>
+  正确顺序：<strong>建应用 / 开权限 / 发版</strong>（第 2 节）→ <strong>把机器人跑起来</strong>（第 7 节）→ 收 open_id（本节）→ 回填归属（本节）。原主人那台机器上的机器人服务的是原账号，与这里无关。
+</div>
 <div class="callout">
   <strong>为什么必须人做：</strong><code>open_id</code>（飞书里「这个人是谁」的 ID）是<strong>按应用签发</strong>的 —— 原账号的 open_id 在委托人的账号里是无效值，所以名册和归属都没搬。搬完机器人里「我的渠道」是空的，<strong>这不是数据丢失</strong>，是归属还没认领。
 </div>
