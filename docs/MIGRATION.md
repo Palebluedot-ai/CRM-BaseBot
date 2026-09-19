@@ -75,6 +75,32 @@ uv run python scripts/migrate_base.py --target-env .env.target --apply
 可选项：`--include-audit`（连审计日志一起搬）、`--include-commission`（连月度汇总一起搬；
 不搬的话目标端跑一次 `reconcile` 就有了）。
 
+## 二·五、方案 C：不交换任何凭证，只交接两个文件
+
+如果委托人一行凭证都不想给，也可以只传数据文件：
+
+```bash
+# 源端（原主人的机器）：导出两个 xlsx
+uv run python scripts/export_for_migration.py --out out/handover.xlsx --board-out out/board.xlsx
+
+# 目标端（委托人的机器）：用现成的导入脚本灌进去
+uv run python scripts/import_registrations.py --file out/handover.xlsx --dry-run   # 先预演
+uv run python scripts/import_registrations.py --file out/handover.xlsx --apply
+uv run python scripts/import_daily_board.py --file out/board.xlsx --apply
+```
+
+导出的表头照抄现成导入脚本认的那套（渠道/客户是模板 xlsx 的形状，看板就是那 18 列），
+所以目标端不需要任何改造。实测：导出 1,650 行看板后导入端读出「客户关联 342/1650 行
+（43 个用户）」，与源 Base 完全一致。
+
+**三条注意**：
+
+1. 这两个文件**含真实客户数据**：`out/` 和 `*.xlsx` 都在 `.gitignore` 里，别提交；发文件走内部渠道。
+2. **只跑一次**：没有 UID 的客户靠「编号+客户名」匹配，重复跑可能堆出重复行
+   （导出命令会把你名下这类客户点出来）。方案 A 没有这个问题。
+3. 结构：目标端要先把表建出来（`uv run python scripts/sync_base.py --apply`），导入脚本才会
+   认得那些列 —— 这也是方案 C 比方案 A 多一步的地方。
+
 ## 三、搬完之后还需要人做的两件
 
 这两件机器代劳不了，因为 **open_id 是飞书按应用签发的** —— 你在源端的 `ou_xxx` 在目标端

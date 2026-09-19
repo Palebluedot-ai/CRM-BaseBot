@@ -75,6 +75,20 @@ uv run python scripts/migrate_base.py --target-env .env.target \
 搬看板（按「客户UID」重建关联）→ 搬名册 → **逐表比对两边行数**。看到每一行都是
 `✅ 渠道 Referral Information：源 N 条 → 目标 N 条` 才算成功。
 
+**情况 C：什么凭证都不交换，只交接数据文件**
+
+原主人会导出两个 xlsx 给你（渠道+客户、看板）。你这边：
+
+```bash
+uv run python scripts/sync_base.py --apply         # 先按 schema 把 6 张表建出来
+uv run python scripts/import_registrations.py --file <渠道客户.xlsx> --dry-run
+uv run python scripts/import_registrations.py --file <渠道客户.xlsx> --apply
+uv run python scripts/import_daily_board.py --file <看板.xlsx> --apply
+```
+
+注意：这份文件**只导一次**（没有 UID 的客户重复导入可能会堆重复行），而且原主人那边得先有
+一个 Base（他导出用的就是他现在的），确保他导出的是最新数据。
+
 ## 4. 搬完立刻自检（你来做）
 
 ```bash
