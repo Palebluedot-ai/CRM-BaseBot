@@ -99,26 +99,27 @@ uv run python scripts/migrate_base.py --target-env .env.target \
 搬看板（按「客户UID」重建关联）→ 搬名册 → **逐表比对两边行数**。看到每一行都是
 `✅ 渠道 Referral Information：源 N 条 → 目标 N 条` 才算成功。
 
-**情况 C：什么凭证都不交换，只交接数据文件**
+**情况 C：什么凭证都不交换，只交接文件**
 
-原主人会导出两个 xlsx 给你（渠道+客户、看板）—— **是 xlsx，不是 CSV**：18–19 位的客户 UID
-用 CSV 转一手会被 Excel 抹掉末尾几位，那种 UID 之后永远算不出佣金，而且不报错。
+原主人会给你一个 zip（里面是 `渠道客户.xlsx` + `看板.xlsx` + `导入说明.txt` + `HANDOFF.html`）
+—— **是 xlsx，不是 CSV**：18–19 位的客户 UID 用 CSV 转一手会被 Excel 抹掉末尾几位，那种 UID
+之后永远算不出佣金，而且不报错。
 
 你这边（Base 用你自己界面建的，把 URL 里的 token 填进 `LARK_BASE_APP_TOKEN`）：
 
 ```bash
-cp .env.target.example .env        # 前两行填你的 App ID / Secret，再填 Base token
-uv run python scripts/sync_base.py --apply         # 建 6 张表；6 个 table_id 会自动写进 .env
-uv run python scripts/import_registrations.py --file 渠道客户.xlsx --dry-run
-uv run python scripts/import_registrations.py --file 渠道客户.xlsx --apply
-uv run python scripts/import_daily_board.py --file 看板.xlsx --apply
+cp .env.target.example .env        # 填你的 App ID / Secret，再填 Base token
+# 把包里的两个 xlsx 放到仓库根目录，然后一条命令导完：
+uv run python scripts/import_handover.py --dir . --dry-run   # 先预演（不写库）
+uv run python scripts/import_handover.py --dir . --apply     # 真导
 ```
 
-> `table_id` **不用手抄**：`sync_base.py --apply` 建完表就把它们写回 `.env` 了（早期版本是要
-> 人手抄的，抄错一位会得到 404 而看不出因果）。
+这一条命令会按顺序做：建 6 张表（含看板公式列）+ 把 6 个 table_id **自动写进 `.env`** →
+导渠道/客户（按「渠道编号」重建关联）→ 导看板（按「客户UID」重建关联）→ 名册按姓名补齐。
+`table_id` 不用手抄（早期版本要人手抄，抄错一位会得到 404 而看不出因果）。
 
-注意：这份文件**只导一次**（没有 UID 的客户重复导入可能会堆重复行），而且原主人那边得先有
-一个 Base（他导出用的就是他现在的），确保他导出的是最新数据。
+注意：这份数据**只导一次**（没有 UID 的客户重复导会堆重复行），而且原主人那边得先有
+一个 Base（他就是从那儿导出的），确保导出的是最新数据。
 
 ## 4. 搬完立刻自检（你来做）
 

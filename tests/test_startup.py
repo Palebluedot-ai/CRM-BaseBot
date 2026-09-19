@@ -240,10 +240,21 @@ def test_变量名写错了立刻炸():
 # ---------- 别让下一个入口漏掉 ----------
 
 
+# 纯粹本地、一个凭证都不读的脚本。上面那条规则的目的是「缺凭证时要给人话而不是 pydantic 栈
+# 回溯」—— 对没有凭证可缺的脚本不适用。往里加名字之前先问一句：它真的不需要任何配置吗？
+NO_CONFIG_SCRIPTS = {
+    "pack_handover.py",  # 打包交接材料：只读本地文件、写 zip，不连任何服务
+}
+
+
 ENTRY_POINTS = sorted(
     [PROJECT_ROOT / "src" / "crm_basebot" / "app.py"]
     + [PROJECT_ROOT / "src" / "crm_basebot" / "jobs" / "reconcile.py"]
-    + list((PROJECT_ROOT / "scripts").glob("*.py"))
+    + [
+        path
+        for path in (PROJECT_ROOT / "scripts").glob("*.py")
+        if path.name not in NO_CONFIG_SCRIPTS
+    ]
 )
 
 

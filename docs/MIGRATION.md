@@ -75,34 +75,36 @@ uv run python scripts/migrate_base.py --target-env .env.target --apply
 可选项：`--include-audit`（连审计日志一起搬）、`--include-commission`（连月度汇总一起搬；
 不搬的话目标端跑一次 `reconcile` 就有了）。
 
-## 二·五、方案 C：不交换任何凭证，只交接两个文件
-
-如果委托人一行凭证都不想给，也可以只传数据文件：
+## 二·五、方案 C：不交换任何凭证，只交接一个包
 
 ```bash
-# 源端（原主人的机器）：导出两个 xlsx
+# 源端（原主人的机器）：导出 + 打包（一条命令一个包）
 uv run python scripts/export_for_migration.py --out out/handover.xlsx --board-out out/board.xlsx
+uv run python scripts/pack_handover.py --out out
+#   → out/CRM-BaseBot-首次导入-YYYYMMDD.zip（渠道客户.xlsx + 看板.xlsx + 导入说明.txt + HANDOFF.html）
 
-# 目标端（委托人的机器）：用现成的导入脚本灌进去
-uv run python scripts/import_registrations.py --file out/handover.xlsx --dry-run   # 先预演
-uv run python scripts/import_registrations.py --file out/handover.xlsx --apply
-uv run python scripts/import_daily_board.py --file out/board.xlsx --apply
+# 目标端（委托人的机器）：一条命令导完
+uv run python scripts/import_handover.py --dir . --dry-run   # 先预演
+uv run python scripts/import_handover.py --dir . --apply
 ```
 
-导出的表头照抄现成导入脚本认的那套（渠道/客户是模板 xlsx 的形状，看板就是那 18 列），
-所以目标端不需要任何改造。实测：导出 1,650 行看板后导入端读出「客户关联 342/1650 行
-（43 个用户）」，与源 Base 完全一致。
+`import_handover.py` 按顺序做：建 6 张表（含公式列）+ 把 6 个 table_id 写回 `.env` →
+导渠道/客户（按「渠道编号」重建关联）→ 导看板（按「客户UID」重建关联）→ 名册按姓名补齐。
+导入逻辑一行都没重写：它调的就是 `import_registrations.py` 和 `import_daily_board.py`
+（两者都有 `run(args, settings, bitable)` 注入点），否则两套实现迟早偷偷不一致。
 
-**三条注意**：
+实测：把导出的看板重新读回来，得到「1,650 行、客户关联 342/1,650 行（43 个用户）」，
+与源 Base 完全一致。
 
-1. 这两个文件**含真实客户数据**：`out/` 和 `*.xlsx` 都在 `.gitignore` 里，别提交；发文件走内部渠道。
+**四条注意**：
+
+1. 包里的 xlsx **含真实客户数据**：`out/` 和 `*.xlsx` 都在 `.gitignore` 里，别提交；发文件走内部渠道。
 2. **必须是 xlsx，不要 CSV**：18–19 位的客户 UID 经 CSV/Excel 转手会被抹掉末尾几位
    （`lark/values.py` 的 `EXCEL_SIGNIFICANT_DIGITS` 就是为这个坑写的），那种 UID 之后永远算不出佣金，还不报错。
-3. **只跑一次**：没有 UID 的客户靠「编号+客户名」匹配，重复跑可能堆出重复行
+3. **打包要用 `pack_handover.py`，不要用命令行 `zip`**：macOS 的 `zip` 不给中文文件名打 UTF-8
+   标记，Windows 那边解出来是 `µ╕áΘüôσ«óµê╖.xlsx` 这种乱码（实测踩过，有回归测试钉着）。
+4. **只跑一次**：没有 UID 的客户靠「编号+客户名」匹配，重复跑可能堆出重复行
    （导出命令会把你名下这类客户点出来）。方案 A 没有这个问题。
-4. 结构：目标端要先把表建出来（`uv run python scripts/sync_base.py --apply`，6 个 table_id
-   会**自动写进 .env**，不用手抄），导入脚本才认得那些列 —— 这是方案 C 比方案 A 多的一步。
-   Base 本身在界面上建一个空的（3 秒），把 URL 里的 token 填进 `LARK_BASE_APP_TOKEN`。
 
 ## 三、搬完之后还需要人做的两件
 
