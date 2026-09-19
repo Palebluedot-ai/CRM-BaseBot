@@ -23,6 +23,7 @@ Base 里已经有同事在用的表，所以安全边界很明确：
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import lark_oapi as lark
@@ -37,8 +38,6 @@ from lark_oapi.api.bitable.v1 import (
     CreateAppTableRequestBody,
     ReqTable,
 )
-
-from pathlib import Path
 
 from .domain import schema
 from .lark.bitable import (
