@@ -65,6 +65,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="也搬「审计日志」（默认不搬，它是历史流水）",
     )
+    parser.add_argument(
+        "--create-base",
+        metavar="名字",
+        help=(
+            "目标账号里还没有 Base 时，用这个应用新建一个（名字就是这个参数），"
+            "token 会写回环境文件 —— 这样同事只需要提供一个应用凭证，"
+            "不用手工建 Base、也不用把应用加成协作者"
+        ),
+    )
     return parser
 
 
@@ -89,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
             include_audit=args.include_audit,
             include_commission=args.include_commission,
             source_settings=source,
+            create_base=args.create_base,
         )
     except MigrationError as exc:
         print(f"\n迁移没法继续：{exc}", file=sys.stderr)

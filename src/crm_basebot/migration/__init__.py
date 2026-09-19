@@ -39,11 +39,20 @@
 
 from __future__ import annotations
 
-from .runner import MigrationResult, TableCopyResult, load_target_settings, run_migration
+from .runner import (
+    MigrationResult,
+    TableCopyResult,
+    create_target_base,
+    load_target_settings,
+    run_migration,
+    set_env_value,
+)
 
 __all__ = [
     "MigrationResult",
     "TableCopyResult",
+    "create_target_base",
     "load_target_settings",
     "run_migration",
+    "set_env_value",
 ]

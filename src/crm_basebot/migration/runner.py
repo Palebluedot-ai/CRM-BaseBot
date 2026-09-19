@@ -82,26 +82,84 @@ class MigrationResult:
         ]
 
 
-def load_target_settings(env_path: Path) -> Settings:
+def _app_credentials_message(env_path: Path) -> str:
+    return (
+        f"{env_path} 里还没填目标账号的应用凭证（LARK_APP_ID / LARK_APP_SECRET）。\n"
+        "  去哪拿：https://open.feishu.cn/app → 在**目标账号**里创建企业自建应用\n"
+        "          → 左侧「凭证与基础信息」。\n"
+        "  别忘了两件：① 权限管理里开通 bitable:app  ② 创建版本并发布（缺了会 403）。"
+    )
+
+
+def load_target_settings(env_path: Path, *, require_token: bool = True) -> Settings:
     """从目标环境文件读凭证。缺键时报出**缺哪个**，不回显任何值。
 
     走 ``startup.load_settings(env_file=...)`` 而不是自己构造 Settings：缺键时的文案
     只有那一处（会告诉人缺哪个键、去哪儿填），迁移这条路上同样该看到它。
+
+    ``require_token=False`` 用于「边建 Base 边迁移」：那一步开始时 token 还不存在
+    （Base 是刚建出来的），建完写回文件再继续。
     """
     if not env_path.is_file():
         raise MigrationError(
             f"找不到目标环境文件：{env_path}\n"
-            "  复制 .env.example 改成 .env.target，填**目标账号**那个飞书应用的\n"
+            "  复制 .env.target.example 改成 .env.target，填**目标账号**那个飞书应用的\n"
             "  LARK_APP_ID / LARK_APP_SECRET / LARK_BASE_APP_TOKEN（表 id 可以留空，\n"
             "  迁移会按表名找到它们）。"
         )
     try:
         settings = load_settings(env_file=env_path)
     except MissingConfigError as exc:
-        raise MigrationError(str(exc)) from None
-    if not settings.base_app_token:
+        message = str(exc)
+        # startup 的缺键文案是围绕 `.env` 写的（会告诉人去项目根目录找）。迁移读的是
+        # .env.target，那份文案会把人指到错的文件上，所以这两项换成本地版本。
+        if "LARK_APP_ID" in message or "LARK_APP_SECRET" in message:
+            raise MigrationError(_app_credentials_message(env_path)) from None
+        raise MigrationError(message) from None
+    if not settings.app_id or not settings.app_secret:
+        raise MigrationError(_app_credentials_message(env_path))
+    if require_token and not settings.base_app_token:
         raise MigrationError(f"{env_path} 里没填 LARK_BASE_APP_TOKEN（目标 Base 的 token）")
     return settings
+
+
+def set_env_value(env_path: Path, key: str, value: str) -> None:
+    """把 ``KEY=value`` 写进环境文件（已存在就替换那一行，不动的行原样保留）。
+
+    建完 Base 拿到 token 后要落盘 —— 不然下一次跑又得重新建一个。注释和空行都留着，
+    文件还是那个「人看的一页配置」，不是被程序重排过的产物。
+    """
+    lines = env_path.read_text(encoding="utf-8").splitlines()
+    for index, line in enumerate(lines):
+        if line.strip().startswith(f"{key}="):
+            lines[index] = f"{key}={value}"
+            break
+    else:
+        lines.append(f"{key}={value}")
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def create_target_base(client, name: str) -> str:
+    """在目标账号里新建一个多维表格（Base），返回它的 app_token。
+
+    为什么要有这条：Base 由**应用自己**创建时，应用就是它的所有者，不需要任何「把应用
+    加为协作者」的界面操作 —— 那一步漏了会得到 403，而报错完全看不出是这个原因
+    （迁移路上最容易卡住的一个坑）。
+    """
+    from lark_oapi.api.bitable.v1 import CreateAppRequest, ReqApp
+
+    request = CreateAppRequest.builder().request_body(ReqApp.builder().name(name).build()).build()
+    response = client.bitable.v1.app.create(request)
+    if not response.success():
+        raise MigrationError(
+            f"新建 Base 失败：{response.code} {response.msg}\n"
+            "  检查应用是否开通了「多维表格」权限，以及是否创建并发版了应用版本。"
+        )
+    app = getattr(response.data, "app", None)
+    app_token = getattr(app, "app_token", None) if app else None
+    if not app_token:
+        raise MigrationError("新建 Base 返回成功但没给 app_token，请到飞书里确认 Base 是否已建出来")
+    return app_token
 
 
 def _table_id(structure: StructureResult, name: str) -> str:
@@ -121,12 +179,39 @@ def run_migration(
     include_commission: bool = False,
     source_settings: Settings | None = None,
     client_factory: Callable[[Any], Any] = build_client,
+    create_base: str | None = None,
 ) -> MigrationResult:
-    """一条命令的入口：``apply=False`` 只预演。"""
+    """一条命令的入口：``apply=False`` 只预演。
+
+    ``create_base="名字"`` 时，若目标环境里还没有 Base token，就先**用一个应用建出这个
+    Base** 再往下走（token 会写回环境文件）。这样同事那边只需要出一个应用凭证 ——
+    不用手工建 Base、也不用在界面上把应用加成协作者。
+    """
     source_settings = source_settings or load_settings()
-    target_settings = load_target_settings(target_env_path)
+    target_settings = load_target_settings(target_env_path, require_token=create_base is None)
+
+    # 预演：目标 Base 还不存在的话，就把「要建 Base」写进计划里，别的都只读不动。
+    if not apply:
+        result = MigrationResult(structure=StructureResult(), applied=False)
+        if create_base and not target_settings.base_app_token:
+            result.structure.plan.append(f"新建 Base「{create_base}」（预演，没有真的建）")
+        else:
+            target_client = client_factory(target_settings)
+            result.structure = ensure_structure(
+                settings=target_settings,
+                bitable=BitableClient(target_settings.base_app_token, target_client),
+                client=target_client,
+                apply=False,
+            )
+        return result
 
     target_client = client_factory(target_settings)
+    if create_base and not target_settings.base_app_token:
+        app_token = create_target_base(target_client, create_base)
+        set_env_value(target_env_path, "LARK_BASE_APP_TOKEN", app_token)
+        target_settings = load_target_settings(target_env_path)
+        logger.info("已新建 Base「%s」，token 写回 %s", create_base, target_env_path)
+
     source_bitable = BitableClient(source_settings.base_app_token)
     # 显式把目标客户端传进去：不然 BitableClient 会用源应用的身份去动目标 Base。
     target_bitable = BitableClient(target_settings.base_app_token, target_client)
@@ -135,11 +220,9 @@ def run_migration(
         settings=target_settings,
         bitable=target_bitable,
         client=target_client,
-        apply=apply,
+        apply=True,
     )
-    result = MigrationResult(structure=structure, applied=apply)
-    if not apply:
-        return result
+    result = MigrationResult(structure=structure, applied=True)
 
     source = _Source(source_bitable, source_settings)
     specs = _build_specs(

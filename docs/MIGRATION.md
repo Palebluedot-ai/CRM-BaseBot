@@ -13,29 +13,53 @@
 因为表头一模一样，搬运不需要任何映射表：**字段按名字对应，关联按业务键重建**
 （客户→渠道 用「渠道编号」，看板→客户 用「客户UID」）。
 
-## 一、准备目标环境文件
+## 一、准备目标环境文件（**在哪儿填、填什么**）
 
 ```bash
-cp .env.example .env.target
+cp .env.target.example .env.target      # 模板就在仓库里，同事 clone 下来就有
 ```
 
-填**目标账号**那个飞书应用的三样（表 id 可以全部留空 —— 迁移按表名自己找）：
+`.env.target` 在仓库根目录，**只需要填三个值**（模板里每一项都写了去哪抄）：
 
-```
-LARK_APP_ID=<目标账号应用的 App ID>
-LARK_APP_SECRET=<同一个应用的 Secret>
-LARK_BASE_APP_TOKEN=<目标 Base 的 token>
-BUSINESS_TIMEZONE=Asia/Singapore
-```
+| 填什么 | 去哪拿 |
+|---|---|
+| `LARK_APP_ID` | https://open.feishu.cn/app → 在**同事的**账号里「创建企业自建应用」→ 左侧「凭证与基础信息」 |
+| `LARK_APP_SECRET` | 同上那一页 |
+| `LARK_BASE_APP_TOKEN` | **走法 A 可以留空**（见下）；走法 B 填同事自己建的那个空 Base 的 URL 里 `/base/<这一段>` |
+| `BUSINESS_TIMEZONE` | 保持 `Asia/Singapore`，除非业务不在新加坡 |
 
-`.env.target` 已在 `.gitignore` 里，不会被提交。
+两个必做的开通动作（**漏了会得到 403，而报错完全看不出原因** —— 这是迁移最容易卡住的地方）：
+
+1. **权限**：开发者后台 → 该应用 → 「权限管理」→ 搜「多维表格」→ 开通 `bitable:app`（读写）
+2. **发版**：同一后台 → 「版本管理与发布」→ 创建版本 → 申请发布（自建企业应用通常要管理员点一下）
+
+`.env.target` 已在 `.gitignore` 里（`.env.target`、`.env.target.*`），不会被提交。
+
+### 目标 Base 用哪种走法？
+
+| | 走法 A（推荐） | 走法 B |
+|---|---|---|
+| 做法 | 命令里加 `--create-base "CRM 佣金看板"`，**什么都不用建** | 同事自己先建一个空 Base，把 URL 里的 token 填进 `.env.target` |
+| 优点 | 应用自己建 = 它就是所有者，**不用**「把应用加为协作者」这一步（少一个 403 坑） | Base 从一出生就在同事自己的空间里，他界面上直接看得见 |
+| 代价 | 建完要在 Base 界面把同事加成协作者（或把所有权转给他），他才能看见 | 必须记得把应用加成协作者（可编辑），否则 403 |
+| token | 迁移自动写回 `.env.target` | 手工填 |
 
 ## 二、跑（默认只预演）
 
 ```bash
-uv run python scripts/migrate_base.py --target-env .env.target --dry-run   # 看要做什么
-uv run python scripts/migrate_base.py --target-env .env.target --apply     # 真搬
+# 走法 A：目标账号里连 Base 都还没建
+uv run python scripts/migrate_base.py --target-env .env.target --create-base "CRM 佣金看板" --dry-run
+uv run python scripts/migrate_base.py --target-env .env.target --create-base "CRM 佣金看板" --apply
+
+# 走法 B：已经有一个空 Base（token 填在 .env.target 里）
+uv run python scripts/migrate_base.py --target-env .env.target --dry-run
+uv run python scripts/migrate_base.py --target-env .env.target --apply
 ```
+
+**在哪台机器上跑？** 任何一台能同时看到两份环境文件的机器都行 —— 所以最省事的做法是
+**在你的机器上跑**（源端 `.env` 已经在这儿了），同事那边只需要出一个应用凭证。搬完 Base
+和结构都在他的账号里，之后他 clone 仓库、填自己的 `.env`（把 `.env.target` 的内容抄成
+`.env`）就能接手日常。
 
 `--apply` 一次做完这些，中间不用手工点 Base：
 

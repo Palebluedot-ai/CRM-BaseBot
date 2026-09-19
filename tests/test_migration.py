@@ -226,8 +226,81 @@ def test_目标环境文件缺Base_token时报错(tmp_path):
         raise AssertionError("应该报错")
 
 
+def test_目标环境文件缺应用凭证时告诉去哪拿(tmp_path):
+    """缺应用凭证时不能把人指到 .env 上去 —— 迁移读的是 .env.target。"""
+    for text in ("LARK_BASE_APP_TOKEN=bascnXYZ\n", "LARK_APP_ID=\nLARK_APP_SECRET=\n"):
+        env = tmp_path / ".env.target"
+        env.write_text(text, encoding="utf-8")
+
+        try:
+            load_target_settings(env)
+        except MigrationError as exc:
+            assert "LARK_APP_ID" in str(exc)
+            assert str(env) in str(exc)  # 指的文件必须是 .env.target
+            assert "open.feishu.cn/app" in str(exc)
+            assert "bitable:app" in str(exc)
+        else:  # pragma: no cover
+            raise AssertionError("应该报错")
+
+
 def test_命令行默认只预演():
     args = cli.build_parser().parse_args(["--target-env", ".env.target"])
     assert args.apply is False
     assert args.include_audit is False
     assert args.include_commission is False
+    assert args.create_base is None
+
+
+def test_建Base的名字能传进去():
+    args = cli.build_parser().parse_args(["--apply", "--create-base", "CRM 佣金看板"])
+    assert args.create_base == "CRM 佣金看板"
+
+
+# ---------- 把 token 写回环境文件 ----------
+
+
+def test_写回环境文件保留注释和未改的行(tmp_path):
+    from crm_basebot.migration import set_env_value
+
+    env = tmp_path / ".env.target"
+    env.write_text(
+        "# 目标账号的配置\nLARK_APP_ID=cli_x\nLARK_BASE_APP_TOKEN=\n\n# 注释留着\n",
+        encoding="utf-8",
+    )
+
+    set_env_value(env, "LARK_BASE_APP_TOKEN", "bascnXYZ")
+
+    text = env.read_text(encoding="utf-8")
+    assert "LARK_BASE_APP_TOKEN=bascnXYZ" in text
+    assert "# 目标账号的配置" in text  # 注释不能被重排掉
+    assert "# 注释留着" in text
+    assert "LARK_APP_ID=cli_x" in text
+
+
+def test_写回环境文件时键不存在就追加(tmp_path):
+    from crm_basebot.migration import set_env_value
+
+    env = tmp_path / ".env.target"
+    env.write_text("LARK_APP_ID=cli_x\n", encoding="utf-8")
+
+    set_env_value(env, "LARK_BASE_APP_TOKEN", "bascnXYZ")
+
+    assert env.read_text(encoding="utf-8").splitlines() == [
+        "LARK_APP_ID=cli_x",
+        "LARK_BASE_APP_TOKEN=bascnXYZ",
+    ]
+
+
+def test_没有token且没给create_base时报人话(tmp_path):
+    env = tmp_path / ".env.target"
+    env.write_text("LARK_APP_ID=cli_x\nLARK_APP_SECRET=s\n", encoding="utf-8")
+
+    try:
+        load_target_settings(env)
+    except MigrationError as exc:
+        assert "LARK_BASE_APP_TOKEN" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("应该报错")
+
+    # 但「边建 Base 边迁移」那条路允许暂时没有 token
+    assert load_target_settings(env, require_token=False).app_id == "cli_x"
