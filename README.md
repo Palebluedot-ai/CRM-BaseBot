@@ -94,6 +94,7 @@ uv run python -m crm_basebot.jobs.reconcile --period 2026-03 --write --replace  
 | [docs/PIPELINE.md](docs/PIPELINE.md) | 每日数据管线：邮件取数、增量导入、Graph 权限、launchd 任务 |
 | [docs/MIGRATION.md](docs/MIGRATION.md) | 一条命令把整套 Base 搬到另一个飞书账号 |
 | [docs/SALES_GUIDE.md](docs/SALES_GUIDE.md) | 销售同事怎么用机器人（给终端用户的一页说明） |
+| [docs/OPENID_ONBOARDING.md](docs/OPENID_ONBOARDING.md) | **OpenID 登记规程**：每位销售 / 每换一个 Bot 都要走一遍（永久保留） |
 | [HANDOFF.html](HANDOFF.html) | 接手手册的浏览器版（人+机器都读） |
 | [docs/DASHBOARD.md](docs/DASHBOARD.md) | 按月佣金仪表盘怎么搭（界面步骤），佣金几列怎么算 |
 

@@ -83,6 +83,19 @@
 
 <h2 id="s1">1 · 环境与账号要求</h2>
 
+<h3>先看清边界：要建的是<strong>两个完全独立的 Bot</strong></h3>
+<table>
+  <tr><th>项目</th><th>两套之间</th></tr>
+  <tr><td>代码</td><td><strong>同一份</strong>（就是这个仓库，各自 clone）</td></tr>
+  <tr><td>Base 结构与公式逻辑</td><td><strong>完全一样</strong>（同一个 schema 建出来的，含看板那几列的公式）</td></tr>
+  <tr><td>Base 数据</td><td>迁移时<strong>复制</strong>过去；之后<strong>各自独立演化</strong> —— 你这边登记的客户不会出现在他那边</td></tr>
+  <tr><td>飞书应用（App ID / Secret）</td><td><strong>各自的</strong>（一个应用只能属于一个账号，不能共用）</td></tr>
+  <tr><td>机器人进程</td><td><strong>各自跑各自的</strong>。同一个应用只能有一条长连接 —— 千万别两个进程用同一套凭证（会互相踢下线）</td></tr>
+  <tr><td><code>open_id</code></td><td><strong>各自的</strong>（按应用签发，互不通用）→ 名册各填各的，见 <code>docs/OPENID_ONBOARDING.md</code></td></tr>
+  <tr><td>取数邮箱</td><td>可能是<strong>同一个</strong>（内部系统那封日报邮件）：能拿到 Graph 凭证就自己取，否则由原主人导出文件</td></tr>
+</table>
+<p class="muted">一句话：<strong>共享的是代码和一开始的数据；运行起来之后没有任何东西是共享的。</strong></p>
+
 <h3>机器（跑命令的那台）</h3>
 <table>
   <tr><th>要求</th><th>说明 · 怎么满足</th></tr>
