@@ -15,6 +15,9 @@
 - 搬完能跑通自检：`scripts/verify_commission.py` 报「逐行一致」。
 - （之后才需要）机器人上线：他那边的销售给机器人发消息、登记渠道/客户、查佣金。
 
+> 人和浏览器友好版：**`HANDOFF.html`**（仓库根目录，`open HANDOFF.html` 打开）。内容与本文
+> 一致，含「环境与账号要求」「交付验收清单」两节表格，适合直接给委托人看。
+
 ## 1. 分工
 
 | 谁 | 做什么 |
@@ -22,6 +25,27 @@
 | **你（agent）** | 逐步执行本文所有命令；把报错翻译成人话给他；不要自己改代码 |
 | **委托人（人类）** | 只在浏览器里做三件事（下面 1.1），然后**把 App ID / Secret 填进 `.env.target`**（不要贴进聊天） |
 | **原主人** | 他手上有源端凭证。要么他把数据推过来（他把你的 `.env.target` 拿到后跑一条命令），要么他把源端 `.env` 给你、你一次跑完 —— 见第 3 步 |
+
+## 1.0 要求（Requirements）
+
+**机器**（跑命令的那台）
+
+| 要求 | 说明 |
+|---|---|
+| macOS / Linux（Windows 也能跑） | 全是纯 Python。只有「定时任务」脚本是 macOS 的 launchd（脚本自带），Linux 用 cron、Windows 用任务计划程序替代 |
+| `uv` | **唯一需要你装的工具**：`curl -LsSf https://astral.sh/uv/install.sh | sh`。它会把 Python 也装好 —— 项目要 ≥3.12（实测用 3.13），**不需要你先装 Python** |
+| `git` | clone 仓库 |
+| 网络 | 必须能到 `open.feishu.cn`（国际版是 `open.larksuite.com`）和 `github.com`；第 7 步的邮件取数另需 `graph.microsoft.com` |
+
+**飞书账号**（这一步最容易踩坑）
+
+- **必须是「企业/团队」账号，个人版不行**：个人版没有管理后台，而「开权限」「发版」都要管理员在后台点通过 —— 个人版里应用永远发不出去（拿到 App ID 也没用，权限和机器人能力都不生效）。自建免费企业即可，不需要营业执照。+86 手机号建飞书企业；只有港号走国际版 Lark。
+- 权限清单（**一次开齐**，免得反复发版）：`bitable:app`（必须）· `im:message.p2p_msg:readonly` + `im:message:send_as_bot`（机器人用）· `contact:user.base:readonly`（可选，当前代码没调用）。
+  **注意**：接收消息用的是 `im:message.p2p_msg:readonly`，**不是** `im:message`（官方事件文档里才写得对，见 `docs/LARK_APP_SETUP.md` 第 4 步）。
+- 事件订阅：`im.message.receive_v1` + 卡片回调 `card.action.trigger`，用**长连接**（不需要公网地址）。
+- Base 不用手工建：第 3 步的方案 A 会让应用自己建一个（顺带省掉「把应用加成协作者」这个 403 坑）。
+
+**可选**（只有「每天自动取数」需要）：Microsoft Entra 应用 + `Mail.Read` 应用权限并限定到一个邮箱。没有也能用：手工把 xlsx 放进 `attachments/` 再跑导入。
 
 ## 1.1 建应用（人类在浏览器点，你给他链接和清单）
 

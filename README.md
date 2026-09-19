@@ -1,8 +1,14 @@
 # CRM-BaseBot
 
-> **要把这套东西交给别人（或别的账号）？** 读 **[HANDOFF.md](HANDOFF.md)** —— 那是给接手方
-> 和他的 AI agent 的一页手册：怎么建应用、填 `.env.target`、用一条命令把结构和数据搬过去、
-> 搬完怎么自检、还差哪两件人做的事。原主人不需要在电脑前操作。
+> **先看哪一份？**
+>
+> | 你是谁 | 读这份 |
+> |---|---|
+> | **接手方（同事 / 他的 AI agent）**：要把整套系统建到自己账号 | **[HANDOFF.md](HANDOFF.md)**（机器读）· **[HANDOFF.html](HANDOFF.html)**（人读，`open HANDOFF.html` 打开；含「环境与账号要求」和「交付验收清单」） |
+> | **销售同事**：日常用机器人登记渠道/客户、查佣金 | **[docs/SALES_GUIDE.md](docs/SALES_GUIDE.md)** |
+> | **维护者**：日常跑批、排错 | [docs/PIPELINE.md](docs/PIPELINE.md)（每日管线）· [docs/BOT.md](docs/BOT.md)（机器人现状与缺口）· [docs/MIGRATION.md](docs/MIGRATION.md)（迁移） |
+>
+> 接手方不需要原主人在电脑前操作；数据搬过去有「凭证迁移」和「只交接文件」两条路，见 HANDOFF。
 
 渠道佣金 CRM，跑在 Lark Base 上，销售通过 Lark 机器人登记和查询。
 
@@ -87,6 +93,8 @@ uv run python -m crm_basebot.jobs.reconcile --period 2026-03 --write --replace  
 | [docs/BOT.md](docs/BOT.md) | 机器人现在能做什么、闭环还缺什么（梳理，不是提案） |
 | [docs/PIPELINE.md](docs/PIPELINE.md) | 每日数据管线：邮件取数、增量导入、Graph 权限、launchd 任务 |
 | [docs/MIGRATION.md](docs/MIGRATION.md) | 一条命令把整套 Base 搬到另一个飞书账号 |
+| [docs/SALES_GUIDE.md](docs/SALES_GUIDE.md) | 销售同事怎么用机器人（给终端用户的一页说明） |
+| [HANDOFF.html](HANDOFF.html) | 接手手册的浏览器版（人+机器都读） |
 | [docs/DASHBOARD.md](docs/DASHBOARD.md) | 按月佣金仪表盘怎么搭（界面步骤），佣金几列怎么算 |
 
 ## 三个必须知道的坑

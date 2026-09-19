@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CRM-BaseBot 接手手册 · 给同事 / 给 AI agent</title>
+<style>
+  :root{
+    --ink:#14161a; --ink-2:#4a5261; --line:#e3e7ee; --bg:#f7f8fa; --card:#fff;
+    --accent:#1f6feb; --warn:#b42318; --warn-bg:#fff5f4; --ok:#0f7b48; --ok-bg:#f2fbf6;
+    --code:#f4f6f9;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:16px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;}
+  .wrap{max-width:900px;margin:0 auto;padding:28px 20px 80px}
+  header{background:linear-gradient(160deg,#14161a,#28313f);color:#fff;border-radius:16px;padding:28px 26px;margin-bottom:22px}
+  header h1{margin:0 0 8px;font-size:26px;letter-spacing:.2px}
+  header p{margin:0;color:#c8d0dc;font-size:15px}
+  .badge{display:inline-block;margin-top:14px;padding:5px 11px;border-radius:999px;background:#ffffff1a;
+    border:1px solid #ffffff33;font-size:13px;color:#eaeef5}
+  h2{margin:34px 0 10px;font-size:20px;padding-bottom:8px;border-bottom:2px solid var(--line)}
+  h3{margin:22px 0 8px;font-size:16.5px}
+  p,li{color:var(--ink-2)}
+  strong{color:var(--ink)}
+  code{background:var(--code);border:1px solid var(--line);border-radius:5px;padding:1px 6px;font-size:14px;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  pre{background:#14161a;color:#e6edf3;border-radius:10px;padding:14px 16px;overflow-x:auto;font-size:13.5px;line-height:1.55;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  pre code{background:none;border:none;color:inherit;padding:0}
+  table{width:100%;border-collapse:collapse;margin:12px 0;background:var(--card);border-radius:10px;overflow:hidden;
+    box-shadow:0 1px 2px #14161a0d}
+  th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--line);font-size:14.5px;vertical-align:top}
+  th{background:#f1f4f9;font-weight:600;color:var(--ink)}
+  tr:last-child td{border-bottom:none}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:14px 0}
+  .callout{border-left:4px solid var(--accent);background:#f0f6ff;border-radius:8px;padding:12px 16px;margin:14px 0}
+  .danger{border-left-color:var(--warn);background:var(--warn-bg)}
+  .ok{border-left-color:var(--ok);background:var(--ok-bg)}
+  .toc{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 20px}
+  .toc ol{margin:6px 0 0;padding-left:22px}
+  .toc li{margin:3px 0}
+  .toc a{color:var(--accent);text-decoration:none}
+  .toc a:hover{text-decoration:underline}
+  .step{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:50%;
+    background:var(--ink);color:#fff;font-size:13px;margin-right:8px;flex:none}
+  .muted{color:#8892a4;font-size:13.5px}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:700px){.grid2{grid-template-columns:1fr}}
+  footer{margin-top:40px;color:#8892a4;font-size:13.5px;border-top:1px solid var(--line);padding-top:16px}
+  @media print{header{background:#14161a!important;-webkit-print-color-adjust:exact}body{background:#fff}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>CRM-BaseBot 接手手册</h1>
+  <p>渠道佣金 CRM：飞书多维表格 + 机器人。这份是**唯一入口文档** —— 人看它、AI agent 也看它。</p>
+  <span class="badge">目标：把整套系统搬进你自己的飞书账号，并让它跑起来</span>
+  <span class="badge">预计 30–60 分钟（大部分时间在飞书后台点几下 + 等发版审批）</span>
+</header>
+
+<div class="callout">
+  <strong>给 AI agent 的一句话</strong>：仓库里是一套已经在原主人账号跑通的飞书 CRM（每天取销售明细 → 只导新加坡站的新增交易日 → 看板按 UID 自动算每笔佣金 → 机器人让销售自己登记渠道/客户/查佣金）。你的任务是把这套系统在委托人自己的飞书账号里建起来。<strong>按本文顺序执行即可，不要重新设计</strong>；需要人在浏览器点的三下在 <a href="#s2">第 2 步</a>，其余你都能做。机器可读的同一份内容在 <code>HANDOFF.md</code>。
+</div>
+
+<div class="toc">
+  <strong>目录</strong>
+  <ol>
+    <li><a href="#s1">环境与账号要求（Requirements）</a></li>
+    <li><a href="#s2">建应用（人在浏览器点 4 下）</a></li>
+    <li><a href="#s3">准备仓库与配置</a></li>
+    <li><a href="#s4">把数据搬过来（三条路，选一条）</a></li>
+    <li><a href="#s5">搬完立刻自检</a></li>
+    <li><a href="#s6">还需要人做的两件（open_id）</a></li>
+    <li><a href="#s7">让机器人上线 / 每天自动取数</a></li>
+    <li><a href="#s8">出问题对照表</a></li>
+    <li><a href="#s9">设计要点（免得好心改坏）</a></li>
+    <li><a href="#s10">交付验收清单</a></li>
+  </ol>
+</div>
+
+<h2 id="s1">1 · 环境与账号要求</h2>
+
+<h3>机器（跑命令的那台）</h3>
+<table>
+  <tr><th>要求</th><th>说明 · 怎么满足</th></tr>
+  <tr><td><strong>macOS / Linux</strong>（Windows 也能跑，见备注）</td>
+      <td>机器人、导入、迁移都是纯 Python，跨平台。只有「定时任务」脚本是 macOS 的 launchd；Linux 用 cron、Windows 用任务计划程序替代（见第 7 步）。</td></tr>
+  <tr><td><strong><code>uv</code></strong>（唯一需要你装的工具）</td>
+      <td><code>curl -LsSf https://astral.sh/uv/install.sh | sh</code><br>它会把 Python 和依赖都装好 —— <strong>不需要你先装 Python</strong>（项目要求 ≥3.12，uv 会自己取 3.13）。</td></tr>
+  <tr><td><strong><code>git</code></strong></td>
+      <td>clone 仓库用。<code>git --version</code> 有输出即可。</td></tr>
+  <tr><td><strong>网络</strong></td>
+      <td>必须：<code>open.feishu.cn</code>（或国际版 <code>open.larksuite.com</code>）、<code>github.com</code>。<br>可选：<code>graph.microsoft.com</code>（只有第 7 步的「邮件自动取数」需要）。</td></tr>
+  <tr><td>磁盘</td><td>很小：代码 + 依赖 &lt; 300&nbsp;MB；导出的 xlsx 每份 1–3&nbsp;MB。</td></tr>
+</table>
+
+<h3>飞书账号（这一步最容易踩坑）</h3>
+<div class="callout danger">
+  <strong>必须是「企业/团队」账号，个人版不行。</strong>个人版没有管理后台，而「开权限」「发版」都需要管理员在后台点「通过」—— 所以个人版里应用永远发不出去（拿到 App ID 也没用，权限和机器人能力都不生效）。<br>
+  <span class="muted">自建免费的企业就行（免费基础版够用，不需要营业执照）。用 +86 手机号建飞书企业；只有港号就走国际版 Lark。</span>
+</div>
+<table>
+  <tr><th>项</th><th>要求</th></tr>
+  <tr><td>权限</td><td>能在组织里创建自建应用；改权限/发版需要<strong>管理员审批</strong>（一次即可，建议一次开齐）</td></tr>
+  <tr><td>应用权限清单</td><td>
+    <code>bitable:app</code>（读写多维表格 —— 必须）<br>
+    <code>im:message.p2p_msg:readonly</code> + <code>im:message:send_as_bot</code>（机器人收/发消息 —— 第 7 步要用）<br>
+    <code>contact:user.base:readonly</code>（可选，当前代码没调用，一起申请省得二次审批）<br>
+    <span class="muted">注意：接收消息用的<strong>不是</strong> <code>im:message</code>，而是 <code>im:message.p2p_msg:readonly</code>（官方事件文档里才写得对）。详见 <code>docs/LARK_APP_SETUP.md</code>「第 4 步」。</span>
+  </td></tr>
+  <tr><td>事件订阅</td><td><code>im.message.receive_v1</code>（接收消息）+ 卡片回调 <code>card.action.trigger</code>，用<strong>长连接</strong>方式（不需要公网地址）</td></tr>
+  <tr><td>一个空 Base</td><td>不需要手工建 —— 第 4 步的方案 A 会让应用自己建一个（省掉「把应用加成协作者」这个 403 坑）</td></tr>
+</table>
+
+<h3>可选（只有「每天自动取数」需要）</h3>
+<table>
+  <tr><td>Microsoft Entra 应用</td><td>授予 <code>Mail.Read</code>（应用程序权限）并限定到收销售明细的那个邮箱。没有也能用：手工把 xlsx 放进 <code>attachments/</code> 再跑导入。</td></tr>
+</table>
+
+<h2 id="s2">2 · 建应用（人在浏览器点 4 下）</h2>
+<ol>
+  <li>打开 <a href="https://open.feishu.cn/app" target="_blank" rel="noopener">open.feishu.cn/app</a> → <strong>创建企业自建应用</strong> → 名字建议 <code>CRM-BaseBot</code></li>
+  <li>进应用 → 左侧 <strong>「凭证与基础信息」</strong> → 复制 <code>App ID</code> / <code>App Secret</code></li>
+  <li>左侧 <strong>「权限管理」</strong> → 按上表把权限一次开齐（至少 <code>bitable:app</code>）</li>
+  <li>左侧 <strong>「版本管理与发布」</strong> → 创建版本 → 申请发布（管理员批准）</li>
+</ol>
+<div class="callout danger">
+  <strong>第 3、4 步漏任何一个，后面所有接口都会 403</strong>，而报错信息完全看不出是这个原因 —— 这是整条路上最容易卡死的地方。确认「版本状态 = 已发布」再往下走。
+</div>
+
+<h2 id="s3">3 · 准备仓库与配置</h2>
+<pre><code>git clone &lt;仓库地址&gt; CRM-BaseBot &amp;&amp; cd CRM-BaseBot
+uv sync                                  # 装依赖（会自动准备 Python）
+cp .env.target.example .env.target       # 模板里每一项都写了「去哪拿」</code></pre>
+<p>把 <code>App ID</code> / <code>App Secret</code> 填进 <code>.env.target</code> 的第 21、22 行（<strong>不要引号、不要空格</strong>）。<code>LARK_BASE_APP_TOKEN</code> 留空 —— 用下面的 <code>--create-base</code> 让应用自己建 Base。</p>
+<pre><code>uv run python scripts/migrate_base.py --target-env .env.target --dry-run</code></pre>
+<p class="muted">这一步只读配置、不联网。看到「迁移没法继续：…还没填目标账号的应用凭证」就回去填；看到「新建 Base「…」（预演，没有真的建）」就说明配置对了。</p>
+
+<h2 id="s4">4 · 把数据搬过来（三条路，选一条）</h2>
+<div class="callout ok">
+  <strong>数据不在 git 里。</strong>仓库里只有代码和文档（约 97 个文件、<strong>零条业务数据</strong>）；真正的资产是飞书 Base 里的内容：看板约 <strong>1,650 行</strong>、渠道约 <strong>101 条</strong>、客户约 <strong>113 条</strong>、销售名册 <strong>4 人</strong>。这些只能靠下面三条路之一搬，不会随 <code>git pull</code> 过来。
+</div>
+<div class="grid2">
+  <div class="card">
+    <h3>方案 A · 凭证迁移（推荐）</h3>
+    <p>委托人给你源端 <code>.env</code>，或你把 <code>.env.target</code> 给原主人让他跑。一条命令搬完结构 + 数据。</p>
+    <pre><code>uv run python scripts/migrate_base.py \
+  --target-env .env.target \
+  --create-base "CRM 佣金看板" --apply</code></pre>
+    <p class="muted">幂等检查：每张表都会打印「源 N 条 → 目标 N 条」，全 ✅ 才算成功。</p>
+  </div>
+  <div class="card">
+    <h3>方案 C · 只交接文件（不换凭证）</h3>
+    <p>原主人导出两个 xlsx，你用现成导入脚本灌进去。</p>
+    <pre><code>uv run python scripts/sync_base.py --apply
+uv run python scripts/import_registrations.py \
+  --file 渠道客户.xlsx --apply
+uv run python scripts/import_daily_board.py \
+  --file 看板.xlsx --apply</code></pre>
+    <p class="muted">注意：这份文件只导一次（没有 UID 的客户重复导入会堆重复行）。</p>
+  </div>
+</div>
+<p class="muted">（方案 B：原主人把源端 <code>.env</code> 直接给你，你这边一条命令跑完 —— 与 A 相同，只是跑在哪台机器的区别。）</p>
+
+<h2 id="s5">5 · 搬完立刻自检</h2>
+<pre><code>cp .env.target .env                 # 之后所有脚本都指向委托人的 Base（.env 在 .gitignore 里）
+uv run python scripts/inspect_base.py          # 核对 6 张表、行数、字段
+uv run python scripts/verify_commission.py     # 期望结论：逐行一致，没有差异</code></pre>
+<p><code>verify_commission.py</code> <strong>不看</strong> Base 的公式列，而是自己按「用户ID → 客户表 → 所属渠道 → 分佣比例」复算一遍再逐行对比。它报「逐行一致」就等于同时证明了三件事：关联没搬错、公式生效、钱算得对。</p>
+
+<h2 id="s6">6 · 还需要人做的两件（open_id）</h2>
+<div class="callout">
+  <strong>为什么必须人做：</strong><code>open_id</code>（飞书里「这个人是谁」的 ID）是<strong>按应用签发</strong>的 —— 原账号的 open_id 在委托人的账号里是无效值，所以名册和归属都没搬。搬完机器人里「我的渠道」是空的，<strong>这不是数据丢失</strong>，是归属还没认领。
+</div>
+<pre><code># ① 让要用的每位销售各给机器人发一条消息；服务端日志会出现他的 open_id：
+#    WARNING crm_basebot.bot.auth: 未登记的 open_id 尝试操作: ou_xxxx
+uv run python scripts/set_sales_open_id.py --name "某人" --open-id ou_xxxx --apply
+uv run python scripts/set_sales_open_id.py --list          # 核对：OpenID 那列有值了
+
+# ② 名册填好之后，按「负责销售」姓名把渠道/客户的归属接上：
+uv run python scripts/backfill_owners.py --dry-run         # 先看会回填多少条
+uv run python scripts/backfill_owners.py --apply</code></pre>
+<p>① 之前，销售在机器人里点「我的渠道」是空的、登记客户时渠道下拉也是空的。② 之后即可正常使用。</p>
+
+<h2 id="s7">7 · 让机器人上线 / 每天自动取数</h2>
+<p><strong>机器人</strong>（长连接，不需要公网地址）：</p>
+<pre><code>uv run python -m crm_basebot.app            # 前台跑；常驻见 docs/BOT.md</code></pre>
+<p>应用侧要开启机器人能力、订阅 <code>im.message.receive_v1</code> + 卡片回调，照 <code>docs/LARK_APP_SETUP.md</code> 清单配 —— <strong>和权限一样，改完要重新发版</strong>。</p>
+<p><strong>每天自动取数</strong>（需要第 1 步末尾那 4 个 Microsoft Graph 键）：</p>
+<pre><code>./scripts/run-daily-import.sh --dry-run     # 先验：应该能取到今天那份附件并算出增量
+./scripts/install-daily-import-launchd.sh   # macOS：每天 10:45 / 16:00（Linux 用 cron 替代）</code></pre>
+
+<h2 id="s8">8 · 出问题对照表</h2>
+<table>
+  <tr><th>现象</th><th>多半是</th><th>怎么办</th></tr>
+  <tr><td>接口 403 / permission denied</td><td>权限没开、没发版，或（自己建 Base 时）应用没被加成协作者</td><td>回第 2 步的 3、4；自己建的 Base 另加「分享 → 应用 → 可编辑」</td></tr>
+  <tr><td>没有权限访问该多维表格</td><td><code>LARK_BASE_APP_TOKEN</code> 填的是另一个账号的 Base</td><td>核对 Base URL 里的 token</td></tr>
+  <tr><td>看板有数据但佣金列全空</td><td>公式列没建出来 / 客户关联没挂上</td><td><code>uv run python scripts/sync_base.py --apply</code>（它会做公式自检并说明原因）</td></tr>
+  <tr><td>行数对不上（源 N → 目标 M&lt;N）</td><td>个别记录含目标端不存在的字段/非法值，被接口整批拒了</td><td>看迁移报告里带 ⚠️ 的行，把那张表的 dry-run 输出发给原主人</td></tr>
+  <tr><td>机器人对谁都回「你还没有被登记为销售」</td><td>名册 OpenID 还空着</td><td>第 6 步 ①</td></tr>
+  <tr><td>机器人里「我的渠道」是空的</td><td>归属还没回填</td><td>第 6 步 ②</td></tr>
+  <tr><td>机器人断线 / 收不到消息</td><td>网络或 DNS（长连接<strong>不补发</strong>断线期间的消息）</td><td>看 <code>docs/BOT.md</code> 的「断线时间线」判读方式</td></tr>
+  <tr><td><code>uv</code> 命令找不到</td><td>没装或没重开终端</td><td><code>curl -LsSf https://astral.sh/uv/install.sh | sh</code>，然后新开一个终端</td></tr>
+</table>
+
+<h2 id="s9">9 · 设计要点（免得好心改坏）</h2>
+<ul>
+  <li><strong>钱只在 Base 里算。</strong>看板的 <code>分佣比例</code>/<code>本笔佣金</code>/<code>月份</code> 是<strong>公式列</strong>，Python 不参与算钱；<code>verify_commission.py</code> 只是复算校验。</li>
+  <li><strong>只导新加坡站。</strong>站点列是「新加坡站」的行才进看板，其它站点解析完就丢（既定口径）。</li>
+  <li><strong>关联一律按业务键。</strong>客户 ↔ 渠道用「渠道编号」，看板 → 客户用「客户UID」。<strong>不要</strong>改回按姓名匹配（大小写、last/first 颠倒会出错，原主人踩过）。</li>
+  <li><strong>每天的导入是增量。</strong>只写看板还没有的交易日、整天替换；<code>--max-days</code>（默认 5）是防呆闸门。</li>
+  <li>细一点的背景：<code>docs/PIPELINE.md</code>（每日管线）、<code>docs/BOT.md</code>（机器人现状与缺口）、<code>docs/MIGRATION.md</code>（迁移细节）、<code>docs/SCHEMA.md</code>（表结构）、<code>docs/DASHBOARD.md</code>（仪表盘）。</li>
+</ul>
+
+<h2 id="s10">10 · 交付验收清单</h2>
+<table>
+  <tr><th>#</th><th>检查项</th><th>期望</th></tr>
+  <tr><td>1</td><td>6 张表都在，字段与源端一致</td><td><code>inspect_base.py</code> 打印 6 张表</td></tr>
+  <tr><td>2</td><td>数据条数</td><td>看板 ≈1,650 · 渠道 ≈101 · 客户 ≈113 · 名册 4</td></tr>
+  <tr><td>3</td><td>佣金逐行复算</td><td><code>verify_commission.py</code> → 「逐行一致，没有差异」</td></tr>
+  <tr><td>4</td><td>公式在算</td><td>看板「本笔佣金」列有值（约 342 行）</td></tr>
+  <tr><td>5</td><td>机器人认人</td><td>名册里至少一人有 OpenID；他发消息能看到主菜单</td></tr>
+  <tr><td>6</td><td>归属可见</td><td>该销售点「我的渠道」能看到自己的渠道</td></tr>
+</table>
+
+<footer>
+  CRM-BaseBot · 接手手册（HTML 版）· 机器可读版本：<code>HANDOFF.md</code> ·
+  细节文档：<code>docs/MIGRATION.md</code>、<code>docs/PIPELINE.md</code>、<code>docs/BOT.md</code>、<code>docs/LARK_APP_SETUP.md</code><br>
+  仓库根目录执行 <code>open HANDOFF.html</code> 即可在浏览器打开这一页。
+</footer>
+
+</div>
+</body>
+</html>
