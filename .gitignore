@@ -6,6 +6,9 @@
 # 而那些文件里有真的密钥 —— 2026-09-19 拷 Graph 凭证时踩到过。
 .env.bak-*
 .env.*.bak
+# 迁移目标端的环境文件（另一个账号的应用凭证 + Base token），同样含密钥
+.env.target
+.env.target.*
 
 # Base 探查产物可能含真实客户数据
 schema_snapshot*.json

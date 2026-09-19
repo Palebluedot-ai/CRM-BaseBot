@@ -64,6 +64,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="把销售名册里的 OpenID 填上")
     parser.add_argument("--name", help='名册里的姓名，例如 "James YANG"')
     parser.add_argument("--open-id", dest="open_id", help="要写入的 open_id，形如 ou_xxxxxxxx")
+    parser.add_argument(
+        "--env",
+        default=".env",
+        help="环境文件，默认 .env；迁移到另一个账号时传 .env.target",
+    )
     parser.add_argument("--list", action="store_true", help="只列出名册现状")
     parser.add_argument("--apply", action="store_true", help="真写；不加则只预演")
     return parser
@@ -73,7 +78,9 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)-7s %(message)s")
 
-    settings = load_settings()
+    # --env 用来读另一个账号的环境文件（另一套应用凭证 + 另一个 Base）。仍然走
+    # startup.load_settings：缺键时的报错文案只有那一处。
+    settings = load_settings(env_file=args.env)
     require_settings(settings, "LARK_BASE_APP_TOKEN", "TABLE_SALES")
     return run(args, settings, BitableClient(settings.base_app_token))
 

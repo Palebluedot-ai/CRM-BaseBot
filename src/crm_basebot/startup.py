@@ -84,10 +84,18 @@ class MissingConfigError(SystemExit):
     """
 
 
-def load_settings() -> Settings:
-    """读配置。缺凭证时抛 MissingConfigError，而不是让 pydantic 的栈回溯打到用户脸上。"""
+def load_settings(env_file: Path | str | None = None) -> Settings:
+    """读配置。缺凭证时抛 MissingConfigError，而不是让 pydantic 的栈回溯打到用户脸上。
+
+    ``env_file`` 用来读**另一个**环境文件（不传就是当前目录的 .env）。迁移到另一个账号
+    时要同时拿着两套凭证：源端 .env、目标端 .env.target。入口一律走这里而不是自己构造
+    Settings —— 缺键时的报错文案只有这一处，绕过它就等于把「缺哪个键、去哪儿填」换成
+    一段 pydantic 栈回溯（``tests/test_startup.py`` 钉着这条）。
+    """
     try:
-        return get_settings()
+        if env_file is None:
+            return get_settings()
+        return Settings(_env_file=env_file)  # type: ignore[call-arg]
     except ValidationError as exc:
         missing = [str(e["loc"][0]) for e in exc.errors() if e["type"] == "missing" and e["loc"]]
         if missing:

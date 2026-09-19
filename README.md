@@ -82,6 +82,7 @@ uv run python -m crm_basebot.jobs.reconcile --period 2026-03 --write --replace  
 | [docs/SCHEMA.md](docs/SCHEMA.md) | 表结构定义，以及每个设计选择的理由 |
 | [docs/BOT.md](docs/BOT.md) | 机器人现在能做什么、闭环还缺什么（梳理，不是提案） |
 | [docs/PIPELINE.md](docs/PIPELINE.md) | 每日数据管线：邮件取数、增量导入、Graph 权限、launchd 任务 |
+| [docs/MIGRATION.md](docs/MIGRATION.md) | 一条命令把整套 Base 搬到另一个飞书账号 |
 | [docs/DASHBOARD.md](docs/DASHBOARD.md) | 按月佣金仪表盘怎么搭（界面步骤），佣金几列怎么算 |
 
 ## 三个必须知道的坑

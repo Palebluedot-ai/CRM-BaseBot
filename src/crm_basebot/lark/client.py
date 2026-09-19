@@ -22,18 +22,22 @@ _LOG_LEVELS = {
 }
 
 
-def _log_level() -> lark.LogLevel:
-    return _LOG_LEVELS.get(get_settings().log_level.upper(), lark.LogLevel.INFO)
+def build_client(settings) -> lark.Client:
+    """按给定凭证造一个客户端。
 
-
-@lru_cache
-def get_client() -> lark.Client:
-    settings = get_settings()
+    单独一个函数是为了迁移：源端和目标端是**两个不同的飞书应用**，必须能拿到两个
+    客户端。``get_client()`` 是单例（源端用），目标端走这里现造。
+    """
     return (
         lark.Client.builder()
         .app_id(settings.app_id)
         .app_secret(settings.app_secret)
         .domain(settings.domain)
-        .log_level(_log_level())
+        .log_level(_LOG_LEVELS.get(settings.log_level.upper(), lark.LogLevel.INFO))
         .build()
     )
+
+
+@lru_cache
+def get_client() -> lark.Client:
+    return build_client(get_settings())

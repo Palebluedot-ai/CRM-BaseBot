@@ -161,6 +161,11 @@ def open_id_map(roster: list[tuple[str, str, str]]) -> dict[str, str]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="按「负责销售」姓名回填存量渠道/客户的归属 OpenID")
+    parser.add_argument(
+        "--env",
+        default=".env",
+        help="环境文件，默认 .env；迁移到另一个账号时传 .env.target",
+    )
     parser.add_argument("--only", help="只处理「负责销售」等于这个姓名的人（忽略大小写/空格）")
     parser.add_argument("--apply", action="store_true", help="真写；不加则只预演")
     return parser
@@ -170,7 +175,9 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)-7s %(message)s")
 
-    settings = load_settings()
+    # --env 用来读另一个账号的环境文件（另一套应用凭证 + 另一个 Base）。仍然走
+    # startup.load_settings：缺键时的报错文案只有那一处。
+    settings = load_settings(env_file=args.env)
     require_settings(
         settings, "LARK_BASE_APP_TOKEN", "TABLE_REFERRAL", "TABLE_CLIENT", "TABLE_SALES"
     )
