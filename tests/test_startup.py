@@ -244,6 +244,7 @@ def test_变量名写错了立刻炸():
 # 回溯」—— 对没有凭证可缺的脚本不适用。往里加名字之前先问一句：它真的不需要任何配置吗？
 NO_CONFIG_SCRIPTS = {
     "pack_handover.py",  # 打包交接材料：只读本地文件、写 zip，不连任何服务
+    "bot_connectivity_report.py",  # 读机器人日志算空窗：纯文本分析，不需要 Base 也不需要凭证
 }
 
 
