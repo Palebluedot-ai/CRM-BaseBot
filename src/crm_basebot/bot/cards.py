@@ -21,6 +21,8 @@ ACTION_SUBMIT_CLIENT = "submit_client"
 ACTION_LIST_REFERRALS = "list_referrals"
 ACTION_OPEN_COMMISSION_QUERY = "open_commission_query"
 ACTION_QUERY_COMMISSION = "query_commission"
+ACTION_OPEN_ECAS_QUERY = "open_ecas_query"
+ACTION_QUERY_ECAS = "query_ecas"
 
 # 表单项标识，回调的 form_value 里用它取值
 F_REFERRAL_NAME = "referral_name"
@@ -32,6 +34,7 @@ F_CLIENT_UID = "client_uid"
 F_CLIENT_NAME = "client_name"
 F_CLIENT_REFERRAL = "client_referral"
 F_QUERY_PERIOD = "query_period"
+F_ECAS_PERIOD = "ecas_period"
 
 
 def _text(content: str, size: str = "normal") -> dict[str, Any]:
@@ -138,6 +141,9 @@ def _menu_buttons() -> list[dict[str, Any]]:
         _menu_button("登记新客户", ACTION_OPEN_CLIENT_FORM),
         _menu_button("我的渠道", ACTION_LIST_REFERRALS),
         _menu_button("佣金查询", ACTION_OPEN_COMMISSION_QUERY),
+        # ECAS 单独一个入口，不并进「佣金查询」。两笔钱、两套比例、两张汇总表，
+        # 混在一个按钮后面只会让人分不清自己看的是哪一笔（见 docs/ECAS.md）。
+        _menu_button("ECAS 返佣", ACTION_OPEN_ECAS_QUERY),
     ]
 
 
@@ -332,42 +338,84 @@ def referral_list_card(items: list[Any]) -> dict[str, Any]:
     return notice_card("我的渠道", body, template="blue")
 
 
+def _period_selector(name: str, default_period: str, period_options: list[str]) -> dict[str, Any]:
+    """月份下拉。没有可选月份时退回文本框。
+
+    ``period_options`` 为空是极少数情况（表是空的）。给个文本框兜底，让人至少能自己
+    敲一个 YYYY-MM 查 —— 结果多半是「没有可展示的明细」，但这比一片空白强：
+    它明确告诉了用户「查得动，只是没数据」。
+    """
+    if not period_options:
+        return _input(name, "月份 YYYY-MM", default_period or "2026-09")
+
+    selector: dict[str, Any] = {
+        "tag": "select_static",
+        "name": name,
+        "placeholder": {"tag": "plain_text", "content": "选择月份"},
+        "required": True,
+        "width": "fill",
+        "options": [
+            {"text": {"tag": "plain_text", "content": p}, "value": p}
+            for p in sorted(period_options, reverse=True)
+        ],
+        "margin": "0px 0px 8px 0px",
+    }
+    # initial_option 为 None 时飞书不认这个 key，所以只在有值时才加
+    if default_period in period_options:
+        selector["initial_option"] = default_period
+    return selector
+
+
+def ecas_query_card(default_period: str, period_options: list[str]) -> dict[str, Any]:
+    """ECAS 返佣查询：选月份，回调 ACTION_QUERY_ECAS。"""
+    return {
+        "schema": "2.0",
+        "header": {
+            "title": {"tag": "plain_text", "content": "ECAS 返佣查询"},
+            "template": "turquoise",
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "form",
+                    "name": "ecas_query_form",
+                    "elements": [
+                        _text("**结算月份**"),
+                        _period_selector(F_ECAS_PERIOD, default_period, period_options),
+                        _submit("ecas_query_submit", ACTION_QUERY_ECAS, "查询"),
+                    ],
+                },
+                footnote(
+                    "ECAS 开户返佣，和交易佣金是两笔钱。"
+                    "只显示你名下渠道介绍的开户；管理员可以看全部。"
+                ),
+            ]
+        },
+    }
+
+
+def ecas_result_card(title: str, body_md: str) -> dict[str, Any]:
+    """ECAS 返佣结果卡。
+
+    标题色和交易佣金那张（blue）刻意不同：两笔钱在会话里往上翻的时候要一眼分得开。
+    """
+    return {
+        "schema": "2.0",
+        "header": {
+            "title": {"tag": "plain_text", "content": title},
+            "template": "turquoise",
+        },
+        "body": {"elements": [_text(body_md)]},
+    }
+
+
 def commission_query_card(default_period: str, period_options: list[str]) -> dict[str, Any]:
     """佣金查询：选月份，回调 ACTION_QUERY_COMMISSION。
 
     ``period_options`` 是可选的月份列表（YYYY-MM）。为空时给一个手动输入的占位。
     有值时用下拉，避免用户拼错格式；``default_period`` 会预选到最新那一个。
     """
-    if period_options:
-        options = [
-            {
-                "text": {"tag": "plain_text", "content": p},
-                "value": p,
-            }
-            for p in sorted(period_options, reverse=True)
-        ]
-        selector: dict[str, Any] = {
-            "tag": "select_static",
-            "name": F_QUERY_PERIOD,
-            "placeholder": {"tag": "plain_text", "content": "选择月份"},
-            "required": True,
-            "width": "fill",
-            "options": options,
-            "initial_option": default_period if default_period in period_options else None,
-            "margin": "0px 0px 8px 0px",
-        }
-        # initial_option 为 None 时飞书不认这个 key，去掉
-        if selector["initial_option"] is None:
-            del selector["initial_option"]
-    else:
-        # 极少数情况：连一个月份都取不到（看板空）。给一个文本框兜底，让用户
-        # 至少能自己敲一个 YYYY-MM 查（结果多半是「没有可展示的明细」，但这
-        # 比一片空白强 —— 它明确告诉了用户「查得动，只是没数据」）。
-        selector = _input(
-            F_QUERY_PERIOD,
-            "月份 YYYY-MM",
-            default_period or "2026-09",
-        )
+    selector = _period_selector(F_QUERY_PERIOD, default_period, period_options)
 
     return {
         "schema": "2.0",

@@ -22,15 +22,14 @@ import argparse
 import logging
 import time
 from collections import defaultdict
-from datetime import datetime
 from decimal import Decimal
-from typing import Any
 from zoneinfo import ZoneInfo
 
-from ..domain import ecas, schema
+from ..domain import ecas
 from ..domain.audit import ACTION_COMPUTE_ECAS, AuditLog
+from ..domain.ecas_query import load_applications, load_payees
 from ..lark.bitable import BitableClient, assert_fields_present
-from ..lark.values import extract_text, to_number
+from ..lark.values import extract_text
 from ..startup import load_settings, require_settings
 
 logger = logging.getLogger(__name__)
@@ -49,71 +48,6 @@ ECAS_REQUIRED_FIELDS: dict[str, int | None] = {
 
 class WriteRefused(RuntimeError):
     """汇总表的现状不允许这次写入。入口把它打出来、以非 0 退出，一行都不改。"""
-
-
-def _link_ids(value: Any) -> list[str]:
-    if isinstance(value, list):
-        return [
-            item if isinstance(item, str) else str(item.get("record_id") or item.get("id") or "")
-            for item in value
-        ]
-    if isinstance(value, dict):
-        return list(value.get("link_record_ids") or [])
-    return []
-
-
-def load_payees(bitable: BitableClient, referral_table: str) -> dict[str, ecas.Payee]:
-    """渠道表 record_id -> Payee。只取编号和名字，**不取比例**。"""
-    out: dict[str, ecas.Payee] = {}
-    for record in bitable.iter_records(
-        referral_table, field_names=[schema.REFERRAL_NO, schema.REFERRAL_NAME]
-    ):
-        out[record.record_id] = ecas.Payee(
-            code=extract_text(record.fields.get(schema.REFERRAL_NO)),
-            name=extract_text(record.fields.get(schema.REFERRAL_NAME)),
-        )
-    return out
-
-
-def load_applications(
-    bitable: BitableClient, table_id: str, payees: dict[str, ecas.Payee], *, tz
-) -> list[ecas.EcasApplication]:
-    """ECAS 申请表 -> 计算用的行。
-
-    没挂上渠道关联但填了介绍人名字的行**照样结算**，收款人就是那个名字、编号留空 ——
-    钱是欠着的，藏起来只会让合计对不上来源表。
-    """
-    applications: list[ecas.EcasApplication] = []
-    for record in bitable.iter_records(table_id):
-        rate = to_number(record.fields.get(ecas.ECAS_RATE))
-        amount = to_number(record.fields.get(ecas.ECAS_AMOUNT))
-        applied = record.fields.get(ecas.ECAS_APPLIED_AT)
-        name = extract_text(record.fields.get(ecas.ECAS_CLIENT_NAME))
-
-        payee: ecas.Payee | None = None
-        for record_id in _link_ids(record.fields.get(ecas.ECAS_REFERRAL_LINK)):
-            if record_id in payees:
-                payee = payees[record_id]
-                break
-        if payee is None:
-            written_name = extract_text(record.fields.get(ecas.ECAS_REFERRER_NAME))
-            if written_name:
-                payee = ecas.Payee(code="", name=written_name)
-
-        period = ""
-        if isinstance(applied, int | float) and not isinstance(applied, bool):
-            period = ecas.period_of(datetime.fromtimestamp(float(applied) / 1000, tz=tz), tz=tz)
-
-        applications.append(
-            ecas.EcasApplication(
-                client_name=name,
-                amount=Decimal(str(amount)) if amount is not None else Decimal("0"),
-                period=period,
-                payee=payee,
-                rate_percent=Decimal(str(rate)) if rate is not None else None,
-            )
-        )
-    return applications
 
 
 def existing_summary(

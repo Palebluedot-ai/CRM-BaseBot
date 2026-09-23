@@ -18,6 +18,7 @@ from .bot.auth import SalesDirectory
 from .bot.handlers import BotHandlers
 from .domain.audit import AuditLog
 from .domain.commission_query import CommissionQueryService
+from .domain.ecas_query import EcasQueryService
 from .domain.referral import ReferralService
 from .domain.referred_client import ReferredClientService
 from .lark.bitable import BitableClient
@@ -59,6 +60,11 @@ def build_handlers() -> BotHandlers:
         CommissionQueryService(bitable, settings=settings) if settings.table_daily_board else None
     )
 
+    # ECAS 是独立的第二套账（docs/ECAS.md）。没跑过 scripts/import_ecas.py 的租户
+    # TABLE_ECAS 是空的，这时不注入 —— 「ECAS 返佣」按钮回一句「未启用」，
+    # 而不是拿一个空 table_id 去读、报一堆看不懂的错。
+    ecas_query = EcasQueryService(bitable, settings=settings) if settings.table_ecas else None
+
     return BotHandlers(
         client=get_client(),
         directory=SalesDirectory(bitable, settings.table_sales),
@@ -74,6 +80,7 @@ def build_handlers() -> BotHandlers:
             bitable, settings.table_client, settings.table_referral, audit
         ),
         commission_query=commission_query,
+        ecas_query=ecas_query,
         background=_in_background,
         tz=tz,
     )

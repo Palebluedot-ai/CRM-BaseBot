@@ -57,6 +57,9 @@ class BotHandlers:
 
     依赖显式注入，方便在没有飞书连接的情况下单测。
 
+    ``ecas_query`` 同理：ECAS 是独立的第二套账（见 ``docs/ECAS.md``），没上 ECAS 的
+    租户不注入它，「ECAS 返佣」按钮就回一句「未启用」。
+
     ``background`` 是后台任务的执行器，用于卡片回调超预算时把实际写入丢到后台
     去跑（见 ``_submit_client``）。默认起一个 daemon 线程；测试里传
     ``lambda fn: fn()`` 走同步，避免线程竞态。
@@ -73,6 +76,7 @@ class BotHandlers:
         referrals,
         clients,
         commission_query=None,
+        ecas_query=None,
         background: Callable[[Callable[[], None]], None] = _run_in_thread,
         tz: tzinfo = DEFAULT_BUSINESS_TIMEZONE,
     ) -> None:
@@ -83,6 +87,8 @@ class BotHandlers:
         # 可选：不注入时「佣金查询」按钮点了会回一句「暂不可用」，而不是崩。
         # 生产 app.py 一定会注入；测试有的场景不需要。
         self._commission_query = commission_query
+        # 同上：没配 ECAS 那两张表时按钮点了回一句「未启用」，而不是去读一个空 table_id。
+        self._ecas_query = ecas_query
         self._background = background
         self._tz = tz
 
@@ -154,6 +160,12 @@ class BotHandlers:
 
         if action == cards.ACTION_QUERY_COMMISSION:
             return self._query_commission(sales, form)
+
+        if action == cards.ACTION_OPEN_ECAS_QUERY:
+            return self._open_ecas_query(sales)
+
+        if action == cards.ACTION_QUERY_ECAS:
+            return self._query_ecas(sales, form)
 
         logger.warning("未知的卡片动作: %r", action)
         return _card_response(cards.with_menu(cards.error_card("这个操作我不认识，请重新开始。")))
@@ -350,6 +362,81 @@ class BotHandlers:
                 "正在查询",
                 f"{period} 的佣金明细正在算，结果会作为新消息推给你（通常 3-10 秒）。",
                 template="blue",
+            ),
+            toast="已提交",
+        )
+
+    # ---------- ECAS 返佣 ----------
+    #
+    # 和交易佣金那两个方法是**平行**的两条路，不是共用的一条：读的表不同、比例来源
+    # 不同、结果进不同的汇总表（见 domain/ecas.py 开头）。长得像是因为交互一样，
+    # 不是因为底下是同一件事。
+
+    def _open_ecas_query(self, sales) -> P2CardActionTriggerResponse:
+        """打开「ECAS 返佣」表单：从申请表取这名销售有数据的月份。
+
+        月份列表按**本人能看到的**算 —— 下拉里列一个他点进去必然是空的月份，
+        只会让人以为系统坏了。申请表只有一百多行，扫一遍压得进 3 秒。
+        """
+        if self._ecas_query is None:
+            return _card_response(
+                cards.with_menu(cards.error_card("ECAS 返佣查询未启用，请联系管理员。"))
+            )
+
+        try:
+            periods = self._ecas_query.periods_for(sales)
+        except Exception:  # noqa: BLE001 - 查询失败不该让整个卡片挂掉
+            logger.exception("读取 ECAS 月份列表失败 open_id=%s", sales.open_id)
+            return _card_response(
+                cards.with_menu(cards.error_card("读取 ECAS 月份列表失败，请稍后重试。"))
+            )
+
+        latest = periods[-1] if periods else ""
+        return _card_response(cards.ecas_query_card(latest, periods))
+
+    def _query_ecas(self, sales, form) -> P2CardActionTriggerResponse:
+        """执行 ECAS 返佣查询。走异步：立即 ack，后台跑，结果 push。
+
+        申请表比日读看板小得多，同步多半也来得及 —— 但「多半」不够：超了 3 秒客户端
+        就弹「延时未响应」的红字，而服务端其实算得好好的。和佣金查询保持同一条路。
+        """
+        if self._ecas_query is None:
+            return _card_response(
+                cards.with_menu(cards.error_card("ECAS 返佣查询未启用，请联系管理员。"))
+            )
+
+        period = _form_text(form, cards.F_ECAS_PERIOD)
+        if not _is_period(period):
+            raise ValidationError(f"月份格式要是 YYYY-MM，你选/填的是「{period}」")
+
+        target_open_id = sales.open_id
+        query_service = self._ecas_query
+        from ..domain.ecas_query import summarize as summarize_ecas
+
+        def worker() -> None:
+            try:
+                rows = query_service.query(sales, period)
+            except Exception:
+                logger.exception("ECAS 查询失败 open_id=%s period=%s", target_open_id, period)
+                self._send_to_user(
+                    target_open_id,
+                    cards.with_menu(cards.error_card("查询 ECAS 返佣失败，请稍后重试。")),
+                )
+                return
+
+            body = summarize_ecas(rows, period=period, viewer_name=sales.name)
+            self._send_to_user(
+                target_open_id,
+                cards.with_menu(cards.ecas_result_card(f"ECAS 返佣  {period}", body)),
+            )
+
+        self._background(worker)
+
+        return _card_response(
+            cards.notice_card(
+                "正在查询",
+                f"{period} 的 ECAS 返佣正在算，结果会作为新消息推给你（通常 3-10 秒）。",
+                template="turquoise",
             ),
             toast="已提交",
         )

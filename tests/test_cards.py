@@ -105,6 +105,11 @@ def all_cards() -> list[tuple[str, dict[str, Any]]]:
         ("with_menu_成功卡", cards.with_menu(cards.success_card("成了", "正文"))),
         ("with_menu_渠道清单", cards.with_menu(cards.referral_list_card(_details()))),
         ("with_menu_佣金结果", cards.with_menu(cards.commission_result_card("佣金明细", "正文"))),
+        ("ecas_query_card", cards.ecas_query_card("2026-09", ["2026-08", "2026-09"])),
+        ("ecas_query_card_无月份", cards.ecas_query_card("", [])),
+        ("commission_query_card", cards.commission_query_card("2026-09", ["2026-08", "2026-09"])),
+        ("commission_query_card_无月份", cards.commission_query_card("", [])),
+        ("with_menu_ECAS结果", cards.with_menu(cards.ecas_result_card("ECAS 返佣", "正文"))),
     ]
 
 
@@ -346,12 +351,7 @@ def test_主菜单按钮都带回调且不在表单里():
         (callback,) = [b for b in button["behaviors"] if b["type"] == "callback"]
         actions.add(callback["value"]["action"])
 
-    assert actions == {
-        cards.ACTION_OPEN_REFERRAL_FORM,
-        cards.ACTION_OPEN_CLIENT_FORM,
-        cards.ACTION_LIST_REFERRALS,
-        cards.ACTION_OPEN_COMMISSION_QUERY,
-    }
+    assert actions == MENU_ACTIONS
 
 
 def test_卡片上没有归属销售输入项():
@@ -420,10 +420,12 @@ MENU_ACTIONS = {
     cards.ACTION_OPEN_CLIENT_FORM,
     cards.ACTION_LIST_REFERRALS,
     cards.ACTION_OPEN_COMMISSION_QUERY,
+    # ECAS 单独一个入口，不并进「佣金查询」：两笔钱、两套比例、两张汇总表。
+    cards.ACTION_OPEN_ECAS_QUERY,
 }
 
 
-def test_结果卡接上菜单后带齐四个入口():
+def test_结果卡接上菜单后带齐全部入口():
     """卡片回调是原地替换：做完一件事，会话里只剩这张卡。
 
     它上面没有按钮的话，要做下一件只能重新打字 —— 这正是要修掉的那个体验。
@@ -518,3 +520,45 @@ def test_分割线就是裸的_hr():
     card = cards.with_menu(cards.success_card("成了", "正文"))
     dividers = components(card, "hr")
     assert dividers == [{"tag": "hr"}]
+
+
+# ---------- ECAS 那两张卡 ----------
+
+
+def test_ECAS查询卡的月份下拉预选最新月份():
+    card = cards.ecas_query_card("2026-09", ["2026-07", "2026-08", "2026-09"])
+    (select,) = components(card, "select_static")
+    assert select["name"] == cards.F_ECAS_PERIOD
+    assert select["initial_option"] == "2026-09"
+    # 最新的排在最前面：绝大多数查询都是「上个月」
+    assert [o["value"] for o in select["options"]] == ["2026-09", "2026-08", "2026-07"]
+
+
+def test_预选月份不在候选里时不写这个key():
+    """``initial_option`` 给一个不在 options 里的值，飞书会拒掉整张卡。"""
+    card = cards.ecas_query_card("2099-01", ["2026-08"])
+    (select,) = components(card, "select_static")
+    assert "initial_option" not in select
+
+
+def test_一个月份都没有时退回文本框():
+    """下拉是空的话点开什么都没有，用户只会以为卡片坏了。"""
+    card = cards.ecas_query_card("", [])
+    assert components(card, "select_static") == []
+    (text_input,) = components(card, "input")
+    assert text_input["name"] == cards.F_ECAS_PERIOD
+
+
+def test_ECAS的卡和交易佣金的卡颜色不一样():
+    """两笔钱在会话里往上翻的时候要一眼分得开。"""
+    ecas_template = cards.ecas_result_card("ECAS 返佣", "正文")["header"]["template"]
+    trade_template = cards.commission_result_card("佣金明细", "正文")["header"]["template"]
+    assert ecas_template != trade_template
+
+
+def test_两张查询卡的表单名和字段名都不冲突():
+    """同一个会话里两张卡都可能在，name 撞了平台会认错是哪个动作。"""
+    ecas_card = cards.ecas_query_card("2026-09", ["2026-09"])
+    trade_card = cards.commission_query_card("2026-09", ["2026-09"])
+    assert cards.F_ECAS_PERIOD != cards.F_QUERY_PERIOD
+    assert components(ecas_card, "form")[0]["name"] != components(trade_card, "form")[0]["name"]

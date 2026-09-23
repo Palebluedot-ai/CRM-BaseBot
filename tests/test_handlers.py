@@ -531,3 +531,124 @@ def test_别的销售的客户不会出现在我的渠道里(fake_bitable, handl
     text = _list_text(handlers)
     assert "别人的客户" not in text
     assert "R999" not in text
+
+
+# ---------- ECAS 返佣按钮 ----------
+#
+# 它和「佣金查询」是平行的两条路，不是共用的一条：读的表不同、比例来源不同、
+# 结果进不同的汇总表。长得像是因为交互一样，不是因为底下是同一件事。
+
+
+class StubEcasQuery:
+    def __init__(self, periods=("2026-08",), rows=()) -> None:
+        self._periods = list(periods)
+        self._rows = list(rows)
+        self.queried: list[tuple[str, str]] = []
+
+    def periods_for(self, sales):
+        return list(self._periods)
+
+    def query(self, sales, period):
+        self.queried.append((sales.open_id, period))
+        return list(self._rows)
+
+
+def _with_ecas(fake_bitable, service) -> BotHandlers:
+    audit = AuditLog(fake_bitable, TBL_AUDIT)
+    return BotHandlers(
+        client=StubLarkClient(),
+        directory=SalesDirectory(fake_bitable, TBL_SALES),
+        referrals=ReferralService(fake_bitable, TBL_REFERRAL, audit),
+        clients=ReferredClientService(fake_bitable, TBL_CLIENT, TBL_REFERRAL, audit),
+        ecas_query=service,
+        background=lambda fn: fn(),
+    )
+
+
+def test_主菜单上有ECAS入口(handlers):
+    payload = marshalled(handlers.on_card_action(trigger(cards.ACTION_LIST_REFERRALS)))
+    assert cards.ACTION_OPEN_ECAS_QUERY in _actions_in(payload)
+
+
+def test_没配ECAS时按钮回未启用而不是崩(handlers):
+    """handlers fixture 没注入 ecas_query —— 没上 ECAS 的租户就是这个状态。"""
+    payload = marshalled(handlers.on_card_action(trigger(cards.ACTION_OPEN_ECAS_QUERY)))
+    text = payload["card"]["data"]["body"]["elements"][0]["content"]
+    assert "未启用" in text
+    # 死路上也要给菜单
+    assert MENU_ACTIONS <= _actions_in(payload)
+
+
+def test_打开ECAS查询时预选最新月份(fake_bitable):
+    bots = _with_ecas(fake_bitable, StubEcasQuery(periods=["2026-07", "2026-08"]))
+    fake_bitable.table(TBL_SALES).add_existing(
+        {
+            schema.SALES_OPEN_ID: ALICE,
+            schema.SALES_NAME: "Alice",
+            schema.SALES_ROLE: schema.ROLE_SALES,
+            schema.SALES_STATUS: schema.SALES_STATUS_ACTIVE,
+        }
+    )
+    payload = marshalled(bots.on_card_action(trigger(cards.ACTION_OPEN_ECAS_QUERY)))
+    card = payload["card"]["data"]
+    (select,) = [n for n in cards_walk(card) if n.get("tag") == "select_static"]
+    assert select["initial_option"] == "2026-08"
+
+
+def _ecas_handlers(fake_bitable, service):
+    fake_bitable.table(TBL_SALES).add_existing(
+        {
+            schema.SALES_OPEN_ID: ALICE,
+            schema.SALES_NAME: "Alice",
+            schema.SALES_ROLE: schema.ROLE_SALES,
+            schema.SALES_STATUS: schema.SALES_STATUS_ACTIVE,
+        }
+    )
+    return _with_ecas(fake_bitable, service)
+
+
+def test_查询走异步先ack再推结果(fake_bitable):
+    service = StubEcasQuery()
+    bots = _ecas_handlers(fake_bitable, service)
+
+    ack = marshalled(
+        bots.on_card_action(trigger(cards.ACTION_QUERY_ECAS, form={cards.F_ECAS_PERIOD: "2026-08"}))
+    )
+    assert "正在查询" in ack["card"]["data"]["header"]["title"]["content"]
+    assert service.queried == [(ALICE, "2026-08")]
+
+    pushed = json.loads(bots._client.sent[-1].request_body.content)
+    assert "ECAS 返佣" in pushed["header"]["title"]["content"]
+    assert MENU_ACTIONS <= _actions_in({"card": {"data": pushed}})
+
+
+def test_月份格式不对时说人话(fake_bitable):
+    bots = _ecas_handlers(fake_bitable, StubEcasQuery())
+    payload = marshalled(
+        bots.on_card_action(trigger(cards.ACTION_QUERY_ECAS, form={cards.F_ECAS_PERIOD: "八月"}))
+    )
+    assert "YYYY-MM" in payload["card"]["data"]["body"]["elements"][0]["content"]
+
+
+def test_查询炸了推一张错误卡而不是静默(fake_bitable):
+    class Boom(StubEcasQuery):
+        def query(self, sales, period):
+            raise RuntimeError("Base 炸了")
+
+    bots = _ecas_handlers(fake_bitable, Boom())
+    bots.on_card_action(trigger(cards.ACTION_QUERY_ECAS, form={cards.F_ECAS_PERIOD: "2026-08"}))
+
+    pushed = json.loads(bots._client.sent[-1].request_body.content)
+    assert pushed["header"]["template"] == "red"
+    assert MENU_ACTIONS <= _actions_in({"card": {"data": pushed}})
+
+
+def test_读月份列表失败不让整张卡挂掉(fake_bitable):
+    class Boom(StubEcasQuery):
+        def periods_for(self, sales):
+            raise RuntimeError("Base 炸了")
+
+    bots = _ecas_handlers(fake_bitable, Boom())
+    payload = marshalled(bots.on_card_action(trigger(cards.ACTION_OPEN_ECAS_QUERY)))
+    assert payload["card"]["data"]["schema"] == "2.0"
+    assert "读取 ECAS 月份列表失败" in payload["card"]["data"]["body"]["elements"][0]["content"]
