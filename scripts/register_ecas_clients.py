@@ -1,32 +1,28 @@
 #!/usr/bin/env python
-"""把 ECAS 表里有介绍人的客户补登记进客户表，让交易佣金算得到他们。
+"""把**个别**已确认符合 PI 资格的 ECAS 客户登记进客户表。
 
     uv run python scripts/register_ecas_clients.py --file "Wallet_and_Trades_ECAS.xlsx"
-    uv run python scripts/register_ecas_clients.py --file "..." --apply
+    uv run python scripts/register_ecas_clients.py --file "..." --client "某某某" --apply
 
-## 为什么要有这一步
+## 先读这一段：整批补登记是错的
 
-ECAS 和交易是两笔独立的佣金，同一个渠道两边各有各的费率，同一个客户两笔都能产生
-—— 这是财务 2026-08 的输出自己证明的：CHANGZHENG YE 同一个月拿了 ECAS 5,000
-（Mo Xuelei × 50%）和交易佣金 3,474.08（R099 × 50%），两笔都付了。
+ECAS 表里有 79 个被介绍的客户，其中只有 9 个登记在客户表里，于是只有那 9 个的交易
+会算出佣金。这个差额曾经被当成「漏登记」—— **不是。**
 
-但「谁介绍了这个客户」这件事，对 ECAS 客户只写在那份 ECAS 表里。客户表没有他们，
-于是交易佣金算不到任何人：2026-08 有 29 个这样的客户、83,757 的 PnL 落进
-「未登记归属」，财务那份 recompute 的 Unmatched 分页里躺着同一批人。
+**交易佣金要求客户符合 PI（专业投资者）资格**（2026-09-23 业务确认）。ECAS 的介绍
+关系不会自动延伸到交易那边：介绍人照样拿 ECAS 返佣，但客户不够 PI 资格就没有交易
+佣金可分。所以「有的有、有的没有」是**正确状态**，不是待修复的缺口。
 
-所以这个脚本做的是**补资料**，不是改算法 —— 算法一直是对的，缺的是输入。
+财务 2026-08 那份权威输出没有付另外那 68 位，和这条规则一致；他们的 PnL 出现在
+Unmatched 分页里，也和这条规则一致。
 
-## ⚠️ `--apply` 要等业务拍板
+于是这个脚本**不再是整批补登记工具**。它只用在一件事上：某个 ECAS 客户经业务确认
+符合 PI 资格之后，把那一个客户登记进去。所以 ``--apply`` 必须配 ``--client``，
+不带 ``--client`` 的 ``--apply`` 会被直接拒绝 —— 整批写进去等于给 68 个不该拿交易
+佣金的客户开了口子，而且写进去之后没有任何地方会告诉你错了。
 
-上面那段说的是**可能性**：ECAS 客户同时产生交易佣金这件事是发生过的（那 3 位）。
-它**不等于**「所有 ECAS 客户都该拿交易佣金」。财务 2026-08 那份权威输出并没有付
-这 68 位 —— 他们的 PnL 躺在 Unmatched 分页里。两种解释都说得通：
-
-  · 该付而漏了（那份输出和我们读的是同一份不完整的客户表，一起漏）
-  · 本来就不该付（ECAS 的介绍关系不自动延伸到交易）
-
-**这个问题只有业务能回答，代码回答不了。** 在拿到明确答复之前只跑预演，不要 `--apply`。
-ECAS 自己的返佣不受这个问题影响 —— 那套账是独立的，见 ``docs/ECAS.md``。
+ECAS 自己的返佣和这件事**完全无关**：那套账按 ECAS 表逐行算，79 个一个不少，
+见 ``docs/ECAS.md``。
 
 ## 绝不做的事
 
@@ -149,10 +145,26 @@ def load_directory(bitable: BitableClient) -> tuple[dict[str, set], dict[str, se
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="把 ECAS 有介绍人的客户补登记进客户表")
+    parser = argparse.ArgumentParser(description="把个别已确认符合 PI 资格的 ECAS 客户登记进客户表")
     parser.add_argument("--file", required=True, help="ECAS 的 xlsx")
+    parser.add_argument(
+        "--client",
+        action="append",
+        default=[],
+        metavar="客户名",
+        help="只处理这个客户（可以给多次）。--apply 必须配它，理由见模块开头",
+    )
     parser.add_argument("--apply", action="store_true", help="真写；不加则只预演")
     args = parser.parse_args(argv)
+
+    if args.apply and not args.client:
+        parser.error(
+            "不带 --client 的 --apply 已经被禁掉了。\n"
+            "交易佣金要求客户符合 PI 资格（2026-09-23 业务确认），"
+            "ECAS 表里那 79 个不是都够格 ——\n"
+            "整批写进去等于给不够格的客户开了口子，而且写完没有任何地方会告诉你错了。\n"
+            '确认某个客户够格之后，用 --client "客户名" --apply 一个一个来。'
+        )
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)-7s %(message)s")
 
@@ -204,6 +216,14 @@ def main(argv: list[str] | None = None) -> int:
     skipped: list[tuple[str, str]] = []
     conflicts: list[str] = []
     claimed: dict[str, str] = {}
+
+    wanted = {norm(name) for name in args.client}
+    if wanted:
+        missing = wanted - set(ecas)
+        if missing:
+            print(f"\n⚠️ ECAS 表里没有这些客户：{sorted(missing)}")
+        ecas = {k: v for k, v in ecas.items() if k in wanted}
+        print(f"按 --client 筛剩 {len(ecas)} 个")
 
     for key, row in sorted(ecas.items()):
         client, referrer = row["client"], row["referrer"]
@@ -282,7 +302,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"      UID {p.uid}（{p.uid_source}）  负责销售 {p.sales}")
 
     if not args.apply:
-        print("\n预演：没有写 Base。确认无误后加 --apply。")
+        print(
+            "\n预演：没有写 Base。\n"
+            "要真的登记某一个客户，先确认他符合 PI 资格，"
+            '然后：--client "客户名" --apply'
+        )
         return 0
 
     written = 0

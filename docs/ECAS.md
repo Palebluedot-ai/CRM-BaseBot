@@ -24,6 +24,32 @@ ECAS 返佣  ECAS Applications ────────────────�
 `tests/test_ecas.py` 里有一条测试专门钉这件事：把渠道表的分佣比例改成 999%，
 ECAS 算出来的钱一分不变。
 
+## ECAS 客户为什么不是都有交易佣金（已解决）
+
+ECAS 表里 79 个被介绍的客户，只有 9 个登记在 `Referred Client` 里，所以只有那 9 个
+的交易会算出佣金。这个差额曾经被当成「漏登记」。**不是。**
+
+**交易佣金要求客户符合 PI（专业投资者）资格**（2026-09-23 业务确认）。ECAS 的介绍
+关系不会自动延伸到交易那边：介绍人照样拿 ECAS 返佣，但客户不够 PI 资格就没有交易
+佣金可分。
+
+所以「有的有、有的没有」是**正确状态**，不是待修复的缺口：
+
+- 财务 2026-08 那份权威输出没有付另外那 68 位 —— 和这条规则一致
+- 他们的 PnL 出现在 Unmatched 分页里 —— 也和这条规则一致
+- 系统现在的行为（只认客户表里的人）—— 本来就是对的，不用改
+
+`scripts/register_ecas_clients.py` 因此**不再是整批补登记工具**。它只用在「某个
+ECAS 客户经确认符合 PI 资格之后，把那一个登记进去」：
+
+```bash
+uv run python scripts/register_ecas_clients.py --file "...xlsx"                      # 预演，看全貌
+uv run python scripts/register_ecas_clients.py --file "...xlsx" --client "某某某" --apply
+```
+
+不带 `--client` 的 `--apply` 会被直接拒绝。整批写进去等于给 68 个不够格的客户开了
+口子，而且写完之后没有任何地方会告诉你错了。
+
 ## 数据从哪来
 
 内部那份「Wallet and Trades」表格里的 `ECAS` 分页，一行一笔开户申请：
@@ -165,8 +191,3 @@ uv run python -m crm_basebot.jobs.ecas_reconcile --period 2026-08 --write --repl
 - **机器人上的 ECAS 按钮**。要改 `src/crm_basebot/bot/cards.py` 和 `handlers.py`。
 - **每月自动结算 ECAS**。现有的 `scripts/monthly_reconcile.py` 只结算交易佣金，
   卡片上已经写明「不含 ECAS」。ECAS 的月结任务还没建。
-- **ECAS 客户要不要同时算交易佣金**。这是个业务问题，不是技术问题：
-  ECAS 表里 79 个被介绍的客户，只有 9 个登记在 `Referred Client` 里，
-  所以只有那 9 个的交易会算出佣金。要不要把另外 68 个补登记，等业务拍板。
-  补登记的脚本是 `scripts/register_ecas_clients.py`，**在业务确认之前不要跑 `--apply`**。
-  这件事和上面的 ECAS 结算**完全无关** —— ECAS 自己的返佣不受它影响。
