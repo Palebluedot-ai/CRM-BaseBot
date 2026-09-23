@@ -372,3 +372,162 @@ def test_归属取自回调而不是表单(fake_bitable, handlers):
     )
     assert written[schema.REFERRAL_OWNER_OPEN_ID] == ALICE
     assert written[schema.REFERRAL_OWNER] == [{"id": ALICE}]
+
+
+# ---------- 做完一件事之后，下一轮入口要在原地 ----------
+#
+# 卡片回调的返回值是**原地替换**：点「登记新渠道」，菜单卡被表单卡盖掉；点「提交」，
+# 表单卡又被成功卡盖掉。结果卡上没有按钮的话，要做下一件只能重新打字。
+# 下面这几条钉的就是「每一张结果卡都带着菜单」。
+
+
+def _actions_in(payload: dict[str, Any]) -> set[str]:
+    found = set()
+    for node in cards_walk(payload["card"]["data"]):
+        if node.get("tag") != "button":
+            continue
+        for behavior in node.get("behaviors", []):
+            if behavior.get("type") == "callback":
+                found.add(behavior["value"]["action"])
+    return found
+
+
+def cards_walk(node: Any):
+    if isinstance(node, dict):
+        yield node
+        for value in node.values():
+            yield from cards_walk(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from cards_walk(item)
+
+
+MENU_ACTIONS = {
+    cards.ACTION_OPEN_REFERRAL_FORM,
+    cards.ACTION_OPEN_CLIENT_FORM,
+    cards.ACTION_LIST_REFERRALS,
+    cards.ACTION_OPEN_COMMISSION_QUERY,
+}
+
+
+def test_登记成功的卡片上带着下一轮菜单(handlers):
+    assert MENU_ACTIONS <= _actions_in(submit_referral(handlers))
+
+
+def test_我的渠道卡片上带着下一轮菜单(handlers):
+    payload = marshalled(handlers.on_card_action(trigger(cards.ACTION_LIST_REFERRALS)))
+    assert MENU_ACTIONS <= _actions_in(payload)
+
+
+def test_认不出的动作也给菜单而不是死路(handlers):
+    payload = marshalled(handlers.on_card_action(trigger("谁也不认识的动作")))
+    assert MENU_ACTIONS <= _actions_in(payload)
+
+
+def test_校验失败的卡片上也带菜单(handlers):
+    """填错一项就要重新打字唤出菜单，是这次要修掉的体验里最烦的一种。"""
+    payload = submit_referral(handlers, referral_form(**{cards.F_REFERRAL_RATE: "不是数字"}))
+    assert MENU_ACTIONS <= _actions_in(payload)
+
+
+def test_名册里没有的人不给菜单(handlers):
+    """给一排按钮，点了还是同一句拒绝 —— 不如不给。"""
+    payload = marshalled(
+        handlers.on_card_action(trigger(cards.ACTION_LIST_REFERRALS, open_id=STRANGER))
+    )
+    assert _actions_in(payload) == set()
+
+
+def test_表单卡上不挂菜单(handlers):
+    """菜单按钮掉进 form 里会变成表单动作。表单本来就有自己的提交按钮，
+    在它下面再堆四个入口只会让人点错。"""
+    payload = marshalled(handlers.on_card_action(trigger(cards.ACTION_OPEN_REFERRAL_FORM)))
+    assert _actions_in(payload) == {cards.ACTION_SUBMIT_REFERRAL}
+
+
+def test_异步提交的等待卡不挂菜单而结果卡挂(handlers):
+    """等待卡的下一步是「等结果」，不是「再做一件事」。菜单要跟着结果走。"""
+    submit_referral(handlers)
+    ack = marshalled(
+        handlers.on_card_action(
+            trigger(
+                cards.ACTION_SUBMIT_CLIENT,
+                form={
+                    cards.F_CLIENT_UID: UID,
+                    cards.F_CLIENT_NAME: "PLUTO STUDIO LIMITED",
+                    cards.F_CLIENT_REFERRAL: "R001",
+                },
+            )
+        )
+    )
+    assert _actions_in(ack) == set()
+
+    # background 是同步执行器，结果卡这时已经推出去了
+    pushed = json.loads(handlers._client.sent[-1].request_body.content)
+    assert MENU_ACTIONS <= _actions_in({"card": {"data": pushed}})
+
+
+# ---------- 我的渠道：比例 + 名下客户 ----------
+
+
+def _list_text(handlers) -> str:
+    payload = marshalled(handlers.on_card_action(trigger(cards.ACTION_LIST_REFERRALS)))
+    blocks = [
+        node["content"]
+        for node in cards_walk(payload["card"]["data"])
+        if node.get("tag") == "markdown"
+    ]
+    return "\n".join(blocks)
+
+
+def test_渠道清单带出比例和名下客户(handlers):
+    submit_referral(handlers)
+    handlers.on_card_action(
+        trigger(
+            cards.ACTION_SUBMIT_CLIENT,
+            form={
+                cards.F_CLIENT_UID: UID,
+                cards.F_CLIENT_NAME: "PLUTO STUDIO LIMITED",
+                cards.F_CLIENT_REFERRAL: "R001",
+            },
+        )
+    )
+
+    text = _list_text(handlers)
+    assert "**R001** 北极星资本 · 20%" in text
+    assert "1 个客户" in text
+    assert "PLUTO STUDIO LIMITED" in text
+
+
+def test_客户表读不出来时照样列渠道(handlers, monkeypatch):
+    """渠道清单本身是有用的。为了一个附加信息把整张卡换成报错，
+    是拿有用的东西去换没用的。"""
+    submit_referral(handlers)
+
+    def boom(_ids):
+        raise RuntimeError("客户表炸了")
+
+    monkeypatch.setattr(handlers._clients, "names_by_referral", boom)
+
+    text = _list_text(handlers)
+    assert "**R001** 北极星资本 · 20%" in text
+    assert "客户名单这次没取到" in text
+
+
+def test_别的销售的客户不会出现在我的渠道里(fake_bitable, handlers):
+    """``names_by_referral`` 只认调用方鉴过权的那批 record_id。"""
+    submit_referral(handlers)
+    other = fake_bitable.table(TBL_REFERRAL).add_existing(
+        {schema.REFERRAL_NO: "R999", schema.REFERRAL_OWNER_OPEN_ID: STRANGER}
+    )
+    fake_bitable.table(TBL_CLIENT).add_existing(
+        {
+            schema.CLIENT_NAME: "别人的客户",
+            schema.CLIENT_REFERRAL_LINK: [other],
+            schema.CLIENT_OWNER_OPEN_ID: STRANGER,
+        }
+    )
+
+    text = _list_text(handlers)
+    assert "别人的客户" not in text
+    assert "R999" not in text

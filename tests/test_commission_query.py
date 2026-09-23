@@ -18,7 +18,13 @@ import pytest
 
 from crm_basebot.bot.auth import Sales
 from crm_basebot.domain import schema
-from crm_basebot.domain.commission_query import CommissionQueryService, summarize
+from crm_basebot.domain.commission_query import (
+    ClientBreakdown,
+    CommissionQueryService,
+    QueryResult,
+    ReferralBreakdown,
+    summarize,
+)
 
 from .conftest import TBL_BOARD, TBL_CLIENT, TBL_REFERRAL
 
@@ -233,3 +239,74 @@ def test_summarize_没数据时给出友好提示(base):
 
     text = summarize(result, viewer_name="Alice")
     assert "没有可展示" in text
+
+
+# ---------- 卡片上的总数 ----------
+#
+# 光有一个「合计应付」，看的人没法判断它合不合理。少了一个渠道、少了一个客户，
+# 金额照样是一个像样的数字 —— 把渠道数、客户数、收入合计摆出来，缺了就立刻看得出。
+
+
+def _breakdown(no: str, rate: str, clients: list[tuple[str, str, int]]) -> ReferralBreakdown:
+    item = ReferralBreakdown(referral_no=no, referral_name=f"{no} 名称", rate_percent=Decimal(rate))
+    for uid, revenue, rows in clients:
+        entry = ClientBreakdown(uid=uid, name=f"客户{uid[-1]}")
+        entry.revenue = Decimal(revenue)
+        entry.row_count = rows
+        item.clients[uid] = entry
+    return item
+
+
+def test_顶部三个总数都算对():
+    result = QueryResult(
+        period="2026-08",
+        referrals=[
+            _breakdown("R001", "20", [("uid1", "25600", 47), ("uid2", "12000", 9)]),
+            _breakdown("R002", "15", [("uid3", "8000", 3)]),
+        ],
+        unmapped_uids=[],
+    )
+    assert result.referral_count == 2
+    assert result.client_count == 3
+    assert result.revenue_total == Decimal("45600")
+    assert result.total_payable == Decimal("8720.00")
+
+    text = summarize(result, viewer_name="Alice")
+    assert "2 个渠道 · 3 个客户 · 收入合计 45,600.00" in text
+
+
+def test_同一个客户挂在两个渠道下只数一次():
+    """客户表被人手改过之后 UID 不保证只挂一个渠道。不去重的话
+    「12 个客户」其实是同一个人数了两遍。"""
+    result = QueryResult(
+        period="2026-08",
+        referrals=[
+            _breakdown("R001", "20", [("uid1", "100", 1)]),
+            _breakdown("R002", "20", [("uid1", "100", 1)]),
+        ],
+        unmapped_uids=[],
+    )
+    assert result.client_count == 1
+
+
+def test_每个渠道下都有小计():
+    result = QueryResult(
+        period="2026-08",
+        referrals=[_breakdown("R001", "20", [("uid1", "25600", 47), ("uid2", "12000", 9)])],
+        unmapped_uids=[],
+    )
+    (ref,) = result.referrals
+    assert ref.client_count == 2
+    assert ref.row_count == 56  # 笔数和客户数是两回事：一个客户一个月能有几十笔
+    assert "小计：收入 37,600.00 · 2 个客户 · 56 笔" in summarize(result, viewer_name="Alice")
+
+
+def test_收入合计不做保底而应付做():
+    """保底是应付金额的规则。收入也截成 0 的话，看报表的人看不出这个月是负的。"""
+    result = QueryResult(
+        period="2026-08",
+        referrals=[_breakdown("R001", "20", [("uid1", "-5000", 2)])],
+        unmapped_uids=[],
+    )
+    assert result.revenue_total == Decimal("-5000")
+    assert result.total_payable == Decimal("0")

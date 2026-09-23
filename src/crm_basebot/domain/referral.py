@@ -14,12 +14,12 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, tzinfo
 
 from ..bot.auth import Sales
 from ..lark.bitable import _WRITE_LOCK, BitableClient
-from ..lark.values import extract_text
+from ..lark.values import extract_text, to_number
 from . import schema
 from .audit import ACTION_CREATE_REFERRAL, AuditLog
 from .dates import DEFAULT_BUSINESS_TIMEZONE, date_to_ms, today_in
@@ -75,6 +75,22 @@ class ReferralInput:
             commission_rate=self.commission_rate,
             payout_frequency=self.payout_frequency,
         )
+
+
+@dataclass
+class ReferralDetail:
+    """展示「我的渠道」用的一行。
+
+    ``client_names`` 由调用方补 —— 客户在另一张表，见 ``list_detail_for``。
+    刻意不是 frozen：补客户名是正常流程的一步，不是「修改了不该改的东西」。
+    """
+
+    record_id: str
+    no: str
+    name: str
+    rate_percent: float | None
+    status: str
+    client_names: list[str] = field(default_factory=list)
 
 
 def parse_referral_no(value: str) -> int | None:
@@ -256,17 +272,33 @@ class ReferralService:
             logger.exception("回填渠道主字段失败 record_id=%s primary=%s", record_id, primary)
 
     def list_for(self, sales: Sales) -> list[tuple[str, str]]:
-        """该销售名下的渠道，返回 [(编号, 名称)]。管理员看全部。"""
+        """该销售名下的渠道，返回 [(编号, 名称)]。管理员看全部。
+
+        只给「登记新客户」那个下拉用 —— 它只需要编号和名字。要展示给人看的清单
+        用 ``list_detail_for``。
+        """
+        return [(item.no, item.name) for item in self.list_detail_for(sales)]
+
+    def list_detail_for(self, sales: Sales) -> list[ReferralDetail]:
+        """该销售名下的渠道，带比例和状态。管理员看全部。
+
+        ``client_names`` 在这里一律是空的 —— 客户住在另一张表，这个服务够不到它。
+        由调用方（``bot/handlers.py``）拿 ``record_id`` 去客户服务那边补上。
+        这样两个服务各自只认自己那张表，不用互相持有对方的 table_id。
+        """
         from ..bot.auth import owned_records
 
-        result: list[tuple[str, str]] = []
+        result: list[ReferralDetail] = []
         records = self._bitable.iter_records(self._table_id)
         for record in owned_records(sales, records, schema.REFERRAL_OWNER_OPEN_ID):
             result.append(
-                (
-                    extract_text(record.fields.get(schema.REFERRAL_NO)),
-                    extract_text(record.fields.get(schema.REFERRAL_NAME)),
+                ReferralDetail(
+                    record_id=record.record_id,
+                    no=extract_text(record.fields.get(schema.REFERRAL_NO)),
+                    name=extract_text(record.fields.get(schema.REFERRAL_NAME)),
+                    rate_percent=to_number(record.fields.get(schema.REFERRAL_RATE)),
+                    status=extract_text(record.fields.get(schema.REFERRAL_STATUS)),
                 )
             )
-        result.sort()
+        result.sort(key=lambda item: (item.no, item.name))
         return result

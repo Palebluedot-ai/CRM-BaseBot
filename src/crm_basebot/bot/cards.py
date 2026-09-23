@@ -126,10 +126,47 @@ def _menu_button(text: str, action: str, *, primary: bool = False) -> dict[str, 
     }
 
 
+def _menu_buttons() -> list[dict[str, Any]]:
+    """主菜单那四个按钮。
+
+    三个按钮垂直堆叠、每个撑满宽度。之前用 column_set 三等分横排，手机屏窄的时候
+    每列只放得下 3-4 个字，「登记新渠道」被截成「登记..」。垂直排列纵向多占一点
+    空间，但任何设备都能把标签完整显示出来。
+    """
+    return [
+        _menu_button("登记新渠道", ACTION_OPEN_REFERRAL_FORM, primary=True),
+        _menu_button("登记新客户", ACTION_OPEN_CLIENT_FORM),
+        _menu_button("我的渠道", ACTION_LIST_REFERRALS),
+        _menu_button("佣金查询", ACTION_OPEN_COMMISSION_QUERY),
+    ]
+
+
+def with_menu(card: dict[str, Any]) -> dict[str, Any]:
+    """在一张结果卡的底部接上主菜单。
+
+    **为什么每张结果卡都要带菜单**：卡片回调的返回值是「原地替换」——
+    点「登记新渠道」，菜单卡就被表单卡盖掉；点「提交」，表单卡又被成功卡盖掉。
+    做完一件事，会话里只剩一张没有任何按钮的成功卡，要再做下一件只能重新打字。
+
+    另一条路是提交完之后再 push 一条新的菜单消息，但那样每操作一次就多两条消息，
+    会话很快被刷满。接在结果卡底部，做完的结果和下一步的入口在同一张卡上，
+    消息数不变。
+
+    返回的是新 dict，不改传进来的那张 —— 调用方常常复用同一张卡的构造结果。
+    """
+    body = card.get("body", {})
+    elements = list(body.get("elements", []))
+    # 分割线就写成 SDK 自己 `CardBuilder.divider()` 发出去的那个形状：裸的
+    # `{"tag": "hr"}`，不加 margin。这是整套卡片里唯一一个没在真机上发过的组件，
+    # 而它现在会出现在**每一张**结果卡上 —— 渲染不出来的话是全线故障，不是一处。
+    # 按钮和上面那行字本来就各自带 margin，省掉它不影响间距。
+    elements.append({"tag": "hr"})
+    elements.append(_text("**接下来做什么？**"))
+    elements.extend(_menu_buttons())
+    return {**card, "body": {**body, "elements": elements}}
+
+
 def menu_card(sales_name: str) -> dict[str, Any]:
-    # 三个按钮垂直堆叠、每个撑满宽度。之前用 column_set 三等分横排，手机屏
-    # 窄的时候每列只放得下 3-4 个字，「登记新渠道」被截成「登记..」。垂直
-    # 排列纵向多占一点空间，但任何设备都能把标签完整显示出来。
     return {
         "schema": "2.0",
         "header": {
@@ -139,10 +176,7 @@ def menu_card(sales_name: str) -> dict[str, Any]:
         "body": {
             "elements": [
                 _text(f"**{sales_name}**，你要做什么？"),
-                _menu_button("登记新渠道", ACTION_OPEN_REFERRAL_FORM, primary=True),
-                _menu_button("登记新客户", ACTION_OPEN_CLIENT_FORM),
-                _menu_button("我的渠道", ACTION_LIST_REFERRALS),
-                _menu_button("佣金查询", ACTION_OPEN_COMMISSION_QUERY),
+                *_menu_buttons(),
             ]
         },
     }
@@ -226,6 +260,11 @@ def client_form_card(referral_options: list[tuple[str, str]]) -> dict[str, Any]:
     }
 
 
+def footnote(content: str) -> dict[str, Any]:
+    """卡片底部那行灰色小字。公开出来，免得调用方去用 ``_text``。"""
+    return _text(f"<font color='grey'>{content}</font>", size="notation")
+
+
 def notice_card(title: str, body: str, *, template: str = "grey") -> dict[str, Any]:
     return {
         "schema": "2.0",
@@ -245,16 +284,52 @@ def error_card(body: str) -> dict[str, Any]:
     return notice_card("没能完成", body, template="red")
 
 
-def referral_list_card(items: list[tuple[str, str]]) -> dict[str, Any]:
+# 一个渠道下最多列几个客户名。超过就折叠 —— 客户多的渠道会把整张卡撑到要滑很久，
+# 而「我的渠道」的用途是快速确认「有哪些渠道、各自多大」，不是客户名册。
+MAX_CLIENTS_SHOWN = 10
+
+
+def _rate_text(rate_percent: float | None) -> str:
+    """20.0 -> "20%"，None -> "比例未填"。
+
+    去掉没意义的尾零：Base 里存的是数字，读回来是 float，直接拼会显示成「20.0%」。
+    """
+    if rate_percent is None:
+        return "比例未填"
+    text = f"{rate_percent:.10f}".rstrip("0").rstrip(".")
+    return f"{text or '0'}%"
+
+
+def referral_list_card(items: list[Any]) -> dict[str, Any]:
+    """``items`` 是 ``domain.referral.ReferralDetail``，每个带比例和名下客户。"""
     if not items:
         return notice_card("我的渠道", "你名下还没有登记任何渠道。")
 
-    # 名字为空时留一个占位（比如 R006 是在 Base 里直接建的、渠道名称字段没填），
-    # 避免渲染成「- **R006** 」这种末尾一个空格、看着像 bug 的行。
-    lines = "\n".join(
-        f"- **{no}** {name if name else '（未命名，建议到 Base 里补齐）'}" for no, name in items
-    )
-    return notice_card("我的渠道", f"共 {len(items)} 个：\n\n{lines}", template="blue")
+    blocks: list[str] = []
+    for item in items:
+        # 名字为空时留一个占位（比如 R006 是在 Base 里直接建的、渠道名称字段没填），
+        # 避免渲染成「**R006** 」这种末尾一个空格、看着像 bug 的行。
+        name = item.name or "（未命名，建议到 Base 里补齐）"
+        head = f"**{item.no}** {name} · {_rate_text(item.rate_percent)}"
+        # 状态只在不是「生效」时才标出来。正常的渠道每行都缀一个「生效」是噪音，
+        # 但停用的渠道混在列表里不作声，会让人以为它还在算钱。
+        if item.status and item.status != schema.STATUS_ACTIVE:
+            head += f" · **{item.status}**"
+        head += f" · {len(item.client_names)} 个客户"
+        lines = [head]
+
+        for client in item.client_names[:MAX_CLIENTS_SHOWN]:
+            lines.append(f"　· {client or '（未命名客户）'}")
+        hidden = len(item.client_names) - MAX_CLIENTS_SHOWN
+        if hidden > 0:
+            lines.append(f"　· …… 还有 {hidden} 个，完整名单在 Base 里")
+        if not item.client_names:
+            lines.append("　· 还没有登记客户")
+        blocks.append("\n".join(lines))
+
+    total_clients = sum(len(item.client_names) for item in items)
+    body = f"共 **{len(items)}** 个渠道、**{total_clients}** 个客户\n\n" + "\n\n".join(blocks)
+    return notice_card("我的渠道", body, template="blue")
 
 
 def commission_query_card(default_period: str, period_options: list[str]) -> dict[str, Any]:

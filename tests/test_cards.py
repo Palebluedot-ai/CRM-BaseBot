@@ -16,6 +16,7 @@ import pytest
 
 from crm_basebot.bot import cards
 from crm_basebot.domain import schema
+from crm_basebot.domain.referral import ReferralDetail
 
 # header.template 的合法取值，来自「标题组件」文档。写错了标题会退化成 default。
 VALID_TEMPLATES = {
@@ -68,6 +69,26 @@ INTERACTIVE_TAGS = {
 REFERRAL_OPTIONS = [("R001", "北极星资本"), ("R002", "鲸落数字")]
 
 
+def _details() -> list[ReferralDetail]:
+    """「我的渠道」那张卡要的输入：带比例、状态和名下客户。"""
+    first = ReferralDetail(
+        record_id="rec1",
+        no="R001",
+        name="北极星资本",
+        rate_percent=20.0,
+        status=schema.STATUS_ACTIVE,
+    )
+    first.client_names = ["PLUTO STUDIO LIMITED", "明辉贸易"]
+    second = ReferralDetail(
+        record_id="rec2",
+        no="R002",
+        name="鲸落数字",
+        rate_percent=15.5,
+        status=schema.STATUS_DISABLED,
+    )
+    return [first, second]
+
+
 def all_cards() -> list[tuple[str, dict[str, Any]]]:
     """机器人会发出去的每一张卡片。新增卡片时记得挂到这里。"""
     return [
@@ -78,8 +99,12 @@ def all_cards() -> list[tuple[str, dict[str, Any]]]:
         ("notice_card", cards.notice_card("标题", "正文")),
         ("success_card", cards.success_card("成了", "正文")),
         ("error_card", cards.error_card("出错了")),
-        ("referral_list_card", cards.referral_list_card(REFERRAL_OPTIONS)),
+        ("referral_list_card", cards.referral_list_card(_details())),
         ("referral_list_card_空", cards.referral_list_card([])),
+        # 结果卡接上菜单之后仍然要满足上面每一条骨架约束 —— 这是实际会发出去的形态
+        ("with_menu_成功卡", cards.with_menu(cards.success_card("成了", "正文"))),
+        ("with_menu_渠道清单", cards.with_menu(cards.referral_list_card(_details()))),
+        ("with_menu_佣金结果", cards.with_menu(cards.commission_result_card("佣金明细", "正文"))),
     ]
 
 
@@ -376,3 +401,120 @@ def test_自检卡片同样符合_2_0_规范():
     (text_input,) = components(form, "input")
     assert text_input["name"]
     assert text_input["required"] is False
+
+
+# ---------- 结果卡底部的菜单 ----------
+
+
+def _menu_actions(card: dict[str, Any]) -> set[str]:
+    actions = set()
+    for button in components(card, "button"):
+        for behavior in button.get("behaviors", []):
+            if behavior["type"] == "callback":
+                actions.add(behavior["value"]["action"])
+    return actions
+
+
+MENU_ACTIONS = {
+    cards.ACTION_OPEN_REFERRAL_FORM,
+    cards.ACTION_OPEN_CLIENT_FORM,
+    cards.ACTION_LIST_REFERRALS,
+    cards.ACTION_OPEN_COMMISSION_QUERY,
+}
+
+
+def test_结果卡接上菜单后带齐四个入口():
+    """卡片回调是原地替换：做完一件事，会话里只剩这张卡。
+
+    它上面没有按钮的话，要做下一件只能重新打字 —— 这正是要修掉的那个体验。
+    """
+    assert _menu_actions(cards.with_menu(cards.success_card("成了", "正文"))) == MENU_ACTIONS
+
+
+def test_原卡不会被就地改掉():
+    """调用方常常复用同一张卡的构造结果，改坏了会累积出四个八个菜单。"""
+    card = cards.success_card("成了", "正文")
+    before = len(card["body"]["elements"])
+    cards.with_menu(card)
+    assert len(card["body"]["elements"]) == before
+
+
+def test_菜单按钮不在表单里():
+    """表单外的按钮才是普通回调；掉进 form 里会变成表单动作，点了不是我们要的行为。"""
+    card = cards.with_menu(cards.success_card("成了", "正文"))
+    assert components(card, "form") == []
+
+
+def test_菜单里的按钮和主菜单完全一致():
+    """两处分头维护的话，早晚有一边少一个入口。"""
+    assert _menu_actions(cards.menu_card("张三")) == _menu_actions(
+        cards.with_menu(cards.notice_card("标题", "正文"))
+    )
+
+
+# ---------- 我的渠道 ----------
+
+
+def test_渠道清单带比例和客户名():
+    (block,) = components(cards.referral_list_card(_details()), "markdown")
+    text = block["content"]
+    assert "**R001** 北极星资本 · 20%" in text
+    assert "2 个客户" in text
+    assert "PLUTO STUDIO LIMITED" in text
+    assert "明辉贸易" in text
+
+
+def test_比例不显示成多余的尾零():
+    """Base 里存的是数字，读回来是 float，直接拼会显示成「20.0%」。"""
+    (block,) = components(cards.referral_list_card(_details()), "markdown")
+    assert "20.0%" not in block["content"]
+    assert "15.5%" in block["content"], "该保留的小数位不能被抹掉"
+
+
+def test_停用的渠道标出来生效的不标():
+    """正常渠道每行都缀一个「生效」是噪音；停用的不作声则会让人以为它还在算钱。"""
+    (block,) = components(cards.referral_list_card(_details()), "markdown")
+    text = block["content"]
+    assert f"**{schema.STATUS_DISABLED}**" in text
+    assert schema.STATUS_ACTIVE not in text
+
+
+def test_没有客户的渠道明说而不是留空行():
+    detail = ReferralDetail(
+        record_id="rec1", no="R001", name="北极星资本", rate_percent=20.0, status=""
+    )
+    (block,) = components(cards.referral_list_card([detail]), "markdown")
+    assert "还没有登记客户" in block["content"]
+
+
+def test_客户太多时折叠而不是把卡片撑爆():
+    detail = ReferralDetail(
+        record_id="rec1", no="R001", name="北极星资本", rate_percent=20.0, status=""
+    )
+    detail.client_names = [f"客户{i:03d}" for i in range(25)]
+    (block,) = components(cards.referral_list_card([detail]), "markdown")
+    text = block["content"]
+    assert "25 个客户" in text
+    assert "客户000" in text
+    assert "客户024" not in text
+    assert f"还有 {25 - cards.MAX_CLIENTS_SHOWN} 个" in text
+
+
+def test_比例没填时说比例未填而不是显示零():
+    """0% 和「没填」是两回事：前者是「这个渠道不分钱」，后者是「资料缺了」。"""
+    detail = ReferralDetail(
+        record_id="rec1", no="R001", name="北极星资本", rate_percent=None, status=""
+    )
+    (block,) = components(cards.referral_list_card([detail]), "markdown")
+    assert "比例未填" in block["content"]
+
+
+def test_分割线就是裸的_hr():
+    """`hr` 是这套卡片里唯一没在真机上发过的组件，而它出现在每一张结果卡上。
+
+    形状对齐 SDK 自己的 `lark_oapi.channel.card.CardBuilder.divider()`：
+    它发的就是裸的 `{"tag": "hr"}`。加属性属于没必要的赌。
+    """
+    card = cards.with_menu(cards.success_card("成了", "正文"))
+    dividers = components(card, "hr")
+    assert dividers == [{"tag": "hr"}]

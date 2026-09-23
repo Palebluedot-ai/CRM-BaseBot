@@ -10,6 +10,11 @@
 
 另一条：open_id 只从 ``data.event.operator.open_id`` 取。这个值由飞书平台签发，
 客户端伪造不了。任何从 form_value 或消息文本里取身份的写法都是漏洞。
+
+**每一张结果卡都要过 ``cards.with_menu``。** 卡片回调的返回值是原地替换，做完一件事
+会话里就只剩一张没有按钮的结果卡，要做下一件只能重新打字。把菜单接在结果卡底部，
+下一轮入口就在原地。唯一的例外是鉴权失败那张 —— 名册里没有的人拿到一排按钮，
+点了还是同一句拒绝，不如不给。
 """
 
 from __future__ import annotations
@@ -113,11 +118,13 @@ class BotHandlers:
         try:
             return self._dispatch(action, sales, form)
         except (ValidationError, AuthError) as exc:
-            return _card_response(cards.error_card(str(exc)))
+            return _card_response(cards.with_menu(cards.error_card(str(exc))))
         except Exception:
             logger.exception("处理卡片动作 %s 失败", action)
             return _card_response(
-                cards.error_card("系统出错了，请稍后再试。管理员可以在服务端日志里看到详情。")
+                cards.with_menu(
+                    cards.error_card("系统出错了，请稍后再试。管理员可以在服务端日志里看到详情。")
+                )
             )
 
     def _dispatch(self, action, sales, form) -> P2CardActionTriggerResponse:
@@ -126,10 +133,15 @@ class BotHandlers:
 
         if action == cards.ACTION_OPEN_CLIENT_FORM:
             options = self._referrals.list_for(sales)
-            return _card_response(cards.client_form_card(options))
+            card = cards.client_form_card(options)
+            # 没有渠道时返回的是一张「还不能登记客户」的提示卡，不是表单 ——
+            # 那种情况下人接着就想点「登记新渠道」，菜单要在。
+            if not options:
+                card = cards.with_menu(card)
+            return _card_response(card)
 
         if action == cards.ACTION_LIST_REFERRALS:
-            return _card_response(cards.referral_list_card(self._referrals.list_for(sales)))
+            return _card_response(cards.with_menu(self._referral_list_card(sales)))
 
         if action == cards.ACTION_SUBMIT_REFERRAL:
             return self._submit_referral(sales, form)
@@ -144,7 +156,34 @@ class BotHandlers:
             return self._query_commission(sales, form)
 
         logger.warning("未知的卡片动作: %r", action)
-        return _card_response(cards.error_card("这个操作我不认识，请重新开始。"))
+        return _card_response(cards.with_menu(cards.error_card("这个操作我不认识，请重新开始。")))
+
+    def _referral_list_card(self, sales) -> dict[str, Any]:
+        """「我的渠道」：渠道清单 + 每个渠道名下的客户名。
+
+        两张表各扫一遍。客户那一遍只读名称和关联两列，而且只认已经鉴过权的那批
+        渠道 record_id —— 别的销售的客户不会漏出去。
+
+        客户表读不出来时**照样把渠道列出来**，只在末尾说明客户没取到。渠道清单本身
+        是有用的，为了一个附加信息把整张卡换成报错，是拿有用的东西去换没用的。
+        """
+        details = self._referrals.list_detail_for(sales)
+        if not details:
+            return cards.referral_list_card([])
+
+        try:
+            names = self._clients.names_by_referral({d.record_id for d in details})
+        except Exception:  # noqa: BLE001 - 见 docstring
+            logger.exception("读取渠道名下客户失败 open_id=%s", sales.open_id)
+            card = cards.referral_list_card(details)
+            card["body"]["elements"].append(
+                cards.footnote("客户名单这次没取到，上面的渠道和比例是准的。")
+            )
+            return card
+
+        for detail in details:
+            detail.client_names = names.get(detail.record_id, [])
+        return cards.referral_list_card(details)
 
     def _submit_referral(self, sales, form) -> P2CardActionTriggerResponse:
         # 输入框的标签就写着「分佣比例 (%)」，照着填「20%」是很自然的事。
@@ -176,11 +215,13 @@ class BotHandlers:
         )
 
         return _card_response(
-            cards.success_card(
-                "渠道已登记",
-                f"编号 **{referral_no}**，已生效。\n\n"
-                f"开始日期 {start_date.isoformat()}，结算频率 {payout_frequency}。\n\n"
-                "接下来可以把这个渠道介绍的客户登记进来。",
+            cards.with_menu(
+                cards.success_card(
+                    "渠道已登记",
+                    f"编号 **{referral_no}**，已生效。\n\n"
+                    f"开始日期 {start_date.isoformat()}，结算频率 {payout_frequency}。\n\n"
+                    f"分佣比例 {rate}%。",
+                )
             ),
             toast=f"已登记 {referral_no}",
         )
@@ -204,21 +245,28 @@ class BotHandlers:
             try:
                 self._clients.create(sales, client_input)
             except (ValidationError, AuthError) as exc:
-                self._send_to_user(target_open_id, cards.error_card(str(exc)))
+                self._send_to_user(target_open_id, cards.with_menu(cards.error_card(str(exc))))
                 return
             except Exception:
                 logger.exception("异步登记客户失败 open_id=%s", target_open_id)
                 self._send_to_user(
                     target_open_id,
-                    cards.error_card("系统出错了，请稍后再试。管理员可以在服务端日志里看到详情。"),
+                    cards.with_menu(
+                        cards.error_card(
+                            "系统出错了，请稍后再试。管理员可以在服务端日志里看到详情。"
+                        )
+                    ),
                 )
                 return
 
             self._send_to_user(
                 target_open_id,
-                cards.success_card(
-                    "客户已登记",
-                    "这个客户的交易会自动计入对应渠道的佣金。",
+                cards.with_menu(
+                    cards.success_card(
+                        "客户已登记",
+                        f"**{client_input.name}** 已挂到渠道 **{client_input.referral_no}**。\n\n"
+                        "这个客户的交易会自动计入对应渠道的佣金。",
+                    )
                 ),
             )
 
@@ -242,13 +290,17 @@ class BotHandlers:
         真发现慢，再改成异步：立即弹一张「加载中」的卡，后台读完月份后 push 新卡。
         """
         if self._commission_query is None:
-            return _card_response(cards.error_card("佣金查询功能未启用，请联系管理员。"))
+            return _card_response(
+                cards.with_menu(cards.error_card("佣金查询功能未启用，请联系管理员。"))
+            )
 
         try:
             latest = self._commission_query.latest_period()
         except Exception:  # noqa: BLE001 - 查询失败不该让整个卡片挂掉
             logger.exception("读取看板最新月份失败 open_id=%s", sales.open_id)
-            return _card_response(cards.error_card("读取月份列表失败，请稍后重试。"))
+            return _card_response(
+                cards.with_menu(cards.error_card("读取月份列表失败，请稍后重试。"))
+            )
 
         # 月份列表：优先给最近 12 个月，避免下拉太长
         options = _recent_months(latest, count=12) if latest else []
@@ -261,7 +313,9 @@ class BotHandlers:
         而服务端其实还在跑；异步能让人清楚看到「已提交」→ 独立结果卡。
         """
         if self._commission_query is None:
-            return _card_response(cards.error_card("佣金查询功能未启用，请联系管理员。"))
+            return _card_response(
+                cards.with_menu(cards.error_card("佣金查询功能未启用，请联系管理员。"))
+            )
 
         period = _form_text(form, cards.F_QUERY_PERIOD)
         if not _is_period(period):
@@ -279,13 +333,15 @@ class BotHandlers:
                 logger.exception("佣金查询失败 open_id=%s period=%s", target_open_id, period)
                 self._send_to_user(
                     target_open_id,
-                    cards.error_card("查询佣金明细失败，请稍后重试或联系管理员。"),
+                    cards.with_menu(cards.error_card("查询佣金明细失败，请稍后重试或联系管理员。")),
                 )
                 return
 
             body = summarize_commission(result, viewer_name=sales.name)
             title = f"佣金明细  {period}"
-            self._send_to_user(target_open_id, cards.commission_result_card(title, body))
+            self._send_to_user(
+                target_open_id, cards.with_menu(cards.commission_result_card(title, body))
+            )
 
         self._background(worker)
 

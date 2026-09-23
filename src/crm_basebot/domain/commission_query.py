@@ -64,6 +64,19 @@ class ReferralBreakdown:
         return sum((c.revenue for c in self.clients.values()), Decimal("0"))
 
     @property
+    def client_count(self) -> int:
+        return len(self.clients)
+
+    @property
+    def row_count(self) -> int:
+        """这个渠道这个月一共多少笔交易记录。
+
+        和客户数是两回事：一个客户一个月可能有几十笔。对账时「笔数对不上」
+        往往比「金额对不上」先被发现，所以两个都摆出来。
+        """
+        return sum(c.row_count for c in self.clients.values())
+
+    @property
     def gross_payable(self) -> Decimal:
         """按比例算出来的原始金额，可能是负（见 CommissionRow.gross_payable）。"""
         return (self.revenue_total * self.rate_percent / Decimal(100)).quantize(
@@ -106,6 +119,25 @@ class QueryResult:
     @property
     def total_payable(self) -> Decimal:
         return sum((r.payable for r in self.referrals), Decimal("0"))
+
+    @property
+    def referral_count(self) -> int:
+        return len(self.referrals)
+
+    @property
+    def client_count(self) -> int:
+        """去重后的客户数。
+
+        同一个 UID 理论上只挂一个渠道，但客户表被人手改过之后不保证 ——
+        按 UID 去重，免得「12 个客户」其实是同一个人数了两遍。
+        """
+        return len({uid for ref in self.referrals for uid in ref.clients})
+
+    @property
+    def revenue_total(self) -> Decimal:
+        """收入合计。**不做 max(0, ...) 保底** —— 保底是应付金额的规则，
+        收入该是多少就是多少，截成 0 会让人看不出这个月是负的。"""
+        return sum((r.revenue_total for r in self.referrals), Decimal("0"))
 
 
 class CommissionQueryService:
@@ -261,7 +293,12 @@ def summarize(result: QueryResult, *, viewer_name: str) -> str:
         )
 
     lines: list[str] = [
-        f"**{result.period}**  合计应付 **{result.total_payable:,.2f}** USD",
+        f"**{result.period}**",
+        f"合计应付  **{result.total_payable:,.2f}** USD",
+        # 三个总数摆在最上面：光有一个金额，看的人没法判断它合不合理。
+        # 「4 个渠道 12 个客户」少了一个就立刻看得出来，比逐行核对快得多。
+        f"{result.referral_count} 个渠道 · {result.client_count} 个客户 · "
+        f"收入合计 {result.revenue_total:,.2f}",
         "",
     ]
 
@@ -269,6 +306,10 @@ def summarize(result: QueryResult, *, viewer_name: str) -> str:
         lines.append(
             f"**{ref.referral_no}** {ref.referral_name or '(未命名)'}  "
             f"—— 应付 {ref.payable:,.2f} USD"
+        )
+        lines.append(
+            f"  小计：收入 {ref.revenue_total:,.2f} · "
+            f"{ref.client_count} 个客户 · {ref.row_count} 笔"
         )
         if ref.is_loss_month:
             lines.append(
