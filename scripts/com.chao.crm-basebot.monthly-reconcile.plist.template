@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  每月结算上个月的佣金，写进 Commission Summary 并通知管理员。
+  用 scripts/install-monthly-reconcile-launchd.sh 安装。
+
+  为什么是 3 号 10:00，不是 1 号：上个月最后一天的交易，内部系统那封邮件通常第二天
+  早上才发；每日导入 10:45 才跑第一趟。留两天缓冲，确保最后一天的收入已经进了看板，
+  否则结算快照会漏掉它，而快照一旦被人看过，改起来就不只是技术问题了。
+
+  10:00 在每日导入（10:45）之前 —— 这是有意的：3 号这天要结算的是上个月，
+  上个月的数据在 1 号和 2 号的导入里就已经全了，不依赖当天那一趟。
+
+  WorkingDirectory 必须是仓库根目录：Settings 读的是相对路径 .env。
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.chao.crm-basebot.monthly-reconcile</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__SCRIPT__</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__WORKDIR__</string>
+
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict>
+      <key>Day</key>
+      <integer>3</integer>
+      <key>Hour</key>
+      <integer>10</integer>
+      <key>Minute</key>
+      <integer>0</integer>
+    </dict>
+  </array>
+
+  <key>StandardOutPath</key>
+  <string>__LOGDIR__/monthly-reconcile-stdout.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__LOGDIR__/monthly-reconcile-stderr.log</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>LANG</key>
+    <string>en_US.UTF-8</string>
+    <!-- 只管日志时间戳和 launchd 的日历触发点；结算月份按 .env 的 BUSINESS_TIMEZONE 算 -->
+    <key>TZ</key>
+    <string>Asia/Hong_Kong</string>
+    <key>PATH</key>
+    <string>__PATH__</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+</dict>
+</plist>

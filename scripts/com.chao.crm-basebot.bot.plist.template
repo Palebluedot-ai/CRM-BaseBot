@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  让机器人常驻。用 scripts/install-bot-launchd.sh 安装，它会把 __XXX__ 占位符
+  替换成这台机器上的真实路径。
+
+  要防的是「进程不在」，不是「连接断了」——长连接断了 SDK 自己会无限重连
+  （docs/BOT.md 里有实测记录）。这个任务解决的是另外两件事：机器重启之后没人
+  把它拉起来，以及进程崩了之后没人发现。
+
+  WorkingDirectory 必须是仓库根目录：Settings 读的是相对路径 .env。
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.chao.crm-basebot.bot</string>
+
+  <!--
+    直接跑 venv 里的 python，中间不夹一层 bash：launchd 的 KeepAlive 盯的是它
+    自己拉起来的那个进程，少一层就少一个「壳还在、python 已经死了」的可能。
+    绝对路径由安装脚本在安装时解析好并写死 —— 缺 venv 要在安装那一刻就报错，
+    而不是变成一个每 30 秒重启一次的崩溃循环。
+  -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PYTHON__</string>
+    <string>-m</string>
+    <string>crm_basebot.app</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__WORKDIR__</string>
+
+  <!-- 开机 / 装上就起。 -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!--
+    崩了就拉起来。机器人自己退出在任何情况下都是不对的，所以这里是无条件的
+    true，不区分退出码。配 .env 配错会变成崩溃循环，ThrottleInterval 把它压到
+    30 秒一次（launchd 默认 10 秒），日志还是会涨，但涨得慢到人来得及看。
+  -->
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+
+  <!--
+    stdout 和 stderr 都进同一个 logs/bot.log —— 这不是图省事，是两个诊断脚本
+    各自要的东西分别在两条流上：
+
+      stdout：lark SDK 自己的 logger（[Lark] [时间] [INFO] connected to wss…），
+              bot_connectivity_report.py 的正则只认这种带方括号的格式。
+      stderr：app.py 里 logging.basicConfig 挂在 root 上的 handler，
+              「未登记的 open_id 尝试操作: ou_xxxx」这行在这边，
+              collect_open_ids.py 要的是它。
+
+    两个脚本的日志参数默认值都是 logs/bot.log，分成两个文件就得每次手工指两次。
+    launchd 两条流都是 O_APPEND 打开的，按行写不会互相截断。
+  -->
+  <key>StandardOutPath</key>
+  <string>__LOGDIR__/bot.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__LOGDIR__/bot.log</string>
+
+  <!--
+    卡片回调只有 3 秒预算。Interactive 是明确告诉 macOS 别把这个进程按后台任务
+    降频降 I/O —— 常驻几天不动的进程很容易被当成可以慢慢来的那种。
+  -->
+  <key>ProcessType</key>
+  <string>Interactive</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>LANG</key>
+    <string>en_US.UTF-8</string>
+    <!-- 只管日志时间戳；业务时区在 .env 的 BUSINESS_TIMEZONE -->
+    <key>TZ</key>
+    <string>Asia/Hong_Kong</string>
+    <key>PATH</key>
+    <string>__PATH__</string>
+    <!--
+      必须有。输出重定向到文件时 python 的 stdout 是块缓冲的，攒满 4-8KB 才落盘，
+      结果就是刚让销售发完消息、回头 tail 日志捞 open_id 却什么都看不到，
+      而人会以为是机器人没收到。
+    -->
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+</dict>
+</plist>
