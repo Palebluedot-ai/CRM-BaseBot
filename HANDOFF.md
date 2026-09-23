@@ -198,6 +198,21 @@ uv run python -m crm_basebot.app        # 机器人（长连接，不需要公�
 ./scripts/install-daily-import-launchd.sh                # 挂成每天 10:45 / 16:00
 ```
 
+另外两个常驻任务，装法一样（都会先预演、都能 `launchctl bootout` 回滚）：
+
+```bash
+./scripts/install-bot-launchd.sh                 # 机器人：开机自启 + 崩溃自动拉起
+./scripts/run-monthly-reconcile.sh --dry-run     # 先验月结：应该算出上个月的金额
+./scripts/install-monthly-reconcile-launchd.sh   # 每月 3 号 10:00 结算上月并私信管理员
+```
+
+⚠️ 机器人同时只能有一个进程 —— 两个进程拿同一对 App ID/Secret 连上去，飞书按集群处理，
+每条事件只投给其中一个，表现是「时灵时不灵」且日志里没有任何错误。装之前先确认没有
+手工起的进程（安装脚本会自己查一遍，有就拒绝装）。
+
+⚠️ 这三个都是**用户级**（`gui/$(id -u)`）任务：那个账号登出、或机器重启后停在登录界面，
+它们都不会自己起来。要真 7×24 得开自动登录或改成系统级 LaunchDaemon。
+
 ## 8. 出问题对照表
 
 | 现象 | 多半是 | 怎么办 |
@@ -208,6 +223,8 @@ uv run python -m crm_basebot.app        # 机器人（长连接，不需要公�
 | 行数对不上（源 N → 目标 M<N） | 某几条记录里有目标端不存在的字段/非法值，被接口整批拒了 | 看迁移报告里带 ⚠️ 的那行；把该表的 `--dry-run` 输出发给原主人 |
 | 机器人对谁都回「你还没有被登记为销售」 | 名册 OpenID 还空着 | 第 5 步 ① |
 | 机器人里「我的渠道」是空的 | 归属还没回填 | 第 5 步 ② |
+| 改了某条渠道的「负责销售」，机器人里还是原来那个人看得到 | `backfill_owners.py` 只动「归属为空」的行 | 先把那行的 `归属销售` 和 `登记人OpenID` 清空，再跑 `--apply` |
+| 重启机器后机器人没起来 | 用户级 launchd 任务要等那个账号登录 | `launchctl print gui/$(id -u)/com.chao.crm-basebot.bot \| grep state` |
 | 断线 / 收不到消息 | 网络或 DNS（长连接不补发断线期间的消息） | 看 `docs/BOT.md` 里「断线时间线」那一节的判读方式 |
 
 ## 9. 这套东西的设计要点（免得你误改）

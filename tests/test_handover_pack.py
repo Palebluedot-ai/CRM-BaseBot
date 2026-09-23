@@ -119,3 +119,31 @@ def test_没有env文件时报人话(monkeypatch, tmp_path):
     with pytest.raises(SystemExit) as exc:
         handover.main(argv)
     assert exc.value.code not in (0, None)
+
+
+# ---------- ③ 看板这一步的参数翻译 ----------
+#
+# 这三条钉的是同一个 bug：早先这里照搬前两步传了 --apply，于是 --apply 模式当场
+# SystemExit，而预演模式什么都不传、把看板真写进了 Base。两头都错，且预演那头
+# 不会报错，只会安静地写。
+
+
+def test_board_gets_dry_run_in_preview_mode():
+    board = _load("import_daily_board")
+    args = board.build_parser().parse_args(handover.board_argv(Path("看板.xlsx"), apply=False))
+    assert args.dry_run is True
+
+
+def test_board_gets_no_apply_when_writing():
+    board = _load("import_daily_board")
+    argv = handover.board_argv(Path("看板.xlsx"), apply=True)
+    assert "--apply" not in argv
+    args = board.build_parser().parse_args(argv)
+    assert args.dry_run is False
+
+
+def test_board_parser_really_rejects_apply():
+    """上面两条的前提：看板的 parser 确实不认 --apply。前提变了这条先红。"""
+    board = _load("import_daily_board")
+    with pytest.raises(SystemExit):
+        board.build_parser().parse_args(["--file", "x.xlsx", "--apply"])

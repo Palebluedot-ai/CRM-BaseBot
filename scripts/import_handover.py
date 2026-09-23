@@ -75,6 +75,18 @@ def find_file(directory: Path, names: tuple[str, ...]) -> Path | None:
     return None
 
 
+def board_argv(board: Path, *, apply: bool) -> list[str]:
+    """给 import_daily_board 的命令行参数。
+
+    **它的开关方向和前两步相反**：看板脚本默认写、用 ``--dry-run`` 预演，而
+    ``sync_base`` 和 ``import_registrations`` 默认预演、用 ``--apply`` 才写。
+    照搬前两步的写法会两头都错 —— ``--apply`` 会让看板的 argparse 以
+    「unrecognized arguments」当场退出，而预演时什么都不传，等于让「预演」
+    把看板真写进 Base。所以这一步单独翻译一次，并且由测试钉住。
+    """
+    return ["--file", str(board)] + ([] if apply else ["--dry-run"])
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="第一次把导出的 xlsx 全部导进目标 Base")
     parser.add_argument("--dir", default=".", help="放那两个 xlsx 的目录，默认当前目录")
@@ -167,9 +179,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # ③ 看板（按 UID 重建客户关联）
     board_module = _load_script("import_daily_board")
-    board_args = board_module.build_parser().parse_args(
-        ["--file", str(board)] + (["--apply"] if args.apply else [])
-    )
+    board_args = board_module.build_parser().parse_args(board_argv(board, apply=args.apply))
     if board_module.run(board_args, settings, bitable) != 0:
         print("\n看板这一步没成功。", file=sys.stderr)
         return 1

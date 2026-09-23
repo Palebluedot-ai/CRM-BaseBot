@@ -50,9 +50,17 @@ uv run python scripts/verify_numbering.py --probe   # 实测 R+3 位编号
 uv run python scripts/import_registrations.py --file "Template .xlsx"        # 渠道和客户从模板导入，先预演，加 --apply 真写
 uv run python scripts/import_daily_board.py --file 交易明细.xlsx --dry-run   # 生产：导入内部系统导出的交易明细，先预演
 uv run python scripts/import_daily_incremental.py --from-mail --dry-run      # 日常：邮件取数 + 只导新加坡站的新增交易日
-./scripts/install-daily-import-launchd.sh                                   # 挂成每天 10:45 / 16:00 自动跑
-uv run python -m crm_basebot.app            # 启动机器人
+uv run python scripts/import_client_directory.py --file 全量UID.xlsx         # 把全量 UID 导出做成 Base 里的客户名录（只读参考）
+uv run python scripts/backfill_client_uids.py --file 全量UID.xlsx            # 按客户名补客户表里空着的 UID，先预演，加 --apply 真写
+./scripts/install-daily-import-launchd.sh        # 挂成每天 10:45 / 16:00 自动导入
+./scripts/install-bot-launchd.sh                 # 机器人挂成常驻：开机自启、崩溃自动拉起
+./scripts/install-monthly-reconcile-launchd.sh   # 每月 3 号 10:00 结算上月并通知管理员
+uv run python -m crm_basebot.app            # 前台手动启动机器人（装了上面那个常驻任务就不用）
 ```
+
+⚠️ **机器人同时只能有一个进程**。两个进程拿同一对 App ID/Secret 连上去，飞书按集群处理，
+每条事件只投给其中一个 —— 表现是「时灵时不灵」，日志里什么错都没有。
+`install-bot-launchd.sh` 会在装之前检查有没有手工起的进程，有就拒绝安装。
 
 **为什么要造种子数据**：自建应用只能在同一个企业租户内使用，所以阶段 A 那个自建的免费
 组织，读不到公司的真实数据。而手工导出 CSV 再导进来是不行的 —— Excel
@@ -74,6 +82,12 @@ uv run python -m crm_basebot.jobs.reconcile --period 2026-03 --write --replace  
 不传 `--period` 时结算的是**日读看板里最新有数据的那个月**，不是「上个月」。写死上个月，月初跑的时候会算出一片空白，而它又恰好在「这个月的数据其实已经有了」的时候什么都不说。实际选中的月份一定会打印在输出第一行，不用猜。
 
 **重跑**：`--write` 遇到汇总表里已经有本次结算月份的行会拒绝，不会在旁边再写一套。数据改过要重算就加 `--replace`，先删那些月份的旧行再写新的；`--all-periods --replace` 清空整张汇总表。算出来是空的时候不会拿空结果顶掉旧汇总（2026-09-05 定的）。
+
+**月结不用人记得跑**：`./scripts/install-monthly-reconcile-launchd.sh` 每月 3 号 10:00 自动结算上个月，写完把「月份 / 渠道数 / 应付合计」私信给名册里的管理员。
+
+为什么是 3 号不是 1 号：上个月最后一天的交易，内部系统那封邮件通常第二天早上才发，而每日导入 10:45 才跑第一趟。1 号结算会漏掉最后一天，而汇总一旦写进去就是结算快照 —— 发现漏了要 `--replace` 重来，还得跟已经看过数字的人解释一遍。留两天缓冲便宜得多。
+
+同一个月跑第二次不会重复写：`reconcile` 本来就拒绝往已有数据的月份写，月结任务把那种拒绝当成正常结果（已经结算过了），照样发通知、退出码 0 —— 否则 launchd 每个月都报一次失败，久了就没人看了。
 
 **只看新加坡站**：看板只放「站点」是新加坡站的记录，导入时香港站、中东站的行直接丢掉（2026-09-17 定的）。筛的是站点列，不是销售分组。
 
