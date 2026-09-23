@@ -179,6 +179,55 @@ def test_只列出自己名下的渠道(service):
     assert [name for _, name in service.list_for(bob)] == ["Bob 的渠道"]
 
 
+def test_只能打开自己名下的渠道详情(service):
+    service.create(alice, _valid("Alice 的渠道"))
+    service.create(bob, _valid("Bob 的渠道"))
+
+    own = service.get_for(alice, "R001")
+    assert own is not None
+    assert own.no == "R001"
+    assert own.name == "Alice 的渠道"
+    assert own.rate == "20%"
+    assert own.start_date == START_DATE.isoformat()
+    assert own.payout == schema.PAYOUT_MONTHLY
+    assert own.status == schema.STATUS_ACTIVE
+    assert own.address == ""
+    assert own.payment == ""
+    assert service.get_for(alice, "R002") is None
+    assert service.get_for(alice, "R001 ") is not None
+
+
+def test_详情读出历史渠道的地址和收款信息(fake_bitable, service):
+    fake_bitable.table(TBL_REFERRAL).add_existing(
+        {
+            schema.REFERRAL_NO: "R050",
+            schema.REFERRAL_NAME: "老渠道",
+            schema.REFERRAL_OWNER_OPEN_ID: ALICE,
+            schema.REFERRAL_SALES_NAME: "Alice",
+            schema.REFERRAL_STATUS: schema.STATUS_ACTIVE,
+            schema.REFERRAL_EMAIL: "old@example.com",
+            schema.REFERRAL_RATE: 15,
+            schema.REFERRAL_PAYOUT: schema.PAYOUT_QUARTERLY,
+            schema.REFERRAL_START_DATE: date_to_ms(date(2024, 3, 1), tz=DEFAULT_BUSINESS_TIMEZONE),
+            schema.REFERRAL_SUBMITTED_ON: date_to_ms(
+                date(2024, 3, 2), tz=DEFAULT_BUSINESS_TIMEZONE
+            ),
+            schema.REFERRAL_ADDRESS: "香港中环",
+            schema.REFERRAL_PAYMENT: "USDT TRC20 abc",
+        }
+    )
+
+    detail = service.get_for(alice, "R050")
+    assert detail is not None
+    assert detail.address == "香港中环"
+    assert detail.payment == "USDT TRC20 abc"
+    assert detail.start_date == "2024-03-01"
+    assert detail.submitted_on == "2024-03-02"
+    assert detail.rate == "15%"
+    assert detail.sales_name == "Alice"
+    assert service.get_for(bob, "R050") is None
+
+
 # ---------- 校验 ----------
 
 

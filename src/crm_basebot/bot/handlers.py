@@ -111,7 +111,12 @@ class BotHandlers:
             return _card_response(cards.error_card(str(exc)))
 
         try:
-            return self._dispatch(action, sales, form)
+            return self._dispatch(
+                action,
+                sales,
+                form,
+                action_value if isinstance(action_value, dict) else {},
+            )
         except (ValidationError, AuthError) as exc:
             return _card_response(cards.error_card(str(exc)))
         except Exception:
@@ -120,7 +125,18 @@ class BotHandlers:
                 cards.error_card("系统出错了，请稍后再试。管理员可以在服务端日志里看到详情。")
             )
 
-    def _dispatch(self, action, sales, form) -> P2CardActionTriggerResponse:
+    def _dispatch(
+        self,
+        action,
+        sales,
+        form,
+        action_value: dict | None = None,
+    ) -> P2CardActionTriggerResponse:
+        action_value = action_value or {}
+
+        if action == cards.ACTION_OPEN_MENU:
+            return _card_response(cards.menu_card(sales.name))
+
         if action == cards.ACTION_OPEN_REFERRAL_FORM:
             return _card_response(cards.referral_form_card())
 
@@ -129,7 +145,32 @@ class BotHandlers:
             return _card_response(cards.client_form_card(options))
 
         if action == cards.ACTION_LIST_REFERRALS:
-            return _card_response(cards.referral_list_card(self._referrals.list_for(sales)))
+            return _card_response(
+                cards.referral_list_card(
+                    self._referrals.list_for(sales),
+                    page=_page_index(action_value),
+                )
+            )
+
+        if action == cards.ACTION_OPEN_REFERRAL:
+            detail = self._referrals.get_for(sales, _referral_no(action_value))
+            if detail is None:
+                return _card_response(cards.referral_missing_card())
+            return _card_response(
+                cards.referral_detail_card(
+                    no=detail.no,
+                    name=detail.name,
+                    status=detail.status,
+                    sales_name=detail.sales_name,
+                    start_date=detail.start_date,
+                    rate=detail.rate,
+                    payout=detail.payout,
+                    email=detail.email,
+                    submitted_on=detail.submitted_on,
+                    address=detail.address,
+                    payment=detail.payment,
+                )
+            )
 
         if action == cards.ACTION_SUBMIT_REFERRAL:
             return self._submit_referral(sales, form)
@@ -328,6 +369,23 @@ class BotHandlers:
         response = self._client.im.v1.message.create(request)
         if not response.success():
             logger.error("发送卡片失败: %s %s", response.code, response.msg)
+
+
+def _page_index(action_value: dict[str, Any]) -> int:
+    """翻页按钮带回的页码。不是非负整数就当第一页，别让回调因为一个坏页码炸成系统错误。"""
+    raw = action_value.get("page", 0)
+    if isinstance(raw, bool):
+        return 0
+    if isinstance(raw, int):
+        return raw if raw > 0 else 0
+    if isinstance(raw, str) and raw.isdigit():
+        return int(raw)
+    return 0
+
+
+def _referral_no(action_value: dict[str, Any]) -> str:
+    raw = action_value.get("referral_no")
+    return "" if raw is None else str(raw).strip()
 
 
 def _form_text(form: dict[str, Any], key: str) -> str:

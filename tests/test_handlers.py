@@ -167,6 +167,112 @@ def test_成功时带上_toast(handlers):
     assert "R001" in payload["toast"]["content"]
 
 
+def _card_buttons(payload: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    found = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            if node.get("tag") == "button":
+                (callback,) = [b for b in node["behaviors"] if b["type"] == "callback"]
+                found.append((node["text"]["content"], callback["value"]))
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(payload["card"]["data"])
+    return found
+
+
+def test_返回目录换回主菜单(handlers):
+    payload = marshalled(handlers.on_card_action(trigger(cards.ACTION_OPEN_MENU)))
+
+    assert "toast" not in payload
+    assert payload["card"]["data"]["header"]["title"]["content"] == "渠道佣金助手"
+    actions = {value["action"] for _, value in _card_buttons(payload)}
+    assert cards.ACTION_LIST_REFERRALS in actions
+    assert cards.ACTION_OPEN_MENU not in actions
+
+
+def test_渠道列表翻到第二页(handlers):
+    for index in range(9):
+        submit_referral(handlers, referral_form(**{cards.F_REFERRAL_NAME: f"渠道{index + 1}"}))
+
+    payload = marshalled(
+        handlers.on_card_action(
+            trigger(
+                cards.ACTION_LIST_REFERRALS,
+                value={"action": cards.ACTION_LIST_REFERRALS, "page": 1},
+            )
+        )
+    )
+    opened = [value["referral_no"] for _, value in _card_buttons(payload) if "referral_no" in value]
+    assert opened == ["R009"]
+    assert ("上一页", {"action": cards.ACTION_LIST_REFERRALS, "page": 0}) in _card_buttons(payload)
+
+
+def test_页码不是数字时回到第一页(handlers):
+    submit_referral(handlers)
+    payload = marshalled(
+        handlers.on_card_action(
+            trigger(
+                cards.ACTION_LIST_REFERRALS,
+                value={"action": cards.ACTION_LIST_REFERRALS, "page": "abc"},
+            )
+        )
+    )
+    assert payload["card"]["data"]["schema"] == "2.0"
+    opened = [value["referral_no"] for _, value in _card_buttons(payload) if "referral_no" in value]
+    assert opened == ["R001"]
+
+
+def test_点进自己的渠道看到特别信息(handlers):
+    submit_referral(handlers)
+    payload = marshalled(
+        handlers.on_card_action(
+            trigger(
+                "",
+                value={"action": cards.ACTION_OPEN_REFERRAL, "referral_no": "R001"},
+            )
+        )
+    )
+    card = payload["card"]["data"]
+    assert card["header"]["title"]["content"] == "北极星资本"
+    text = json.dumps(card, ensure_ascii=False)
+    assert "特别信息" in text
+    assert "地址：未填写" in text
+    assert "收款信息：未填写" in text
+    assert "分佣比例：20%" in text
+    assert ("返回列表", {"action": cards.ACTION_LIST_REFERRALS}) in _card_buttons(payload)
+
+
+def test_点进别人的渠道被拒绝(fake_bitable, handlers):
+    fake_bitable.table(TBL_REFERRAL).add_existing(
+        {
+            schema.REFERRAL_NO: "R099",
+            schema.REFERRAL_NAME: "别人的渠道",
+            schema.REFERRAL_OWNER_OPEN_ID: STRANGER,
+            schema.REFERRAL_ADDRESS: "不该被看到的地址",
+        }
+    )
+    payload = marshalled(
+        handlers.on_card_action(
+            trigger(
+                "",
+                value={"action": cards.ACTION_OPEN_REFERRAL, "referral_no": "R099"},
+            )
+        )
+    )
+    card = payload["card"]["data"]
+    text = json.dumps(card, ensure_ascii=False)
+    assert card["header"]["title"]["content"] == "找不到这个渠道"
+    assert "别人的渠道" not in text
+    assert "不该被看到的地址" not in text
+    actions = {value["action"] for _, value in _card_buttons(payload)}
+    assert actions == {cards.ACTION_LIST_REFERRALS, cards.ACTION_OPEN_MENU}
+
+
 def test_没有_toast_时不发空字段(handlers):
     """``toast: null`` 会被 SDK 的 filter_null 抹掉，这里钉住这个前提。"""
     payload = marshalled(handlers.on_card_action(trigger(cards.ACTION_LIST_REFERRALS)))

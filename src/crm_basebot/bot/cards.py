@@ -19,8 +19,13 @@ ACTION_OPEN_CLIENT_FORM = "open_client_form"
 ACTION_SUBMIT_REFERRAL = "submit_referral"
 ACTION_SUBMIT_CLIENT = "submit_client"
 ACTION_LIST_REFERRALS = "list_referrals"
+ACTION_OPEN_REFERRAL = "open_referral"
+ACTION_OPEN_MENU = "open_menu"
 ACTION_OPEN_COMMISSION_QUERY = "open_commission_query"
 ACTION_QUERY_COMMISSION = "query_commission"
+
+# 管理员名下能有上百条渠道。一页八条，卡片还放得下按钮，也不至于只露出前半段。
+REFERRAL_PAGE_SIZE = 8
 
 # 表单项标识，回调的 form_value 里用它取值
 F_REFERRAL_NAME = "referral_name"
@@ -115,15 +120,25 @@ PAYOUT_CHOICES: list[tuple[str, str]] = [
 ]
 
 
-def _menu_button(text: str, action: str, *, primary: bool = False) -> dict[str, Any]:
+def _callback_button(text: str, value: dict[str, Any], *, primary: bool = False) -> dict[str, Any]:
+    """表单外的按钮。``value`` 必须是对象，裸字符串飞书反序列化时会直接抛掉。"""
     return {
         "tag": "button",
         "text": {"tag": "plain_text", "content": text},
         "type": "primary" if primary else "default",
         "width": "fill",
         "margin": "0px 0px 8px 0px",
-        "behaviors": [{"type": "callback", "value": {"action": action}}],
+        "behaviors": [{"type": "callback", "value": value}],
     }
+
+
+def _menu_button(text: str, action: str, *, primary: bool = False) -> dict[str, Any]:
+    return _callback_button(text, {"action": action}, primary=primary)
+
+
+def _filled(value: str) -> str:
+    text = value.strip() if value else ""
+    return text if text else "未填写"
 
 
 def menu_card(sales_name: str) -> dict[str, Any]:
@@ -245,16 +260,150 @@ def error_card(body: str) -> dict[str, Any]:
     return notice_card("没能完成", body, template="red")
 
 
-def referral_list_card(items: list[tuple[str, str]]) -> dict[str, Any]:
-    if not items:
-        return notice_card("我的渠道", "你名下还没有登记任何渠道。")
+def _referral_button_label(no: str, name: str) -> str:
+    if name:
+        return f"{no} {name}".strip()
+    if no:
+        return f"{no}（未命名）"
+    return "（未命名）"
 
-    # 名字为空时留一个占位（比如 R006 是在 Base 里直接建的、渠道名称字段没填），
-    # 避免渲染成「- **R006** 」这种末尾一个空格、看着像 bug 的行。
-    lines = "\n".join(
-        f"- **{no}** {name if name else '（未命名，建议到 Base 里补齐）'}" for no, name in items
+
+def referral_list_card(items: list[tuple[str, str]], *, page: int = 0) -> dict[str, Any]:
+    """一页渠道，每条可点进详情，底部能回目录。
+
+    空列表也留「返回目录」。不然这张卡换掉目录之后，只能再发一句话才能回去。
+    """
+    back = _callback_button("返回目录", {"action": ACTION_OPEN_MENU})
+    if not items:
+        return {
+            "schema": "2.0",
+            "header": {
+                "title": {"tag": "plain_text", "content": "我的渠道"},
+                "template": "blue",
+            },
+            "body": {
+                "elements": [
+                    _text("你名下还没有登记任何渠道。"),
+                    back,
+                ]
+            },
+        }
+
+    page_size = REFERRAL_PAGE_SIZE
+    page_count = (len(items) + page_size - 1) // page_size
+    current = min(max(page, 0), page_count - 1)
+    start = current * page_size
+    elements: list[dict[str, Any]] = [
+        _text(f"共 {len(items)} 个，第 {current + 1}/{page_count} 页。点一条查看。"),
+    ]
+    for no, name in items[start : start + page_size]:
+        elements.append(
+            _callback_button(
+                _referral_button_label(no, name),
+                {"action": ACTION_OPEN_REFERRAL, "referral_no": no},
+            )
+        )
+    if current > 0:
+        elements.append(
+            _callback_button(
+                "上一页",
+                {"action": ACTION_LIST_REFERRALS, "page": current - 1},
+            )
+        )
+    if current + 1 < page_count:
+        elements.append(
+            _callback_button(
+                "下一页",
+                {"action": ACTION_LIST_REFERRALS, "page": current + 1},
+            )
+        )
+    elements.append(back)
+    return {
+        "schema": "2.0",
+        "header": {
+            "title": {"tag": "plain_text", "content": "我的渠道"},
+            "template": "blue",
+        },
+        "body": {"elements": elements},
+    }
+
+
+def referral_detail_card(
+    *,
+    no: str,
+    name: str,
+    status: str,
+    sales_name: str,
+    start_date: str,
+    rate: str,
+    payout: str,
+    email: str,
+    submitted_on: str,
+    address: str,
+    payment: str,
+) -> dict[str, Any]:
+    """只读。地址和收款信息登记表单不收，但历史行里有，单独放在「特别信息」。"""
+    title = name.strip() if name and name.strip() else (no.strip() or "渠道详情")
+    who = "\n".join(
+        [
+            "**是谁**",
+            f"编号：{_filled(no)}",
+            f"名称：{_filled(name)}",
+            f"状态：{_filled(status)}",
+            f"负责销售：{_filled(sales_name)}",
+        ]
     )
-    return notice_card("我的渠道", f"共 {len(items)} 个：\n\n{lines}", template="blue")
+    terms = "\n".join(
+        [
+            "**怎么分**",
+            f"开始日期：{_filled(start_date)}",
+            f"分佣比例：{_filled(rate)}",
+            f"结算频率：{_filled(payout)}",
+            f"邮箱：{_filled(email)}",
+            f"提交日期：{_filled(submitted_on)}",
+        ]
+    )
+    special = "\n".join(
+        [
+            "**特别信息**",
+            f"地址：{_filled(address)}",
+            f"收款信息：{_filled(payment)}",
+        ]
+    )
+    return {
+        "schema": "2.0",
+        "header": {
+            "title": {"tag": "plain_text", "content": title},
+            "template": "blue",
+        },
+        "body": {
+            "elements": [
+                _text(who),
+                _text(terms),
+                _text(special),
+                _callback_button("返回列表", {"action": ACTION_LIST_REFERRALS}),
+                _callback_button("返回目录", {"action": ACTION_OPEN_MENU}),
+            ]
+        },
+    }
+
+
+def referral_missing_card() -> dict[str, Any]:
+    """编号不存在，或不在当前这个人名下。不走共用的 error_card，否则回不去。"""
+    return {
+        "schema": "2.0",
+        "header": {
+            "title": {"tag": "plain_text", "content": "找不到这个渠道"},
+            "template": "red",
+        },
+        "body": {
+            "elements": [
+                _text("这个编号不存在，或者不在你名下。"),
+                _callback_button("返回列表", {"action": ACTION_LIST_REFERRALS}),
+                _callback_button("返回目录", {"action": ACTION_OPEN_MENU}),
+            ]
+        },
+    }
 
 
 def commission_query_card(default_period: str, period_options: list[str]) -> dict[str, Any]:

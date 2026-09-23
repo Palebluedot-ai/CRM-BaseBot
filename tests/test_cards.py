@@ -80,6 +80,23 @@ def all_cards() -> list[tuple[str, dict[str, Any]]]:
         ("error_card", cards.error_card("出错了")),
         ("referral_list_card", cards.referral_list_card(REFERRAL_OPTIONS)),
         ("referral_list_card_空", cards.referral_list_card([])),
+        (
+            "referral_detail_card",
+            cards.referral_detail_card(
+                no="R001",
+                name="北极星资本",
+                status="生效",
+                sales_name="Alice",
+                start_date="2026-01-15",
+                rate="20%",
+                payout="Monthly",
+                email="a@b.com",
+                submitted_on="2026-01-16",
+                address="",
+                payment="",
+            ),
+        ),
+        ("referral_missing_card", cards.referral_missing_card()),
     ]
 
 
@@ -309,6 +326,111 @@ def test_结算频率下拉的取值是模板原文():
 
 
 # ---------- 主菜单 ----------
+
+
+def _button_callbacks(card: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    found = []
+    for button in components(card, "button"):
+        (callback,) = [b for b in button["behaviors"] if b["type"] == "callback"]
+        found.append((button["text"]["content"], callback["value"]))
+    return found
+
+
+def test_渠道列表每条可点且底部能回目录():
+    """列表不再是一段点不了的文本。每条渠道一个按钮，底部能回目录，不靠再发一条消息。"""
+    card = cards.referral_list_card(REFERRAL_OPTIONS)
+    assert components(card, "form") == []
+
+    callbacks = _button_callbacks(card)
+    assert (
+        "R001 北极星资本",
+        {"action": cards.ACTION_OPEN_REFERRAL, "referral_no": "R001"},
+    ) in callbacks
+    assert (
+        "R002 鲸落数字",
+        {"action": cards.ACTION_OPEN_REFERRAL, "referral_no": "R002"},
+    ) in callbacks
+    assert ("返回目录", {"action": cards.ACTION_OPEN_MENU}) in callbacks
+
+
+def test_渠道列表按八条一页切开():
+    items = [(f"R{i:03d}", f"渠道{i}") for i in range(1, 11)]
+
+    first = _button_callbacks(cards.referral_list_card(items, page=0))
+    first_nos = [value["referral_no"] for _, value in first if "referral_no" in value]
+    assert first_nos == [f"R{i:03d}" for i in range(1, 9)]
+    assert ("下一页", {"action": cards.ACTION_LIST_REFERRALS, "page": 1}) in first
+    assert all(value.get("page") != 0 for _, value in first)
+
+    second = _button_callbacks(cards.referral_list_card(items, page=1))
+    second_nos = [value["referral_no"] for _, value in second if "referral_no" in value]
+    assert second_nos == ["R009", "R010"]
+    assert ("上一页", {"action": cards.ACTION_LIST_REFERRALS, "page": 0}) in second
+    assert all(text != "下一页" for text, _ in second)
+
+    # 页码超出最后一页时停在最后一页，而不是给一张空卡
+    clamped = _button_callbacks(cards.referral_list_card(items, page=99))
+    assert [value["referral_no"] for _, value in clamped if "referral_no" in value] == second_nos
+
+
+def test_空渠道列表也能回目录():
+    card = cards.referral_list_card([])
+    assert components(card, "form") == []
+    assert _button_callbacks(card) == [("返回目录", {"action": cards.ACTION_OPEN_MENU})]
+    text = "\n".join(node["content"] for node in components(card, "markdown"))
+    assert "还没有" in text
+
+
+def test_未命名渠道的按钮不留空尾巴():
+    callbacks = _button_callbacks(cards.referral_list_card([("R006", "")]))
+    assert (
+        "R006（未命名）",
+        {"action": cards.ACTION_OPEN_REFERRAL, "referral_no": "R006"},
+    ) in callbacks
+
+
+def test_渠道详情把特别信息和空值分开():
+    card = cards.referral_detail_card(
+        no="R001",
+        name="北极星资本",
+        status="生效",
+        sales_name="Alice",
+        start_date="2026-01-15",
+        rate="20%",
+        payout="Monthly",
+        email="a@b.com",
+        submitted_on="2026-01-16",
+        address="",
+        payment="USDT TRC20 abc",
+    )
+    text = "\n".join(node["content"] for node in components(card, "markdown"))
+    assert "**是谁**" in text
+    assert "**怎么分**" in text
+    assert "**特别信息**" in text
+    assert "编号：R001" in text
+    assert "分佣比例：20%" in text
+    assert "地址：未填写" in text
+    assert "收款信息：USDT TRC20 abc" in text
+
+    assert _button_callbacks(card) == [
+        ("返回列表", {"action": cards.ACTION_LIST_REFERRALS}),
+        ("返回目录", {"action": cards.ACTION_OPEN_MENU}),
+    ]
+    assert components(card, "form") == []
+
+
+def test_提示卡和结果卡不加返回目录():
+    """返回目录只加在渠道列表和详情上。共用的提示卡一加，查询中和登记结果也会多一个按钮。"""
+    untouched = [
+        cards.notice_card("标题", "正文"),
+        cards.success_card("成了", "正文"),
+        cards.error_card("出错了"),
+        cards.commission_result_card("佣金明细", "正文"),
+        cards.menu_card("张三"),
+    ]
+    for card in untouched:
+        actions = {value["action"] for _, value in _button_callbacks(card)}
+        assert cards.ACTION_OPEN_MENU not in actions
 
 
 def test_主菜单按钮都带回调且不在表单里():

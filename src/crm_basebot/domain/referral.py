@@ -22,7 +22,7 @@ from ..lark.bitable import _WRITE_LOCK, BitableClient
 from ..lark.values import extract_text
 from . import schema
 from .audit import ACTION_CREATE_REFERRAL, AuditLog
-from .dates import DEFAULT_BUSINESS_TIMEZONE, date_to_ms, today_in
+from .dates import DEFAULT_BUSINESS_TIMEZONE, date_to_ms, ms_to_date, today_in
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,23 @@ REFERRAL_NO_PATTERN = re.compile(r"^R(\d+)$")
 
 class ValidationError(ValueError):
     """销售填的内容不合法。"""
+
+
+@dataclass(frozen=True)
+class ReferralDetail:
+    """一条渠道拿给卡片展示的只读内容。空字符串表示这一列没填。"""
+
+    no: str
+    name: str
+    status: str
+    sales_name: str
+    start_date: str
+    rate: str
+    payout: str
+    email: str
+    submitted_on: str
+    address: str
+    payment: str
 
 
 @dataclass(frozen=True)
@@ -270,3 +287,67 @@ class ReferralService:
             )
         result.sort()
         return result
+
+    def get_for(self, sales: Sales, referral_no: str) -> ReferralDetail | None:
+        """按编号取该销售名下的一条渠道。不在名下、或没有这个编号，返回 None。
+
+        编号来自按钮回传，客户端改得了，所以这里不单独写一套权限判断，
+        先过 ``owned_records`` 再按编号对。
+        """
+        from ..bot.auth import owned_records
+
+        wanted = referral_no.strip()
+        if not wanted:
+            return None
+
+        records = self._bitable.iter_records(self._table_id)
+        for record in owned_records(sales, records, schema.REFERRAL_OWNER_OPEN_ID):
+            fields = record.fields
+            if extract_text(fields.get(schema.REFERRAL_NO)) != wanted:
+                continue
+            return ReferralDetail(
+                no=wanted,
+                name=extract_text(fields.get(schema.REFERRAL_NAME)),
+                status=extract_text(fields.get(schema.REFERRAL_STATUS)),
+                sales_name=extract_text(fields.get(schema.REFERRAL_SALES_NAME)),
+                start_date=_format_day(fields.get(schema.REFERRAL_START_DATE), tz=self._tz),
+                rate=_format_rate(fields.get(schema.REFERRAL_RATE)),
+                payout=extract_text(fields.get(schema.REFERRAL_PAYOUT)),
+                email=extract_text(fields.get(schema.REFERRAL_EMAIL)),
+                submitted_on=_format_day(fields.get(schema.REFERRAL_SUBMITTED_ON), tz=self._tz),
+                address=extract_text(fields.get(schema.REFERRAL_ADDRESS)),
+                payment=extract_text(fields.get(schema.REFERRAL_PAYMENT)),
+            )
+        return None
+
+
+_ISO_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _format_rate(value: object) -> str:
+    text = extract_text(value)
+    if not text:
+        return ""
+    try:
+        number = float(text)
+    except ValueError:
+        return text
+    if number == int(number):
+        return f"{int(number)}%"
+    return f"{number:g}%"
+
+
+def _format_day(value: object, *, tz: tzinfo) -> str:
+    """日期列可能是毫秒时间戳，也可能已经是 YYYY-MM-DD。空的返回空字符串。"""
+    if isinstance(value, date):
+        return value.isoformat()
+    text = extract_text(value)
+    if not text:
+        return ""
+    if _ISO_DAY.match(text):
+        return text
+    try:
+        ms = int(float(text))
+    except ValueError:
+        return text
+    return ms_to_date(ms, tz=tz).isoformat()

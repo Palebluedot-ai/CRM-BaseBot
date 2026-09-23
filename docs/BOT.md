@@ -20,7 +20,7 @@
 |---|---|---|---|
 | 登记新渠道 | `open_referral_form` | Referral Information 一行 | 名称、邮箱、开始日期、分佣比例、结算频率 |
 | 登记新客户 | `open_client_form` | Referred Client 一行 | 先选自己名下的渠道，再填客户UID + 名称 |
-| 我的渠道 | `list_referrals` | 只读 | 列出本人名下渠道（管理员看全部） |
+| 我的渠道 | `list_referrals` | 只读 | 分页列出本人名下渠道（管理员看全部），可点进详情；详情底部可回目录 |
 | 佣金查询 | `open_commission_query` | 只读 | 选月份，读看板算本人名下各渠道应付佣金 |
 
 ### 身份与归属：两条铁律
