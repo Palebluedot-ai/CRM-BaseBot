@@ -1,5 +1,8 @@
 #!/usr/bin/env python
-"""每月结算：把上个月的佣金汇总写进 Commission Summary，然后把结果发给管理员。
+"""每月结算：把上个月的**交易**佣金汇总写进 Commission Summary，然后把结果发给管理员。
+
+ECAS 开户返佣不在这里 —— 那是另一套账，见 ``crm_basebot.jobs.ecas_reconcile``
+和 ``docs/ECAS.md``。两边的金额是同一个量级，所以卡片上会写明这个数只含交易佣金。
 
     uv run python scripts/monthly_reconcile.py                      # 预演：算上个月，不写不发
     uv run python scripts/monthly_reconcile.py --apply               # 写 + 通知
@@ -121,17 +124,20 @@ def send_card(client, open_id: str, card: dict) -> bool:
 
 def build_card(period: str, count: int, total: float, *, already: bool, unmapped: str) -> dict:
     lines = [
-        f"**{period}** 佣金结算"
+        f"**{period}** 交易佣金结算"
         + ("（本月之前已经结算过，这次没有重复写入）" if already else "已写入 Commission Summary"),
         "",
         f"渠道数：**{count}**",
         f"应付合计：**{total:,.2f} USD**",
+        # 这一句不是客套。ECAS 开户返佣是另一套账、另一张汇总表（见 docs/ECAS.md），
+        # 金额和这里同一个量级。不写明的话，看卡片的人会把这个数当成「这个月一共要付多少」，
+        # 照着它开票就会漏掉 ECAS 那一半。
+        "（只含交易佣金，**不含 ECAS 开户返佣** —— 那部分在 ECAS Commission Summary）",
     ]
     if unmapped:
         lines += [
             "",
-            f"另有 {unmapped} 个客户在看板里有收入但没登记归属渠道，"
-            "这部分**没有**计入上面的金额。",
+            f"另有 {unmapped} 个客户在看板里有收入但没登记归属渠道，这部分**没有**计入上面的金额。",
         ]
     lines += ["", "开发票前请在 Base 的 Commission Summary 里核对一遍。"]
     return cards.notice_card(

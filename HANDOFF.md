@@ -235,8 +235,13 @@ uv run python -m crm_basebot.app        # 机器人（长连接，不需要公�
 - **关联一律按业务键**：客户 ↔ 渠道用「渠道编号」，看板 → 客户用「客户UID」。
   **不要**按姓名匹配（大小写/last-first 颠倒会错，原主人踩过）。
 - **每天的导入是增量**：只写看板还没有的交易日，整天替换；`--max-days`（默认 5）是防呆闸门。
+- **ECAS 是另一套账**：`ECAS Applications` / `ECAS Commission Summary` 和上面这条链路
+  没有任何数据往来。同一个渠道两边的比例可以不一样，同一个客户两边各付一次，所以
+  ECAS 的比例逐行来自 ECAS 数据，**永远不从渠道表取**。月结卡片上写明了「不含 ECAS」，
+  改文案前先看 `docs/ECAS.md`。
 - 更细的背景：`README.md`、`docs/PIPELINE.md`（每日管线）、`docs/BOT.md`（机器人现状与缺口）、
-  `docs/MIGRATION.md`（迁移细节与两种走法）、`docs/SCHEMA.md`（表结构）、`docs/DASHBOARD.md`（仪表盘）。
+  `docs/MIGRATION.md`（迁移细节与两种走法）、`docs/SCHEMA.md`（表结构）、`docs/DASHBOARD.md`（仪表盘）、
+  `docs/ECAS.md`（ECAS 开户返佣）。
 
 ## 10. 别做的事
 

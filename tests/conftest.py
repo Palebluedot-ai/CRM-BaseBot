@@ -148,6 +148,9 @@ TBL_AUDIT = "tblAudit"
 TBL_SALES = "tblSales"
 TBL_BOARD = "tblBoard"
 TBL_COMMISSION = "tblCommission"
+# ECAS 那两张表。和上面几张没有数据往来，只是住在同一个假 Base 里。
+TBL_ECAS = "tblEcas"
+TBL_ECAS_COMMISSION = "tblEcasCommission"
 
 
 @pytest.fixture
@@ -159,4 +162,6 @@ def fake_bitable():
     bitable.tables[TBL_SALES] = FakeTable()
     bitable.tables[TBL_BOARD] = FakeTable()
     bitable.tables[TBL_COMMISSION] = FakeTable()
+    bitable.tables[TBL_ECAS] = FakeTable()
+    bitable.tables[TBL_ECAS_COMMISSION] = FakeTable()
     return bitable

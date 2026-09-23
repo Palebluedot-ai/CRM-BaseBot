@@ -18,6 +18,21 @@ Daily Revenue Board ──用户ID──► Referred Client ──关联──�
 2026-09-17 起看板表头以真实导出为准，这一列的名字多了「+合约」；合约两列目前全是 0，算出来的钱不变。
 `max(0, ...)` 保底条款保留（见表 4）。
 
+另外还有**第二套账**住在同一个 Base 里，和上面这条链路没有任何数据往来：
+
+```
+ECAS Applications ──关联（只取编号和名字）──► Referral Information
+   (脚本从 ECAS xlsx 导入)
+        │
+   ECAS金额 × 这一行自己的分佣比例，按月聚合
+        ▼
+ECAS Commission Summary
+```
+
+同一个渠道两边的比例**可以不一样**，同一个客户两边**各付一次**。所以 ECAS 的比例
+逐行来自 ECAS 数据，永远不从「表 1」的分佣比例取 —— 关联过去只为了拿编号和名字。
+完整说明见 [ECAS.md](ECAS.md)，表 7 / 表 8 也在那里。
+
 ## 表 1：Referral Information（渠道登记）
 
 列对齐 2026-09-17 给的模板「Referral Registration」，现成的 101 个渠道由 `scripts/import_registrations.py` 导入，重复跑只更新不重复。
@@ -217,5 +232,8 @@ uv run python scripts/sync_base.py --apply # 执行
 ```
 
 `sync_base.py` 只增不改不删：缺的表和字段会补，已存在但类型不符的只报告给你决定，多出来的一概不碰。
+
+ECAS 那两张表**不由 `sync_base.py` 管**（两套账，各建各的）。它们由
+`scripts/import_ecas.py --apply` 一并建出来并回填 `.env`，见 [ECAS.md](ECAS.md)。
 
 结构建好之后，开发租户还需要一套测试数据才能验证对账，见 [LARK_APP_SETUP.md 第 10 步](LARK_APP_SETUP.md#第-10-步造种子数据)。

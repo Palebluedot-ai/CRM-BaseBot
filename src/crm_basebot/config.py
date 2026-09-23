@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     table_audit: str = Field(default="", alias="TABLE_AUDIT")
     table_sales: str = Field(default="", alias="TABLE_SALES")
 
+    # ECAS 开户返佣那两张表。和上面几张**没有**数据上的往来，只是住在同一个 Base 里。
+    # 由 scripts/import_ecas.py 建出来并回填到 .env，不用手抄。
+    table_ecas: str = Field(default="", alias="TABLE_ECAS")
+    table_ecas_commission: str = Field(default="", alias="TABLE_ECAS_COMMISSION")
+
     # 日读看板 xlsx 的默认路径。import_daily_board.py 支持 --file 覆盖。
     daily_board_xlsx: str = Field(default="", alias="DAILY_BOARD_XLSX")
 

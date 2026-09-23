@@ -111,6 +111,7 @@ uv run python -m crm_basebot.jobs.reconcile --period 2026-03 --write --replace  
 | [docs/OPENID_ONBOARDING.md](docs/OPENID_ONBOARDING.md) | **OpenID 登记规程**：每位销售 / 每换一个 Bot 都要走一遍（永久保留） |
 | [HANDOFF.html](HANDOFF.html) | 接手手册的浏览器版（人+机器都读） |
 | [docs/DASHBOARD.md](docs/DASHBOARD.md) | 按月佣金仪表盘怎么搭（界面步骤），佣金几列怎么算 |
+| [docs/ECAS.md](docs/ECAS.md) | **ECAS 开户返佣**：和交易佣金并行的第二套账，两边互不相干 |
 
 ## 三个必须知道的坑
 
