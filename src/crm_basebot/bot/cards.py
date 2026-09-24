@@ -26,8 +26,10 @@ ACTION_QUERY_COMMISSION = "query_commission"
 ACTION_OPEN_ECAS_QUERY = "open_ecas_query"
 ACTION_QUERY_ECAS = "query_ecas"
 
-# 管理员名下能有上百条渠道。一页八条，卡片还放得下按钮，也不至于只露出前半段。
-REFERRAL_PAGE_SIZE = 8
+# 管理员名下能有上百条渠道。一页八条要翻十三次，翻页本身比看渠道还累（2026-09-24 反馈）。
+# 现在一页六十条：101 个渠道正好两页，卡片长但滑一下就到底，比翻页快得多。
+# 不做成无限长是因为卡片 JSON 有大小上限，六十个按钮约 15KB，留足余量。
+REFERRAL_PAGE_SIZE = 60
 
 # 表单项标识，回调的 form_value 里用它取值
 F_REFERRAL_NAME = "referral_name"
@@ -123,14 +125,24 @@ PAYOUT_CHOICES: list[tuple[str, str]] = [
 ]
 
 
-def _callback_button(text: str, value: dict[str, Any], *, primary: bool = False) -> dict[str, Any]:
-    """表单外的按钮。``value`` 必须是对象，裸字符串飞书反序列化时会直接抛掉。"""
+def _callback_button(
+    text: str,
+    value: dict[str, Any],
+    *,
+    primary: bool = False,
+    margin: str = "0px 0px 8px 0px",
+) -> dict[str, Any]:
+    """表单外的按钮。``value`` 必须是对象，裸字符串飞书反序列化时会直接抛掉。
+
+    ``margin`` 给 ``"0px"`` 就是紧贴上一个按钮。渠道列表用它排成一整条，
+    六十个按钮之间各留 8px 的话，光间距就多出快五百像素（2026-09-24 反馈）。
+    """
     return {
         "tag": "button",
         "text": {"tag": "plain_text", "content": text},
         "type": "primary" if primary else "default",
         "width": "fill",
-        "margin": "0px 0px 8px 0px",
+        "margin": margin,
         "behaviors": [{"type": "callback", "value": value}],
     }
 
@@ -349,13 +361,18 @@ def referral_list_card(items: list[tuple[str, str]], *, page: int = 0) -> dict[s
     current = min(max(page, 0), page_count - 1)
     start = current * page_size
     elements: list[dict[str, Any]] = [
-        _text(f"共 {len(items)} 个，第 {current + 1}/{page_count} 页。点一条查看。"),
+        _text(
+            f"共 {len(items)} 个，点一条查看。"
+            + (f"第 {current + 1}/{page_count} 页。" if page_count > 1 else "")
+        ),
     ]
     for no, name in items[start : start + page_size]:
         elements.append(
             _callback_button(
                 _referral_button_label(no, name),
                 {"action": ACTION_OPEN_REFERRAL, "referral_no": no},
+                # 紧贴上一个：这一列是一整条名单，不是一堆各自独立的按钮
+                margin="0px",
             )
         )
     if current > 0:
@@ -383,6 +400,15 @@ def referral_list_card(items: list[tuple[str, str]], *, page: int = 0) -> dict[s
     }
 
 
+# 详情卡里最多列几个客户名。超过就折叠 —— 客户多的渠道会把卡片撑到要滑很久，
+# 而这张卡是「这条渠道最近怎么样」，不是客户名册。
+MAX_CLIENTS_SHOWN = 15
+
+
+def _money(value: Any) -> str:
+    return "—" if value is None else f"{value:,.2f}"
+
+
 def referral_detail_card(
     *,
     no: str,
@@ -396,50 +422,73 @@ def referral_detail_card(
     submitted_on: str,
     address: str,
     payment: str,
+    recent_fees: list[Any] | None = None,
+    client_names: list[str] | None = None,
+    history_failed: bool = False,
 ) -> dict[str, Any]:
-    """只读。地址和收款信息登记表单不收，但历史行里有，单独放在「特别信息」。"""
+    """只读。
+
+    **顺序是「先钱，后资料」**（2026-09-24 反馈）：点进一条渠道，第一眼要看的是它最近
+    挣了多少、带了哪些客户；编号邮箱地址那些是查证用的，往下挪但不删 —— 开发票时
+    收款信息还是得查得到。
+
+    ``recent_fees`` 是 ``domain.referral_history.MonthlyFee``。给 None 表示调用方没取
+    （或者取失败，见 ``history_failed``）—— 那一节整个不显示，而不是显示一片空的：
+    「这几个月没赚钱」和「这次没查到」不能长成一样。
+    """
     title = name.strip() if name and name.strip() else (no.strip() or "渠道详情")
-    who = "\n".join(
-        [
-            "**是谁**",
-            f"编号：{_filled(no)}",
-            f"名称：{_filled(name)}",
-            f"状态：{_filled(status)}",
-            f"负责销售：{_filled(sales_name)}",
-        ]
+    elements: list[dict[str, Any]] = []
+
+    if history_failed:
+        elements.append(_text("**近几个月**\n这次没查到，Base 那边没读回来。下面的资料是准的。"))
+    elif recent_fees:
+        lines = ["**近 3 个月**"]
+        for fee in recent_fees:
+            lines.append(f"{fee.period}　交易 {_money(fee.trade)}　ECAS {_money(fee.ecas)}")
+        if all(fee.is_empty for fee in recent_fees):
+            # 三个月全是「—」时说一句。空表和「确实没有」在这张卡上长得一样，
+            # 而前者通常意味着那几个月还没跑对账。
+            lines.append("<font color='grey'>这几个月还没有结算记录。</font>")
+        elements.append(_text("\n".join(lines)))
+
+    if client_names is not None:
+        lines = [f"**客户（{len(client_names)}）**"]
+        if not client_names:
+            lines.append("还没有登记客户。")
+        for client in client_names[:MAX_CLIENTS_SHOWN]:
+            lines.append(f"· {client or '（未命名客户）'}")
+        hidden = len(client_names) - MAX_CLIENTS_SHOWN
+        if hidden > 0:
+            lines.append(f"<font color='grey'>…… 还有 {hidden} 个，完整名单在 Base 里</font>")
+        elements.append(_text("\n".join(lines)))
+
+    elements.append(
+        _text(
+            "**是谁**\n"
+            f"编号：{_filled(no)}　状态：{_filled(status)}\n"
+            f"负责销售：{_filled(sales_name)}"
+        )
     )
-    terms = "\n".join(
-        [
-            "**怎么分**",
-            f"开始日期：{_filled(start_date)}",
-            f"分佣比例：{_filled(rate)}",
-            f"结算频率：{_filled(payout)}",
-            f"邮箱：{_filled(email)}",
-            f"提交日期：{_filled(submitted_on)}",
-        ]
+    elements.append(
+        _text(
+            "**怎么分**\n"
+            f"开始日期：{_filled(start_date)}　分佣比例：{_filled(rate)}\n"
+            f"结算频率：{_filled(payout)}　邮箱：{_filled(email)}\n"
+            f"提交日期：{_filled(submitted_on)}"
+        )
     )
-    special = "\n".join(
-        [
-            "**特别信息**",
-            f"地址：{_filled(address)}",
-            f"收款信息：{_filled(payment)}",
-        ]
-    )
+    # 地址和收款信息登记表单不收，但历史行里有。开发票要用，所以留着，只是排在最后。
+    elements.append(_text(f"**特别信息**\n地址：{_filled(address)}\n收款信息：{_filled(payment)}"))
+    elements.append(_callback_button("返回列表", {"action": ACTION_LIST_REFERRALS}))
+    elements.append(_callback_button("返回目录", {"action": ACTION_OPEN_MENU}))
+
     return {
         "schema": "2.0",
         "header": {
             "title": {"tag": "plain_text", "content": title},
             "template": "blue",
         },
-        "body": {
-            "elements": [
-                _text(who),
-                _text(terms),
-                _text(special),
-                _callback_button("返回列表", {"action": ACTION_LIST_REFERRALS}),
-                _callback_button("返回目录", {"action": ACTION_OPEN_MENU}),
-            ]
-        },
+        "body": {"elements": elements},
     }
 
 

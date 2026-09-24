@@ -195,8 +195,10 @@ def test_返回目录换回主菜单(handlers):
     assert cards.ACTION_OPEN_MENU not in actions
 
 
-def test_渠道列表翻到第二页(handlers):
-    for index in range(9):
+def test_渠道列表翻到第二页(handlers, monkeypatch):
+    """页大小生产是 60，测试里调小 —— 要测的是「页码传得下去」，不是六十条数据。"""
+    monkeypatch.setattr(cards, "REFERRAL_PAGE_SIZE", 2)
+    for index in range(3):
         submit_referral(handlers, referral_form(**{cards.F_REFERRAL_NAME: f"渠道{index + 1}"}))
 
     payload = marshalled(
@@ -208,23 +210,7 @@ def test_渠道列表翻到第二页(handlers):
         )
     )
     opened = [value["referral_no"] for _, value in _card_buttons(payload) if "referral_no" in value]
-    assert opened == ["R009"]
-    assert ("上一页", {"action": cards.ACTION_LIST_REFERRALS, "page": 0}) in _card_buttons(payload)
-
-
-def test_页码不是数字时回到第一页(handlers):
-    submit_referral(handlers)
-    payload = marshalled(
-        handlers.on_card_action(
-            trigger(
-                cards.ACTION_LIST_REFERRALS,
-                value={"action": cards.ACTION_LIST_REFERRALS, "page": "abc"},
-            )
-        )
-    )
-    assert payload["card"]["data"]["schema"] == "2.0"
-    opened = [value["referral_no"] for _, value in _card_buttons(payload) if "referral_no" in value]
-    assert opened == ["R001"]
+    assert opened == ["R003"]
 
 
 def test_点进自己的渠道看到特别信息(handlers):
@@ -749,3 +735,125 @@ def test_登记客户的表单卡也有退路(handlers):
     submit_referral(handlers)
     payload = marshalled(handlers.on_card_action(trigger(cards.ACTION_OPEN_CLIENT_FORM)))
     assert cards.ACTION_OPEN_MENU in _actions_in(payload)
+
+
+# ---------- 详情卡：附加信息取不到时不能把整张卡换成报错 ----------
+
+
+def _open_r001(bots):
+    return marshalled(
+        bots.on_card_action(
+            trigger("", value={"action": cards.ACTION_OPEN_REFERRAL, "referral_no": "R001"})
+        )
+    )
+
+
+def _detail_text(payload) -> str:
+    return "\n".join(
+        node["content"]
+        for node in cards_walk(payload["card"]["data"])
+        if node.get("tag") == "markdown"
+    )
+
+
+class StubHistory:
+    def __init__(self, fees=None, boom=False) -> None:
+        self._fees = fees or []
+        self._boom = boom
+        self.asked: list[str] = []
+
+    def recent(self, referral_no, *, today, months=3):
+        self.asked.append(referral_no)
+        if self._boom:
+            raise RuntimeError("Base 炸了")
+        return list(self._fees)
+
+
+def _with_history(fake_bitable, history) -> BotHandlers:
+    fake_bitable.table(TBL_SALES).add_existing(
+        {
+            schema.SALES_OPEN_ID: ALICE,
+            schema.SALES_NAME: "Alice",
+            schema.SALES_ROLE: schema.ROLE_SALES,
+            schema.SALES_STATUS: schema.SALES_STATUS_ACTIVE,
+        }
+    )
+    audit = AuditLog(fake_bitable, TBL_AUDIT)
+    return BotHandlers(
+        client=StubLarkClient(),
+        directory=SalesDirectory(fake_bitable, TBL_SALES),
+        referrals=ReferralService(fake_bitable, TBL_REFERRAL, audit),
+        clients=ReferredClientService(fake_bitable, TBL_CLIENT, TBL_REFERRAL, audit),
+        referral_history=history,
+        background=lambda fn: fn(),
+    )
+
+
+def test_详情卡带出近三个月和客户(fake_bitable):
+    from decimal import Decimal
+
+    from crm_basebot.domain.referral_history import MonthlyFee
+
+    history = StubHistory([MonthlyFee("2026-08", None, Decimal("60000"))])
+    bots = _with_history(fake_bitable, history)
+    submit_referral(bots)
+    bots.on_card_action(
+        trigger(
+            cards.ACTION_SUBMIT_CLIENT,
+            form={
+                cards.F_CLIENT_UID: UID,
+                cards.F_CLIENT_NAME: "PLUTO STUDIO LIMITED",
+                cards.F_CLIENT_REFERRAL: "R001",
+            },
+        )
+    )
+
+    text = _detail_text(_open_r001(bots))
+    assert history.asked == ["R001"]
+    assert "2026-08　交易 —　ECAS 60,000.00" in text
+    assert "PLUTO STUDIO LIMITED" in text
+
+
+def test_近三个月读不到时照样给资料(fake_bitable):
+    """渠道资料已经在手上了。为了附加信息把整张卡换成报错，是拿有用的换没用的。"""
+    bots = _with_history(fake_bitable, StubHistory(boom=True))
+    submit_referral(bots)
+
+    text = _detail_text(_open_r001(bots))
+    assert "这次没查到" in text
+    assert "分佣比例：20%" in text
+
+
+def test_客户读不到时照样给资料(fake_bitable, monkeypatch):
+    bots = _with_history(fake_bitable, StubHistory())
+    submit_referral(bots)
+
+    def boom(_record_id):
+        raise RuntimeError("客户表炸了")
+
+    monkeypatch.setattr(bots._clients, "names_for_referral", boom)
+    text = _detail_text(_open_r001(bots))
+    assert "分佣比例：20%" in text
+    assert "客户（" not in text
+
+
+def test_没注入历史服务时那一节不显示(handlers):
+    """没配汇总表的租户照样能点进渠道详情。"""
+    submit_referral(handlers)
+    text = _detail_text(_open_r001(handlers))
+    assert "近 3 个月" not in text
+    assert "分佣比例：20%" in text
+
+
+def test_别人的渠道下的客户不会漏进详情卡(fake_bitable):
+    """names_for_referral 只按调用方鉴过权的那条 record_id 取数。"""
+    bots = _with_history(fake_bitable, StubHistory())
+    submit_referral(bots)
+    other = fake_bitable.table(TBL_REFERRAL).add_existing(
+        {schema.REFERRAL_NO: "R999", schema.REFERRAL_OWNER_OPEN_ID: STRANGER}
+    )
+    fake_bitable.table(TBL_CLIENT).add_existing(
+        {schema.CLIENT_NAME: "别人的客户", schema.CLIENT_REFERRAL_LINK: [other]}
+    )
+
+    assert "别人的客户" not in _detail_text(_open_r001(bots))

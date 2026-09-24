@@ -35,8 +35,13 @@ class ValidationError(ValueError):
 
 @dataclass(frozen=True)
 class ReferralDetail:
-    """一条渠道拿给卡片展示的只读内容。空字符串表示这一列没填。"""
+    """一条渠道拿给卡片展示的只读内容。空字符串表示这一列没填。
 
+    ``record_id`` 不上卡片，是给调用方拿去另一张表找这条渠道名下的客户用的
+    （客户表按 record_id 关联，不按编号）。
+    """
+
+    record_id: str
     no: str
     name: str
     status: str
@@ -306,6 +311,7 @@ class ReferralService:
             if extract_text(fields.get(schema.REFERRAL_NO)) != wanted:
                 continue
             return ReferralDetail(
+                record_id=record.record_id,
                 no=wanted,
                 name=extract_text(fields.get(schema.REFERRAL_NAME)),
                 status=extract_text(fields.get(schema.REFERRAL_STATUS)),

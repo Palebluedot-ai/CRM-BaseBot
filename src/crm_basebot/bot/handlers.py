@@ -30,7 +30,7 @@ import re
 import threading
 import time
 from collections.abc import Callable
-from datetime import date, tzinfo
+from datetime import date, datetime, tzinfo
 from typing import Any
 
 import lark_oapi as lark
@@ -100,6 +100,7 @@ class BotHandlers:
         clients,
         commission_query=None,
         ecas_query=None,
+        referral_history=None,
         background: Callable[[Callable[[], None]], None] = _run_in_thread,
         tz: tzinfo = DEFAULT_BUSINESS_TIMEZONE,
         greet_cooldown_seconds: float = GREET_COOLDOWN_SECONDS,
@@ -114,6 +115,8 @@ class BotHandlers:
         self._commission_query = commission_query
         # 同上：没配 ECAS 那两张表时按钮点了回一句「未启用」，而不是去读一个空 table_id。
         self._ecas_query = ecas_query
+        # 详情卡上的「近 3 个月」。没注入就不显示那一节，卡片其余部分照常。
+        self._referral_history = referral_history
         self._background = background
         self._tz = tz
         self._greet_cooldown = greet_cooldown_seconds
@@ -236,21 +239,7 @@ class BotHandlers:
             detail = self._referrals.get_for(sales, _referral_no(action_value))
             if detail is None:
                 return _card_response(cards.referral_missing_card())
-            return _card_response(
-                cards.referral_detail_card(
-                    no=detail.no,
-                    name=detail.name,
-                    status=detail.status,
-                    sales_name=detail.sales_name,
-                    start_date=detail.start_date,
-                    rate=detail.rate,
-                    payout=detail.payout,
-                    email=detail.email,
-                    submitted_on=detail.submitted_on,
-                    address=detail.address,
-                    payment=detail.payment,
-                )
-            )
+            return _card_response(self._referral_detail_card(detail))
 
         if action == cards.ACTION_SUBMIT_REFERRAL:
             return self._submit_referral(sales, form)
@@ -272,6 +261,48 @@ class BotHandlers:
 
         logger.warning("未知的卡片动作: %r", action)
         return _card_response(cards.with_menu(cards.error_card("这个操作我不认识，请重新开始。")))
+
+    def _referral_detail_card(self, detail) -> dict[str, Any]:
+        """详情卡。近 3 个月和客户名单要多读三张表，所以单独一个方法。
+
+        **三张表的读取都包着 try**：渠道本身的资料已经在手上了，为了附加信息把整张卡
+        换成一句报错，是拿有用的东西去换没用的。取不到就那一节不显示，并在卡片上说明。
+
+        这一步是同步的，压在卡片回调的 3 秒预算里。三张表都很小（渠道一百多行、两张
+        汇总表每月每渠道一行、客户表几百行），而且都只读要用的那几列。真发现慢了，
+        改成和佣金查询一样的异步：先 ack 一张「正在读」，算完 push。
+        """
+        fees = None
+        history_failed = False
+        if self._referral_history is not None:
+            try:
+                fees = self._referral_history.recent(detail.no, today=datetime.now(self._tz).date())
+            except Exception:  # noqa: BLE001 - 见 docstring
+                logger.exception("读取渠道 %s 的近几个月失败", detail.no)
+                history_failed = True
+
+        clients = None
+        try:
+            clients = self._clients.names_for_referral(detail.record_id)
+        except Exception:  # noqa: BLE001 - 见 docstring
+            logger.exception("读取渠道 %s 名下的客户失败", detail.no)
+
+        return cards.referral_detail_card(
+            no=detail.no,
+            name=detail.name,
+            status=detail.status,
+            sales_name=detail.sales_name,
+            start_date=detail.start_date,
+            rate=detail.rate,
+            payout=detail.payout,
+            email=detail.email,
+            submitted_on=detail.submitted_on,
+            address=detail.address,
+            payment=detail.payment,
+            recent_fees=fees,
+            client_names=clients,
+            history_failed=history_failed,
+        )
 
     def _submit_referral(self, sales, form) -> P2CardActionTriggerResponse:
         # 输入框的标签就写着「分佣比例 (%)」，照着填「20%」是很自然的事。

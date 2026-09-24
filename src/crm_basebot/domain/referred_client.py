@@ -16,6 +16,7 @@ from ..lark.bitable import BitableClient
 from ..lark.values import extract_text, to_uid
 from . import schema
 from .audit import ACTION_CREATE_CLIENT, AuditLog
+from .commission import _link_ids
 from .referral import ValidationError
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,28 @@ class ReferredClientService:
             if to_uid(record.fields.get(schema.CLIENT_UID)) == target:
                 return record.record_id
         return None
+
+    def names_for_referral(self, referral_record_id: str) -> list[str]:
+        """这条渠道名下的客户名称，按名称排序。
+
+        只读要用的两列。客户表是全台子的客户，全字段读回来光 UID 那一串就白白占掉
+        大半流量，而这里只要名字和挂在谁下面。
+
+        ``referral_record_id`` 必须是调用方**已经鉴过权**的那条 —— 这个方法自己不判
+        归属，它只按关联取数。
+        """
+        if not referral_record_id:
+            return []
+        names: list[str] = []
+        for record in self._bitable.iter_records(
+            self._table_id,
+            field_names=[schema.CLIENT_NAME, schema.CLIENT_REFERRAL_LINK],
+        ):
+            linked = _link_ids(record.fields.get(schema.CLIENT_REFERRAL_LINK) or [])
+            if referral_record_id in linked:
+                names.append(extract_text(record.fields.get(schema.CLIENT_NAME)))
+        names.sort()
+        return names
 
     def create(self, sales: Sales, data: ClientInput) -> str:
         clean = data.validated()

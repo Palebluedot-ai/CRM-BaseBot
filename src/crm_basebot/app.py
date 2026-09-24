@@ -20,6 +20,7 @@ from .domain.audit import AuditLog
 from .domain.commission_query import CommissionQueryService
 from .domain.ecas_query import EcasQueryService
 from .domain.referral import ReferralService
+from .domain.referral_history import ReferralHistoryService
 from .domain.referred_client import ReferredClientService
 from .lark.bitable import BitableClient
 from .lark.client import get_client
@@ -65,6 +66,11 @@ def build_handlers() -> BotHandlers:
     # 而不是拿一个空 table_id 去读、报一堆看不懂的错。
     ecas_query = EcasQueryService(bitable, settings=settings) if settings.table_ecas else None
 
+    # 渠道详情卡上的「近 3 个月」。汇总表没配就不注入 —— 那一节不显示，卡片其余照常。
+    referral_history = (
+        ReferralHistoryService(bitable, settings=settings) if settings.table_commission else None
+    )
+
     return BotHandlers(
         client=get_client(),
         directory=SalesDirectory(bitable, settings.table_sales),
@@ -81,6 +87,7 @@ def build_handlers() -> BotHandlers:
         ),
         commission_query=commission_query,
         ecas_query=ecas_query,
+        referral_history=referral_history,
         background=_in_background,
         tz=tz,
     )

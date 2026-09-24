@@ -365,18 +365,21 @@ def test_渠道列表每条可点且底部能回目录():
     assert ("返回目录", {"action": cards.ACTION_OPEN_MENU}) in callbacks
 
 
-def test_渠道列表按八条一页切开():
-    items = [(f"R{i:03d}", f"渠道{i}") for i in range(1, 11)]
+def test_渠道列表按页大小切开():
+    """页大小是 cards.REFERRAL_PAGE_SIZE，不要在断言里写死数字 ——
+    2026-09-24 从 8 调到 60（一页八条要翻十三次，翻页比看渠道还累）。"""
+    size = cards.REFERRAL_PAGE_SIZE
+    items = [(f"R{i:03d}", f"渠道{i}") for i in range(1, size + 3)]
 
     first = _button_callbacks(cards.referral_list_card(items, page=0))
     first_nos = [value["referral_no"] for _, value in first if "referral_no" in value]
-    assert first_nos == [f"R{i:03d}" for i in range(1, 9)]
+    assert first_nos == [f"R{i:03d}" for i in range(1, size + 1)]
     assert ("下一页", {"action": cards.ACTION_LIST_REFERRALS, "page": 1}) in first
     assert all(value.get("page") != 0 for _, value in first)
 
     second = _button_callbacks(cards.referral_list_card(items, page=1))
     second_nos = [value["referral_no"] for _, value in second if "referral_no" in value]
-    assert second_nos == ["R009", "R010"]
+    assert second_nos == [f"R{size + 1:03d}", f"R{size + 2:03d}"]
     assert ("上一页", {"action": cards.ACTION_LIST_REFERRALS, "page": 0}) in second
     assert all(text != "下一页" for text, _ in second)
 
@@ -637,3 +640,109 @@ def test_表单卡只给退路不给整个菜单():
     """表单有自己的提交按钮，底下再堆五个入口只会让人点错。"""
     actions = _menu_actions(cards.referral_form_card())
     assert actions == {cards.ACTION_SUBMIT_REFERRAL, cards.ACTION_OPEN_MENU}
+
+
+def test_渠道按钮之间不留间距():
+    """六十个按钮各留 8px 的话，光间距就多出快五百像素（2026-09-24 反馈）。
+    这一列是一整条名单，不是一堆各自独立的按钮。"""
+    card = cards.referral_list_card([("R001", "甲"), ("R002", "乙")])
+    channel_buttons = [
+        e
+        for e in card["body"]["elements"]
+        if e.get("tag") == "button" and "referral_no" in e["behaviors"][0]["value"]
+    ]
+    assert len(channel_buttons) == 2
+    assert all(b["margin"] == "0px" for b in channel_buttons)
+
+
+def test_只有一页时不显示页码():
+    """「第 1/1 页」是句废话，还让人以为后面还有。"""
+    (head, *_rest) = components(cards.referral_list_card([("R001", "甲")]), "markdown")
+    assert "页" not in head["content"]
+
+
+# ---------- 详情卡：先钱，后资料 ----------
+
+
+def _fees():
+    from decimal import Decimal
+
+    from crm_basebot.domain.referral_history import MonthlyFee
+
+    return [
+        MonthlyFee("2026-08", None, Decimal("60000")),
+        MonthlyFee("2026-07", Decimal("1234.5"), Decimal("35000")),
+        MonthlyFee("2026-06", None, None),
+    ]
+
+
+def _detail(**kwargs):
+    base = dict(
+        no="R095",
+        name="JIANG JUN",
+        status="生效",
+        sales_name="Prance Wang",
+        start_date="2026-04-02",
+        rate="50%",
+        payout="Monthly",
+        email="",
+        submitted_on="2026-04-01",
+        address="",
+        payment="",
+    )
+    base.update(kwargs)
+    return cards.referral_detail_card(**base)
+
+
+def _detail_text(card) -> str:
+    return "\n".join(n["content"] for n in components(card, "markdown"))
+
+
+def test_近三个月排在资料前面():
+    """点进一条渠道，第一眼要看的是它最近挣了多少（2026-09-24 反馈）。"""
+    text = _detail_text(_detail(recent_fees=_fees(), client_names=["甲", "乙"]))
+    assert text.index("近 3 个月") < text.index("客户（2）") < text.index("**是谁**")
+
+
+def test_两套账分开列不合并():
+    """同一个渠道两边的比例可以不一样，合成一个数就看不出哪笔是哪笔了。"""
+    text = _detail_text(_detail(recent_fees=_fees()))
+    assert "2026-08　交易 —　ECAS 60,000.00" in text
+    assert "2026-07　交易 1,234.50　ECAS 35,000.00" in text
+
+
+def test_三个月全空时说一句而不是留三行破折号():
+    """空表和「确实没有」长得一样，而前者通常意味着那几个月还没跑对账。"""
+    from crm_basebot.domain.referral_history import MonthlyFee
+
+    text = _detail_text(_detail(recent_fees=[MonthlyFee("2026-08"), MonthlyFee("2026-07")]))
+    assert "还没有结算记录" in text
+
+
+def test_取不到近几个月时明说而不是显示空的():
+    """「这几个月没赚钱」和「这次没查到」不能长成一样。"""
+    text = _detail_text(_detail(history_failed=True))
+    assert "这次没查到" in text
+    assert "近 3 个月" not in text
+
+
+def test_没有客户时明说():
+    text = _detail_text(_detail(client_names=[]))
+    assert "客户（0）" in text
+    assert "还没有登记客户" in text
+
+
+def test_客户太多时折叠():
+    names = [f"客户{i:03d}" for i in range(30)]
+    text = _detail_text(_detail(client_names=names))
+    assert "客户（30）" in text
+    assert "客户000" in text
+    assert "客户029" not in text
+    assert f"还有 {30 - cards.MAX_CLIENTS_SHOWN} 个" in text
+
+
+def test_地址和收款信息留着只是排到最后():
+    """开发票要用，不能删；但它不是点进来第一眼要看的东西。"""
+    text = _detail_text(_detail(recent_fees=_fees(), payment="USDT TRC20 abc"))
+    assert "收款信息：USDT TRC20 abc" in text
+    assert text.index("近 3 个月") < text.index("**特别信息**")
