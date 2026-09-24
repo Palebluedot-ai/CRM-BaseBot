@@ -32,6 +32,10 @@ dist/
 build/
 .pytest_cache/
 .ruff_cache/
+# 跑覆盖率留下的数据库和报告，每次重跑都会重新生成
+.coverage
+.coverage.*
+htmlcov/
 
 # macOS
 .DS_Store
