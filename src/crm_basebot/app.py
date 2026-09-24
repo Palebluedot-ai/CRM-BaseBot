@@ -102,6 +102,10 @@ def main() -> None:
         lark.EventDispatcherHandler.builder("", "")
         .register_p2_im_message_receive_v1(handlers.on_message)
         .register_p2_card_action_trigger(handlers.on_card_action)
+        # 打开会话就自动弹主菜单。这个事件要在开发者后台单独订阅
+        # （事件订阅 -> 添加事件 -> 「用户进入与机器人的会话」），
+        # 没订阅的话这里注册了也永远收不到，机器人其余功能不受影响。
+        .register_p2_im_chat_access_event_bot_p2p_chat_entered_v1(handlers.on_p2p_chat_entered)
         .build()
     )
 

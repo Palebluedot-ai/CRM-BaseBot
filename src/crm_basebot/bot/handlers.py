@@ -28,6 +28,7 @@ import json
 import logging
 import re
 import threading
+import time
 from collections.abc import Callable
 from datetime import date, tzinfo
 from typing import Any
@@ -36,6 +37,7 @@ import lark_oapi as lark
 from lark_oapi.api.im.v1 import (
     CreateMessageRequest,
     CreateMessageRequestBody,
+    P2ImChatAccessEventBotP2pChatEnteredV1,
     P2ImMessageReceiveV1,
 )
 from lark_oapi.event.callback.model.p2_card_action_trigger import (
@@ -51,6 +53,22 @@ from . import cards
 from .auth import AuthError
 
 logger = logging.getLogger(__name__)
+
+
+# 同一个人多久之内不重复自动弹菜单。进入会话的事件开得很勤（切回会话、手机上划一下
+# 都可能触发），不设冷却期的话会话会被菜单卡填满。五分钟是个折中：出去办点别的再回来
+# 有菜单，点开表单临时切走再切回来不会被顶掉。
+GREET_COOLDOWN_SECONDS = 300.0
+
+
+def _entered_open_id(data: P2ImChatAccessEventBotP2pChatEnteredV1) -> str:
+    """从「进入会话」事件里取 open_id。取不到就返回空串，让调用方安静地跳过。
+
+    和卡片回调一样，身份只认平台签发的这个值。
+    """
+    event = getattr(data, "event", None)
+    operator = getattr(event, "operator_id", None)
+    return getattr(operator, "open_id", "") or ""
 
 
 def _run_in_thread(func: Callable[[], None]) -> None:
@@ -84,6 +102,8 @@ class BotHandlers:
         ecas_query=None,
         background: Callable[[Callable[[], None]], None] = _run_in_thread,
         tz: tzinfo = DEFAULT_BUSINESS_TIMEZONE,
+        greet_cooldown_seconds: float = GREET_COOLDOWN_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._client = client
         self._directory = directory
@@ -96,6 +116,10 @@ class BotHandlers:
         self._ecas_query = ecas_query
         self._background = background
         self._tz = tz
+        self._greet_cooldown = greet_cooldown_seconds
+        self._clock = clock
+        # open_id -> 上次自动弹菜单的时刻。见 on_p2p_chat_entered。
+        self._greeted: dict[str, float] = {}
 
     # ---------- 收到消息：弹主菜单 ----------
 
@@ -110,6 +134,39 @@ class BotHandlers:
             return
 
         self._send(chat_id, cards.menu_card(sales.name))
+
+    # ---------- 进入会话：自动弹菜单 ----------
+
+    def on_p2p_chat_entered(self, data: P2ImChatAccessEventBotP2pChatEnteredV1) -> None:
+        """用户打开和机器人的单聊时，主动把主菜单推过去。
+
+        这样「不用打字就有按钮」。飞书没有「用户打开了会话」以外更精确的信号，这个事件
+        就是最接近的那一个，**但它开得很勤** —— 切回会话、手机上划一下都可能触发。
+        每触发一次就推一张卡的话，会话很快被菜单卡填满，真正的结果卡反而被挤到上面去。
+
+        所以加了冷却期：同一个人 ``greet_cooldown_seconds`` 秒内只弹一次。刚点开表单
+        又切出去、过十几秒切回来，不会有一张新菜单卡把表单顶掉。
+
+        **名册里没有的人不推。** 不请自来的一张拒绝卡对他没有任何用处；而他一旦发消息，
+        现有的那条路照样会告诉他。这里只留一行日志，管理员按它登记新人。
+        """
+        open_id = _entered_open_id(data)
+        if not open_id:
+            return
+
+        try:
+            sales = self._directory.require(open_id)
+        except AuthError:
+            logger.info("未登记的 open_id 打开了会话：%s", open_id)
+            return
+
+        now = self._clock()
+        last = self._greeted.get(open_id)
+        if last is not None and now - last < self._greet_cooldown:
+            return
+        self._greeted[open_id] = now
+
+        self._send_to_user(open_id, cards.menu_card(sales.name))
 
     # ---------- 卡片回调 ----------
 

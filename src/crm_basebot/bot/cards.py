@@ -162,6 +162,15 @@ def _menu_buttons() -> list[dict[str, Any]]:
     ]
 
 
+def back_to_menu_button() -> dict[str, Any]:
+    """一个「返回目录」。表单卡用它当退路。
+
+    **必须放在表单容器外面。** 掉进 ``{"tag": "form"}`` 里它就变成表单动作，点一下
+    会连带触发表单校验 —— 必填项没填就退不出去，而退出去正是这个按钮的全部用途。
+    """
+    return _callback_button("返回目录", {"action": ACTION_OPEN_MENU})
+
+
 def with_menu(card: dict[str, Any]) -> dict[str, Any]:
     """在一张**结果**卡的底部接上主菜单。
 
@@ -232,6 +241,7 @@ def referral_form_card() -> dict[str, Any]:
                     "归属人自动记为你本人。</font>",
                     size="notation",
                 ),
+                back_to_menu_button(),
             ]
         },
     }
@@ -275,6 +285,7 @@ def client_form_card(referral_options: list[tuple[str, str]]) -> dict[str, Any]:
                     "否则佣金对不上。</font>",
                     size="notation",
                 ),
+                back_to_menu_button(),
             ]
         },
     }

@@ -553,11 +553,10 @@ def test_名册里没有的人不给菜单(handlers):
     assert _actions_in(payload) == set()
 
 
-def test_表单卡上不挂菜单(handlers):
-    """菜单按钮掉进 form 里会变成表单动作。表单本来就有自己的提交按钮，
-    在它下面再堆四个入口只会让人点错。"""
+def test_表单卡给退路不给整个菜单(handlers):
+    """按错了进来得走得掉，但表单有自己的提交按钮，底下再堆五个入口只会让人点错。"""
     payload = marshalled(handlers.on_card_action(trigger(cards.ACTION_OPEN_REFERRAL_FORM)))
-    assert _actions_in(payload) == {cards.ACTION_SUBMIT_REFERRAL}
+    assert _actions_in(payload) == {cards.ACTION_SUBMIT_REFERRAL, cards.ACTION_OPEN_MENU}
 
 
 def test_异步提交的等待卡不挂菜单而结果卡挂(handlers):
@@ -617,3 +616,136 @@ def test_点别人的渠道编号进不去(fake_bitable, handlers):
         )
     )
     assert payload["card"]["data"]["header"]["title"]["content"] == "找不到这个渠道"
+
+
+# ---------- 打开会话就自动弹菜单 ----------
+#
+# 「不用打字就有按钮」。飞书这个事件开得很勤（切回会话、手机上划一下都可能触发），
+# 所以下面几条主要盯的是**别把会话刷满**，以及别给名册外的人推东西。
+
+
+def entered(open_id: str = ALICE):
+    from lark_oapi.api.im.v1 import P2ImChatAccessEventBotP2pChatEnteredV1
+
+    return P2ImChatAccessEventBotP2pChatEnteredV1(
+        {
+            "schema": "2.0",
+            "header": {"event_id": "evt-enter", "event_type": "im.chat.access_event"},
+            "event": {
+                "chat_id": "oc_1",
+                "operator_id": {"open_id": open_id, "union_id": "on_1", "user_id": "u1"},
+            },
+        }
+    )
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _greeter(fake_bitable, clock, cooldown=300.0) -> BotHandlers:
+    fake_bitable.table(TBL_SALES).add_existing(
+        {
+            schema.SALES_OPEN_ID: ALICE,
+            schema.SALES_NAME: "Alice",
+            schema.SALES_ROLE: schema.ROLE_SALES,
+            schema.SALES_STATUS: schema.SALES_STATUS_ACTIVE,
+        }
+    )
+    audit = AuditLog(fake_bitable, TBL_AUDIT)
+    return BotHandlers(
+        client=StubLarkClient(),
+        directory=SalesDirectory(fake_bitable, TBL_SALES),
+        referrals=ReferralService(fake_bitable, TBL_REFERRAL, audit),
+        clients=ReferredClientService(fake_bitable, TBL_CLIENT, TBL_REFERRAL, audit),
+        background=lambda fn: fn(),
+        greet_cooldown_seconds=cooldown,
+        clock=clock,
+    )
+
+
+def _pushed(bots) -> list[dict]:
+    return [json.loads(r.request_body.content) for r in bots._client.sent]
+
+
+def test_打开会话就推一张主菜单(fake_bitable):
+    bots = _greeter(fake_bitable, _Clock())
+    bots.on_p2p_chat_entered(entered())
+
+    (card,) = _pushed(bots)
+    assert card["header"]["title"]["content"] == "渠道佣金助手"
+    assert MENU_ACTIONS <= _actions_in({"card": {"data": card}})
+
+
+def test_冷却期内再进来不重复推(fake_bitable):
+    """这个事件开得很勤。每次都推的话，会话很快被菜单卡填满，
+    刚点开的表单会被顶到上面去。"""
+    clock = _Clock()
+    bots = _greeter(fake_bitable, clock)
+
+    bots.on_p2p_chat_entered(entered())
+    clock.now += 299
+    bots.on_p2p_chat_entered(entered())
+    assert len(_pushed(bots)) == 1
+
+
+def test_冷却期过了再进来会推(fake_bitable):
+    clock = _Clock()
+    bots = _greeter(fake_bitable, clock)
+
+    bots.on_p2p_chat_entered(entered())
+    clock.now += 301
+    bots.on_p2p_chat_entered(entered())
+    assert len(_pushed(bots)) == 2
+
+
+def test_冷却期是按人算的(fake_bitable):
+    clock = _Clock()
+    bots = _greeter(fake_bitable, clock)
+    fake_bitable.table(TBL_SALES).add_existing(
+        {
+            schema.SALES_OPEN_ID: "ou_bob000000000000000000000000000",
+            schema.SALES_NAME: "Bob",
+            schema.SALES_ROLE: schema.ROLE_SALES,
+            schema.SALES_STATUS: schema.SALES_STATUS_ACTIVE,
+        }
+    )
+
+    bots.on_p2p_chat_entered(entered())
+    bots.on_p2p_chat_entered(entered("ou_bob000000000000000000000000000"))
+    assert len(_pushed(bots)) == 2
+
+
+def test_名册外的人打开会话不推任何东西(fake_bitable, caplog):
+    """不请自来的一张拒绝卡对他没有用处。只留一行日志给管理员登记新人。"""
+    import logging
+
+    bots = _greeter(fake_bitable, _Clock())
+    with caplog.at_level(logging.INFO):
+        bots.on_p2p_chat_entered(entered(STRANGER))
+
+    assert _pushed(bots) == []
+    assert STRANGER in caplog.text
+
+
+def test_事件里没有open_id时安静跳过(fake_bitable):
+    """身份只认平台签发的那个值。取不到就什么都不做，别去猜。"""
+    from lark_oapi.api.im.v1 import P2ImChatAccessEventBotP2pChatEnteredV1
+
+    bots = _greeter(fake_bitable, _Clock())
+    bots.on_p2p_chat_entered(
+        P2ImChatAccessEventBotP2pChatEnteredV1(
+            {"schema": "2.0", "header": {"event_id": "e"}, "event": {"chat_id": "oc_1"}}
+        )
+    )
+    assert _pushed(bots) == []
+
+
+def test_登记客户的表单卡也有退路(handlers):
+    submit_referral(handlers)
+    payload = marshalled(handlers.on_card_action(trigger(cards.ACTION_OPEN_CLIENT_FORM)))
+    assert cards.ACTION_OPEN_MENU in _actions_in(payload)

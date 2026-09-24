@@ -609,3 +609,31 @@ def test_两张查询卡的表单名和字段名都不冲突():
     trade_card = cards.commission_query_card("2026-09", ["2026-09"])
     assert cards.F_ECAS_PERIOD != cards.F_QUERY_PERIOD
     assert components(ecas_card, "form")[0]["name"] != components(trade_card, "form")[0]["name"]
+
+
+# ---------- 表单卡的退路 ----------
+
+
+def test_两张表单卡都有返回目录():
+    """按错了进来、看一眼不想填了，得走得掉。改之前只能重新发一条消息。"""
+    for card in (cards.referral_form_card(), cards.client_form_card(REFERRAL_OPTIONS)):
+        assert cards.ACTION_OPEN_MENU in _menu_actions(card)
+
+
+def test_返回目录按钮在表单容器外面():
+    """掉进 form 里它就变成表单动作：必填项没填就退不出去，
+    而退出去正是这个按钮的全部用途。"""
+    for card in (cards.referral_form_card(), cards.client_form_card(REFERRAL_OPTIONS)):
+        (form,) = components(card, "form")
+        inside = [b["text"]["content"] for b in components(form, "button")]
+        assert inside == ["提交登记"]
+        top_level = [
+            e["text"]["content"] for e in card["body"]["elements"] if e.get("tag") == "button"
+        ]
+        assert "返回目录" in top_level
+
+
+def test_表单卡只给退路不给整个菜单():
+    """表单有自己的提交按钮，底下再堆五个入口只会让人点错。"""
+    actions = _menu_actions(cards.referral_form_card())
+    assert actions == {cards.ACTION_SUBMIT_REFERRAL, cards.ACTION_OPEN_MENU}
