@@ -26,10 +26,17 @@ ACTION_QUERY_COMMISSION = "query_commission"
 ACTION_OPEN_ECAS_QUERY = "open_ecas_query"
 ACTION_QUERY_ECAS = "query_ecas"
 
-# 管理员名下能有上百条渠道。一页八条要翻十三次，翻页本身比看渠道还累（2026-09-24 反馈）。
-# 现在一页六十条：101 个渠道正好两页，卡片长但滑一下就到底，比翻页快得多。
-# 不做成无限长是因为卡片 JSON 有大小上限，六十个按钮约 15KB，留足余量。
-REFERRAL_PAGE_SIZE = 60
+# 管理员名下能有上百条渠道。
+#
+# **这个数是撞出来的，不是选出来的。** 一页八条要翻十三次（2026-09-24 反馈），改成
+# 六十条之后飞书直接拒收整张卡：客户端弹 `200673`，服务端一行日志都没有 —— 回调响应
+# 有上限，超了平台自己丢掉，我们这边看不见。原作者那句「一页八条，卡片还放得下按钮」
+# 大概就是同一堵墙撞出来的。
+#
+# 二十条是往回收的一档：比八条少翻三分之二，又离六十条那个已知会炸的值足够远。
+# 要再往上加，一次加十，每次都在真机上点一遍「我的渠道」——
+# 这个上限没有文档，只能试。
+REFERRAL_PAGE_SIZE = 20
 
 # 表单项标识，回调的 form_value 里用它取值
 F_REFERRAL_NAME = "referral_name"
@@ -371,8 +378,10 @@ def referral_list_card(items: list[tuple[str, str]], *, page: int = 0) -> dict[s
             _callback_button(
                 _referral_button_label(no, name),
                 {"action": ACTION_OPEN_REFERRAL, "referral_no": no},
-                # 紧贴上一个：这一列是一整条名单，不是一堆各自独立的按钮
-                margin="0px",
+                # 紧贴上一个：这一列是一整条名单，不是一堆各自独立的按钮。
+                # 写满四个值 —— 一个值的简写平台文档说支持，但这次排查里它是另一个
+                # 变量，不想两个可疑点搅在一起。
+                margin="0px 0px 0px 0px",
             )
         )
     if current > 0:

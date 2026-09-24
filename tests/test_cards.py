@@ -367,7 +367,7 @@ def test_渠道列表每条可点且底部能回目录():
 
 def test_渠道列表按页大小切开():
     """页大小是 cards.REFERRAL_PAGE_SIZE，不要在断言里写死数字 ——
-    2026-09-24 从 8 调到 60（一页八条要翻十三次，翻页比看渠道还累）。"""
+    2026-09-24 从 8 调到 60，被飞书以 200673 拒收，回收到 20。"""
     size = cards.REFERRAL_PAGE_SIZE
     items = [(f"R{i:03d}", f"渠道{i}") for i in range(1, size + 3)]
 
@@ -652,7 +652,7 @@ def test_渠道按钮之间不留间距():
         if e.get("tag") == "button" and "referral_no" in e["behaviors"][0]["value"]
     ]
     assert len(channel_buttons) == 2
-    assert all(b["margin"] == "0px" for b in channel_buttons)
+    assert all(b["margin"] == "0px 0px 0px 0px" for b in channel_buttons)
 
 
 def test_只有一页时不显示页码():
