@@ -108,6 +108,10 @@ def load_applications(
         if isinstance(applied, int | float) and not isinstance(applied, bool):
             period = ecas.period_of(datetime.fromtimestamp(float(applied) / 1000, tz=tz), tz=tz)
 
+        # 客户UID 列是文本（18-19 位存成数字会被抹平低位）。不是纯数字的一律当没填：
+        # 它只用来把同一个客户排到同一行，对不上时退回按名字对，不影响任何金额。
+        uid = extract_text(record.fields.get(ecas.ECAS_CLIENT_UID)).strip()
+
         applications.append(
             ecas.EcasApplication(
                 client_name=name,
@@ -115,6 +119,7 @@ def load_applications(
                 period=period,
                 payee=payee,
                 rate_percent=Decimal(str(rate)) if rate is not None else None,
+                client_uid=uid if uid.isdigit() else "",
             )
         )
     return applications

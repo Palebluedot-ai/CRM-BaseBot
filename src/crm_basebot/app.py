@@ -66,9 +66,12 @@ def build_handlers() -> BotHandlers:
     # 而不是拿一个空 table_id 去读、报一堆看不懂的错。
     ecas_query = EcasQueryService(bitable, settings=settings) if settings.table_ecas else None
 
-    # 渠道详情卡上的「近 3 个月」。汇总表没配就不注入 —— 那一节不显示，卡片其余照常。
+    # 渠道详情卡上的「近 3 个月」，从日读看板和 ECAS 申请表现算每个客户的数。
+    # 两张表都没配就不注入 —— 那一节不显示，卡片其余照常。
     referral_history = (
-        ReferralHistoryService(bitable, settings=settings) if settings.table_commission else None
+        ReferralHistoryService(bitable, settings=settings)
+        if settings.table_daily_board or settings.table_ecas
+        else None
     )
 
     return BotHandlers(

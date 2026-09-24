@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -30,8 +30,10 @@ from lark_oapi.api.bitable.v1 import (
     BatchCreateAppTableRecordRequestBody,
     BatchDeleteAppTableRecordRequest,
     BatchDeleteAppTableRecordRequestBody,
+    Condition,
     CreateAppTableRecordRequest,
     DeleteAppTableRecordRequest,
+    FilterInfo,
     GetAppTableRecordRequest,
     ListAppTableFieldRequest,
     ListAppTableRequest,
@@ -49,6 +51,10 @@ _WRITE_LOCK = threading.RLock()
 
 # 「查询记录」接口单次最多 500 行（默认只有 20，所以必须显式传）
 MAX_SEARCH_PAGE_SIZE = 500
+
+# 「查询记录」按某一列等于若干个值筛选时，一个请求里放多少个条件。平台上限是 50，
+# 取 20 留足余量 —— 一条渠道名下的客户通常十几个，一个请求就够。
+MAX_FILTER_VALUES = 20
 
 # 「列出数据表」「列出字段」两个接口的分页上限
 MAX_LIST_PAGE_SIZE = 100
@@ -269,12 +275,66 @@ class BitableClient:
         if not 0 < page_size <= MAX_SEARCH_PAGE_SIZE:
             raise ValueError(f"page_size 要在 1 到 {MAX_SEARCH_PAGE_SIZE} 之间，给的是 {page_size}")
 
+        yield from self._search(table_id, page_size=page_size, field_names=field_names)
+
+    def iter_records_where_in(
+        self,
+        table_id: str,
+        field_name: str,
+        values: Iterable[str],
+        *,
+        field_names: list[str] | None = None,
+    ) -> Iterator[Record]:
+        """只取 ``field_name`` 等于 ``values`` 里任意一个值的记录，筛选在服务端做。
+
+        给「大表里按一小撮键取数」用：一条渠道名下十来个客户的交易明细，全表扫一遍
+        日读看板是十几个分页往返，按客户UID 筛选一两页就回来了。
+
+        值按 ``MAX_FILTER_VALUES`` 切批，每批各自翻页。去重后一个值都没有时一个请求
+        都不发。条件是「等于」（``is``），对文本列是逐字符比较 —— UID 两边都是文本，
+        正合适。
+        """
+        wanted = sorted({value for value in values if value})
+        for start in range(0, len(wanted), MAX_FILTER_VALUES):
+            chunk = wanted[start : start + MAX_FILTER_VALUES]
+            filter_info = (
+                FilterInfo.builder()
+                .conjunction("or")
+                .conditions(
+                    [
+                        Condition.builder()
+                        .field_name(field_name)
+                        .operator("is")
+                        .value([value])
+                        .build()
+                        for value in chunk
+                    ]
+                )
+                .build()
+            )
+            yield from self._search(
+                table_id,
+                page_size=MAX_SEARCH_PAGE_SIZE,
+                field_names=field_names,
+                filter_info=filter_info,
+            )
+
+    def _search(
+        self,
+        table_id: str,
+        *,
+        page_size: int,
+        field_names: list[str] | None,
+        filter_info: FilterInfo | None = None,
+    ) -> Iterator[Record]:
         page_token: str | None = None
 
         while True:
             body_builder = SearchAppTableRecordRequestBody.builder()
             if field_names:
                 body_builder = body_builder.field_names(field_names)
+            if filter_info is not None:
+                body_builder = body_builder.filter(filter_info)
 
             builder = (
                 SearchAppTableRecordRequest.builder()

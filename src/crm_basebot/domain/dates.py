@@ -40,3 +40,34 @@ def today_in(tz: tzinfo) -> date:
     今天，服务器时区一变，记下来的日期就会差一天。
     """
     return datetime.now(tz).date()
+
+
+def period_of_day(day: date) -> str:
+    """日历日 -> 它所在的月份 ``YYYY-MM``。"""
+    return f"{day.year:04d}-{day.month:02d}"
+
+
+def months_ending(period: str, count: int) -> list[str]:
+    """以 ``period``（``YYYY-MM``）为最后一个月，往回数 ``count`` 个月，**从早到晚**。
+
+    「近三个月」在两张卡上是同一个意思：详情卡以本月为止，佣金查询以选中的月份为止，
+    都是含那个月在内往回三个月。两处共用这一个函数，免得一边按新到旧、一边按旧到新，
+    或者一边含本月、一边不含。
+
+    ``period`` 不是合法的 ``YYYY-MM``（月份不在 01–12）时返回空列表：调用方都先校验过，
+    这里不再抛。
+    """
+    if len(period) != 7 or period[4] != "-" or not (period[:4] + period[5:]).isdigit():
+        return []
+    year, month = int(period[:4]), int(period[5:])
+    if not 1 <= month <= 12 or count <= 0:
+        return []
+    months: list[str] = []
+    for _ in range(count):
+        months.append(f"{year:04d}-{month:02d}")
+        month -= 1
+        if month == 0:
+            month = 12
+            year -= 1
+    months.reverse()
+    return months

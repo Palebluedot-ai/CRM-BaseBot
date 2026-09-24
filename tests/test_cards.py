@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import json
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -67,12 +69,100 @@ INTERACTIVE_TAGS = {
 
 REFERRAL_OPTIONS = [("R001", "北极星资本"), ("R002", "鲸落数字")]
 
+# 表格组件列的 data_type 合法取值（「表格」组件文档）。我们只用前两个。
+VALID_TABLE_DATA_TYPES = {"text", "lark_md", "number", "options", "persons", "date", "markdown"}
+
 
 MANY_OPTIONS = [(f"R{i:03d}", f"渠道{i}") for i in range(1, 21)]
 
 
+UID_X = "576356842129619983"
+UID_Y = "589880697175440501"
+UID_Z = "688046085125749888"
+
+
+def _channel_months():
+    from crm_basebot.domain.referral_history import ChannelMonth, ClientMonth
+
+    return [
+        ChannelMonth("2026-07"),
+        ChannelMonth(
+            "2026-08",
+            trade=Decimal("4741.82"),
+            ecas=Decimal("5000"),
+            clients=(
+                ClientMonth("CHINA STARLINKAGE TRUST (HK) LIMITED", Decimal("4700"), None),
+                ClientMonth("YIXIN BAOD TRADING CO., LIMITED", Decimal("41.82"), Decimal("5000")),
+            ),
+        ),
+        ChannelMonth(
+            "2026-09",
+            trade=Decimal("0"),
+            clients=(ClientMonth("PEI YANG DEVELOPMENT LIMITED", Decimal("0"), None),),
+            trade_loss=True,
+            current=True,
+        ),
+    ]
+
+
+def _query_result():
+    from crm_basebot.domain.commission_query import (
+        ClientBreakdown,
+        QueryResult,
+        ReferralBreakdown,
+    )
+
+    def breakdown(no, name, rate, clients):
+        item = ReferralBreakdown(no, name, Decimal(rate))
+        for uid, client_name, revenue in clients:
+            item.clients[uid] = ClientBreakdown(uid=uid, name=client_name, revenue=Decimal(revenue))
+        return item
+
+    return QueryResult(
+        periods=["2026-07", "2026-08", "2026-09"],
+        months={
+            "2026-07": [
+                breakdown("R076", "DAI CANGWEI", "30", [(UID_X, "CHINA STARLINKAGE", "100")])
+            ],
+            "2026-08": [],
+            "2026-09": [
+                breakdown(
+                    "R076",
+                    "DAI CANGWEI",
+                    "30",
+                    [(UID_X, "CHINA STARLINKAGE", "18604.03"), (UID_Y, "YIXIN BAOD", "66.64")],
+                ),
+                breakdown("R090", "VISION GLOBAL", "50", [(UID_Z, "SHANG MING", "-176.95")]),
+            ],
+        },
+    )
+
+
+class QueryResultEmpty:
+    periods = ["2026-07", "2026-08", "2026-09"]
+    is_empty = True
+
+
+def _detail(**kwargs):
+    base = dict(
+        no="R095",
+        name="JIANG JUN",
+        start_date="2026-04-02",
+        rate="50%",
+        payout="Monthly",
+        email="",
+        submitted_on="2026-04-01",
+    )
+    base.update(kwargs)
+    return cards.referral_detail_card(**base)
+
+
 def all_cards() -> list[tuple[str, dict[str, Any]]]:
     """机器人会发出去的每一张卡片。新增卡片时记得挂到这里。"""
+    detail_full = _detail(months=_channel_months(), client_names=["甲", "乙"])
+    result = cards.commission_result_card(
+        _query_result(), viewer_name="张三", current_period="2026-09"
+    )
     return [
         ("menu_card", cards.menu_card("张三")),
         ("referral_form_card", cards.referral_form_card()),
@@ -83,27 +173,23 @@ def all_cards() -> list[tuple[str, dict[str, Any]]]:
         ("error_card", cards.error_card("出错了")),
         ("referral_list_card", cards.referral_list_card(REFERRAL_OPTIONS)),
         ("referral_list_card_空", cards.referral_list_card([])),
-        (
-            "referral_detail_card",
-            cards.referral_detail_card(
-                no="R001",
-                name="北极星资本",
-                status="生效",
-                sales_name="Alice",
-                start_date="2026-01-15",
-                rate="20%",
-                payout="Monthly",
-                email="a@b.com",
-                submitted_on="2026-01-16",
-                address="",
-                payment="",
-            ),
-        ),
+        ("referral_detail_card", _detail()),
+        ("referral_detail_card_近三个月", detail_full),
+        ("referral_detail_card_没查到", _detail(history_failed=True)),
+        ("referral_detail_card_列点版", cards.flatten_tables(detail_full)),
         ("referral_missing_card", cards.referral_missing_card()),
         # 结果卡接上菜单之后仍然要满足上面每一条骨架约束 —— 这是实际会发出去的形态
         ("with_menu_成功卡", cards.with_menu(cards.success_card("成了", "正文"))),
         ("referral_list_card_第二页", cards.referral_list_card(MANY_OPTIONS, page=1)),
-        ("with_menu_佣金结果", cards.with_menu(cards.commission_result_card("佣金明细", "正文"))),
+        ("with_menu_佣金结果", cards.with_menu(result)),
+        ("佣金结果_列点版", cards.with_menu(cards.flatten_tables(result))),
+        (
+            "佣金结果_空",
+            cards.commission_result_card(
+                QueryResultEmpty(), viewer_name="张三", current_period="2026-09"
+            ),
+        ),
+        ("submitted_card", cards.submitted_card("登记新渠道", [("渠道名称", "甲"), ("邮箱", "")])),
         ("ecas_query_card", cards.ecas_query_card("2026-09", ["2026-08", "2026-09"])),
         ("ecas_query_card_无月份", cards.ecas_query_card("", [])),
         ("commission_query_card", cards.commission_query_card("2026-09", ["2026-08", "2026-09"])),
@@ -304,7 +390,7 @@ def test_表单不再收地址和收款信息():
 
 
 def test_开始日期是必填的日期选择器():
-    """回传的是毫秒时间戳而不是 YYYY-MM-DD 文本，这一项必须有值。"""
+    """回传的是 ``2026-08-01 +0800`` 这样的文本（handlers._form_date 解析），必须有值。"""
     card = cards.referral_form_card()
     (picker,) = components(card, "date_picker")
 
@@ -374,13 +460,13 @@ def test_渠道列表按页大小切开():
     first = _button_callbacks(cards.referral_list_card(items, page=0))
     first_nos = [value["referral_no"] for _, value in first if "referral_no" in value]
     assert first_nos == [f"R{i:03d}" for i in range(1, size + 1)]
-    assert ("下一页", {"action": cards.ACTION_LIST_REFERRALS, "page": 1}) in first
+    assert ("下一页", {"action": cards.ACTION_REFERRAL_PAGE, "page": 1}) in first
     assert all(value.get("page") != 0 for _, value in first)
 
     second = _button_callbacks(cards.referral_list_card(items, page=1))
     second_nos = [value["referral_no"] for _, value in second if "referral_no" in value]
     assert second_nos == [f"R{size + 1:03d}", f"R{size + 2:03d}"]
-    assert ("上一页", {"action": cards.ACTION_LIST_REFERRALS, "page": 0}) in second
+    assert ("上一页", {"action": cards.ACTION_REFERRAL_PAGE, "page": 0}) in second
     assert all(text != "下一页" for text, _ in second)
 
     # 页码超出最后一页时停在最后一页，而不是给一张空卡
@@ -404,28 +490,15 @@ def test_未命名渠道的按钮不留空尾巴():
     ) in callbacks
 
 
-def test_渠道详情把特别信息和空值分开():
-    card = cards.referral_detail_card(
-        no="R001",
-        name="北极星资本",
-        status="生效",
-        sales_name="Alice",
-        start_date="2026-01-15",
-        rate="20%",
-        payout="Monthly",
-        email="a@b.com",
-        submitted_on="2026-01-16",
-        address="",
-        payment="USDT TRC20 abc",
-    )
+def test_渠道详情只留渠道详情一节():
+    """2026-09-24 第二轮反馈：「是谁」「特别信息」删掉，「怎么分」改叫「渠道详情」。"""
+    card = _detail(no="R001", name="北极星资本", rate="20%", email="a@b.com")
     text = "\n".join(node["content"] for node in components(card, "markdown"))
-    assert "**是谁**" in text
-    assert "**怎么分**" in text
-    assert "**特别信息**" in text
-    assert "编号：R001" in text
+    assert "**渠道详情**" in text
     assert "分佣比例：20%" in text
-    assert "地址：未填写" in text
-    assert "收款信息：USDT TRC20 abc" in text
+    assert "邮箱：a@b.com" in text
+    for gone in ("**是谁**", "**怎么分**", "**特别信息**", "负责销售", "收款信息", "地址"):
+        assert gone not in text
 
     assert _button_callbacks(card) == [
         ("返回列表", {"action": cards.ACTION_LIST_REFERRALS}),
@@ -434,13 +507,25 @@ def test_渠道详情把特别信息和空值分开():
     assert components(card, "form") == []
 
 
+def test_编号挪到标题下面():
+    card = _detail(no="R076", name="DAI CANGWEI")
+    assert card["header"]["title"]["content"] == "DAI CANGWEI"
+    assert card["header"]["subtitle"] == {"tag": "plain_text", "content": "R076"}
+
+
+def test_没名字时标题就是编号_不重复写副标题():
+    card = _detail(no="R076", name="")
+    assert card["header"]["title"]["content"] == "R076"
+    assert "subtitle" not in card["header"]
+
+
 def test_提示卡和结果卡不加返回目录():
     """返回目录只加在渠道列表和详情上。共用的提示卡一加，查询中和登记结果也会多一个按钮。"""
     untouched = [
         cards.notice_card("标题", "正文"),
         cards.success_card("成了", "正文"),
         cards.error_card("出错了"),
-        cards.commission_result_card("佣金明细", "正文"),
+        cards.commission_result_card(_query_result(), viewer_name="张三"),
         cards.menu_card("张三"),
     ]
     for card in untouched:
@@ -602,7 +687,8 @@ def test_一个月份都没有时退回文本框():
 def test_ECAS的卡和交易佣金的卡颜色不一样():
     """两笔钱在会话里往上翻的时候要一眼分得开。"""
     ecas_template = cards.ecas_result_card("ECAS 返佣", "正文")["header"]["template"]
-    trade_template = cards.commission_result_card("佣金明细", "正文")["header"]["template"]
+    trade_card = cards.commission_result_card(_query_result(), viewer_name="张三")
+    trade_template = trade_card["header"]["template"]
     assert ecas_template != trade_template
 
 
@@ -661,69 +747,54 @@ def test_只有一页时不显示页码():
     assert "页" not in head["content"]
 
 
-# ---------- 详情卡：先钱，后资料 ----------
-
-
-def _fees():
-    from decimal import Decimal
-
-    from crm_basebot.domain.referral_history import MonthlyFee
-
-    return [
-        MonthlyFee("2026-08", None, Decimal("60000")),
-        MonthlyFee("2026-07", Decimal("1234.5"), Decimal("35000")),
-        MonthlyFee("2026-06", None, None),
-    ]
-
-
-def _detail(**kwargs):
-    base = dict(
-        no="R095",
-        name="JIANG JUN",
-        status="生效",
-        sales_name="Prance Wang",
-        start_date="2026-04-02",
-        rate="50%",
-        payout="Monthly",
-        email="",
-        submitted_on="2026-04-01",
-        address="",
-        payment="",
-    )
-    base.update(kwargs)
-    return cards.referral_detail_card(**base)
+# ---------- 详情卡：近 3 个月，每个客户一行 ----------
 
 
 def _detail_text(card) -> str:
     return "\n".join(n["content"] for n in components(card, "markdown"))
 
 
-def test_近三个月排在资料前面():
+def _tables(card):
+    return components(card, "table")
+
+
+def test_近三个月排在客户和渠道详情前面():
     """点进一条渠道，第一眼要看的是它最近挣了多少（2026-09-24 反馈）。"""
-    text = _detail_text(_detail(recent_fees=_fees(), client_names=["甲", "乙"]))
-    assert text.index("近 3 个月") < text.index("客户（2）") < text.index("**是谁**")
+    text = _detail_text(_detail(months=_channel_months(), client_names=["甲", "乙"]))
+    assert text.index("近 3 个月") < text.index("客户（2）") < text.index("**渠道详情**")
+
+
+def test_每个有记录的月份一张表_每个客户一行():
+    """不要只有总数，要看到每个客户贡献了多少（2026-09-24 第二轮反馈）。"""
+    tables = _tables(_detail(months=_channel_months()))
+    assert len(tables) == 2  # 7 月没有记录，不发空表
+    august = tables[0]
+    assert [c["display_name"] for c in august["columns"]] == ["客户", "交易", "ECAS"]
+    assert august["rows"] == [
+        {"client": "CHINA STARLINKAGE TRUST (HK) LIMITED", "trade": "4,700.00", "ecas": "—"},
+        {"client": "YIXIN BAOD TRADING CO., LIMITED", "trade": "41.82", "ecas": "5,000.00"},
+    ]
+
+
+def test_每月一行合计_本月标至今():
+    text = _detail_text(_detail(months=_channel_months()))
+    assert "**2026-07**　没有交易，也没有 ECAS" in text
+    assert "**2026-08**　交易 4,741.82 · ECAS 5,000.00" in text
+    assert "**2026-09（本月至今）**　交易 0.00 · ECAS —" in text
+    assert "交易整月合计为负" in text
 
 
 def test_两套账分开列不合并():
     """同一个渠道两边的比例可以不一样，合成一个数就看不出哪笔是哪笔了。"""
-    text = _detail_text(_detail(recent_fees=_fees()))
-    assert "2026-08　交易 —　ECAS 60,000.00" in text
-    assert "2026-07　交易 1,234.50　ECAS 35,000.00" in text
-
-
-def test_三个月全空时说一句而不是留三行破折号():
-    """空表和「确实没有」长得一样，而前者通常意味着那几个月还没跑对账。"""
-    from crm_basebot.domain.referral_history import MonthlyFee
-
-    text = _detail_text(_detail(recent_fees=[MonthlyFee("2026-08"), MonthlyFee("2026-07")]))
-    assert "还没有结算记录" in text
+    (august, _) = _tables(_detail(months=_channel_months()))
+    assert {c["name"] for c in august["columns"]} == {"client", "trade", "ecas"}
 
 
 def test_取不到近几个月时明说而不是显示空的():
     """「这几个月没赚钱」和「这次没查到」不能长成一样。"""
-    text = _detail_text(_detail(history_failed=True))
-    assert "这次没查到" in text
-    assert "近 3 个月" not in text
+    card = _detail(history_failed=True)
+    assert "这次没查到" in _detail_text(card)
+    assert _tables(card) == []
 
 
 def test_没有客户时明说():
@@ -741,8 +812,134 @@ def test_客户太多时折叠():
     assert f"还有 {30 - cards.MAX_CLIENTS_SHOWN} 个" in text
 
 
-def test_地址和收款信息留着只是排到最后():
-    """开发票要用，不能删；但它不是点进来第一眼要看的东西。"""
-    text = _detail_text(_detail(recent_fees=_fees(), payment="USDT TRC20 abc"))
-    assert "收款信息：USDT TRC20 abc" in text
-    assert text.index("近 3 个月") < text.index("**特别信息**")
+# ---------- 表格组件 ----------
+#
+# 表格是这套卡片里最新的组件。规则抄自「表格」组件文档，形状对齐 SDK 自己的
+# ``CardBuilder.table()``。真机上万一不收，handlers 会改发 ``flatten_tables`` 的列点版。
+
+
+@pytest.mark.parametrize("card", CARD_VALUES, ids=CARD_IDS)
+def test_一张卡最多五个表格(card):
+    """平台上限：一张卡最多 5 个表格组件，超了整张卡发不出去。"""
+    assert len(components(card, "table")) <= 5
+
+
+@pytest.mark.parametrize("card", CARD_VALUES, ids=CARD_IDS)
+def test_表格的形状照文档(card):
+    for table in components(card, "table"):
+        assert 1 <= table["page_size"] <= 10, "page_size 只能是 1 到 10"
+        assert table["rows"], "空表格不要发"
+        names = [c["name"] for c in table["columns"]]
+        assert len(set(names)) == len(names), "列的 name 不能重复"
+        for column in table["columns"]:
+            assert column["name"] and column["display_name"]
+            assert column["data_type"] in VALID_TABLE_DATA_TYPES
+        for row in table["rows"]:
+            assert set(row) <= set(names), "行里的 key 必须是列的 name"
+            assert all(isinstance(value, str) for value in row.values())
+
+
+@pytest.mark.parametrize("card", CARD_VALUES, ids=CARD_IDS)
+def test_表格只挂在_body_根下(card):
+    top_level = [e for e in card["body"]["elements"] if e.get("tag") == "table"]
+    assert components(card, "table") == top_level
+
+
+def test_列点版没有表格_内容还在():
+    card = _detail(months=_channel_months())
+    flat = cards.flatten_tables(card)
+    assert _tables(flat) == []
+    assert "· YIXIN BAOD TRADING CO., LIMITED　交易 41.82　ECAS 5,000.00" in _detail_text(flat)
+    assert len(_tables(card)) == 2, "原卡不能被就地改掉"
+
+
+# ---------- 佣金查询结果卡 ----------
+
+
+def _result_card():
+    return cards.commission_result_card(
+        _query_result(), viewer_name="张三", current_period="2026-09"
+    )
+
+
+def test_佣金结果不显示UID():
+    """太乱，后台照样按 UID 对（2026-09-24 反馈）。"""
+    text = json.dumps(_result_card(), ensure_ascii=False)
+    for uid in (UID_X, UID_Y, UID_Z):
+        assert uid not in text
+
+
+def test_佣金结果不写计算过程也没有未登记归属那一段():
+    text = json.dumps(_result_card(), ensure_ascii=False)
+    assert "×" not in text
+    assert "收入" not in text
+    assert "未登记归属" not in text
+
+
+def test_佣金结果按渠道和客户排成三个月的表():
+    summary, detail = _tables(_result_card())
+    assert [c["display_name"] for c in summary["columns"]] == ["月份", "应付", "渠道", "客户"]
+    assert [row["month"] for row in summary["rows"]] == ["7月", "8月", "9月至今"]
+    assert [c["display_name"] for c in detail["columns"]] == [
+        "渠道 / 客户",
+        "7月",
+        "8月",
+        "9月至今",
+    ]
+    assert [row["name"] for row in detail["rows"]] == [
+        "**R076 DAI CANGWEI**",
+        "· CHINA STARLINKAGE",
+        "· YIXIN BAOD",
+        "**R090 VISION GLOBAL**",
+        "· SHANG MING",
+    ]
+    r076 = detail["rows"][0]
+    assert r076["m0"] == "30.00"  # 100 × 30%
+    assert r076["m1"] == "—"  # 8 月没有交易
+    assert r076["m2"] == "5,601.20"
+
+
+def test_每个月客户加起来等于渠道应付():
+    _, detail = _tables(_result_card())
+    channel, *clients = detail["rows"][:3]
+    total = sum(Decimal(row["m2"].replace(",", "")) for row in clients)
+    assert total == Decimal(channel["m2"].replace(",", ""))
+
+
+def test_整月为负的渠道加一句说明():
+    text = "\n".join(n["content"] for n in components(_result_card(), "markdown"))
+    assert "R090 VISION GLOBAL 在 2026-09 整月合计为负，按规则记 0。" in text
+
+
+def test_跨年的表头带上年份():
+    assert cards._month_label("2025-12", ["2025-12", "2026-01"], "") == "25年12月"
+    assert cards._month_label("2026-01", ["2025-12", "2026-01"], "2026-01") == "26年1月至今"
+
+
+def test_结果太长时截断并说明(monkeypatch):
+    """整张卡的 JSON 有大小上限，超了整条消息发不出去。"""
+    monkeypatch.setattr(cards, "MAX_TABLE_ROWS", 3)
+    card = _result_card()
+    _, detail = _tables(card)
+    assert len(detail["rows"]) == 3
+    text = "\n".join(n["content"] for n in components(card, "markdown"))
+    assert "只列了前 3 行（共 5 行）" in text
+
+
+def test_查询卡说清楚会列三个月():
+    card = cards.commission_query_card("2026-09", ["2026-09", "2026-08"])
+    text = "\n".join(n["content"] for n in components(card, "markdown"))
+    assert "这个月和前两个月" in text
+
+
+# ---------- 已提交回执 ----------
+
+
+def test_已提交回执列出填过的内容_没有按钮():
+    """表单原样留着就能再点一次提交；换成回执，记录还在，又点不了第二次。"""
+    card = cards.submitted_card("登记新渠道", [("渠道名称", "北极星"), ("邮箱", "")])
+    assert card["header"]["title"]["content"] == "登记新渠道 · 已提交"
+    text = "\n".join(n["content"] for n in components(card, "markdown"))
+    assert "渠道名称：北极星" in text
+    assert "邮箱：未填写" in text
+    assert components(card, "button") == []

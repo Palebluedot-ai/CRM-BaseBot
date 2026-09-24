@@ -204,13 +204,18 @@ class Payee:
 
 @dataclass
 class EcasApplication:
-    """一笔 ECAS 申请。没有介绍人的申请 ``payee`` 是 None。"""
+    """一笔 ECAS 申请。没有介绍人的申请 ``payee`` 是 None。
+
+    ``client_uid`` 只拿来在详情卡上把同一个客户的交易和 ECAS 排到同一行，
+    不参与结算。来源表里大多是空的，空的时候按名字对（见 ``referral_history``）。
+    """
 
     client_name: str
     amount: Decimal
     period: str
     payee: Payee | None = None
     rate_percent: Decimal | None = None
+    client_uid: str = ""
 
     @property
     def fee(self) -> Decimal:

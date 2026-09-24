@@ -1,11 +1,11 @@
 """销售自查用的佣金明细：CommissionQueryService。
 
 对账写的是「按月 × 渠道」的粗粒度汇总，这个 service 是「按月 × 渠道 × 客户」的
-读取路径。要点：
+读取路径，一次查连续几个月。要点：
 
 1. **权限**沿用现有 owned_records 的口径 —— 销售只看自己名下渠道，管理员看全部。
-2. **孤儿 UID**（在看板里但没登记归属的客户）只对管理员可见 —— 销售看到别人的孤儿
-   没有意义，也不该让他知道存在过。
+2. **没登记归属的 UID 不出现**：2026-09-24 反馈把结果卡上那一段删了，查询也就不再
+   收集它们（对账任务照样会报，见 jobs/reconcile.py）。
 3. **客户份额**用「按客户收入占比切分渠道应付」的算法，保证 sum(客户份额) == 渠道
    应付；直接按客户 × 比例算再累加会在渠道被 max(0, ...) 兜底时对不上。
 """
@@ -23,7 +23,6 @@ from crm_basebot.domain.commission_query import (
     CommissionQueryService,
     QueryResult,
     ReferralBreakdown,
-    summarize,
 )
 
 from .conftest import TBL_BOARD, TBL_CLIENT, TBL_REFERRAL
@@ -110,37 +109,42 @@ def test_销售只看到自己名下的渠道(base):
     _row(base, UID_A1, 1000.00)  # Alice
     _row(base, UID_B1, 5000.00)  # Bob
 
-    result = CommissionQueryService(base, settings=Settings()).query(alice, "2026-03")
+    result = CommissionQueryService(base, settings=Settings()).query(alice, ["2026-03"])
 
-    assert [r.referral_no for r in result.referrals] == ["R001"]
-    assert result.referrals[0].revenue_total == Decimal("1000.00")
+    assert [r.referral_no for r in result.referrals_in("2026-03")] == ["R001"]
+    assert result.referrals_in("2026-03")[0].revenue_total == Decimal("1000.00")
 
 
 def test_管理员看全部渠道(base):
     _row(base, UID_A1, 1000.00)
     _row(base, UID_B1, 5000.00)
 
-    result = CommissionQueryService(base, settings=Settings()).query(admin, "2026-03")
+    result = CommissionQueryService(base, settings=Settings()).query(admin, ["2026-03"])
 
-    assert {r.referral_no for r in result.referrals} == {"R001", "R002"}
+    assert {r.referral_no for r in result.referrals_in("2026-03")} == {"R001", "R002"}
 
 
-def test_销售看不到孤儿uid(base):
+def test_没登记归属的UID不出现在结果里(base):
+    """管理员也一样：那一段从结果卡上删掉了（2026-09-24 反馈），查询也就不收集它们。"""
     _row(base, UID_A1, 1000.00)
     _row(base, UID_ORPHAN, 500.00)
 
-    result = CommissionQueryService(base, settings=Settings()).query(alice, "2026-03")
+    result = CommissionQueryService(base, settings=Settings()).query(admin, ["2026-03"])
 
-    assert result.unmapped_uids == [], "销售看到别的销售的孤儿没有意义，也不该知道存在过"
+    assert not hasattr(result, "unmapped_uids")
+    uids = {uid for ref in result.referrals_in("2026-03") for uid in ref.clients}
+    assert uids == {UID_A1}
 
 
-def test_管理员看得到孤儿uid(base):
+def test_名下没有客户时不去扫看板(base):
+    """看板上万行，扫完也是空的。"""
+    nobody = Sales(open_id="ou_nobody", name="Nobody", role=schema.ROLE_SALES, is_active=True)
     _row(base, UID_A1, 1000.00)
-    _row(base, UID_ORPHAN, 500.00)
 
-    result = CommissionQueryService(base, settings=Settings()).query(admin, "2026-03")
+    result = CommissionQueryService(base, settings=Settings()).query(nobody, ["2026-03"])
 
-    assert result.unmapped_uids == [UID_ORPHAN]
+    assert result.is_empty
+    assert base.tables[TBL_BOARD].scan_count == 0
 
 
 # ---------- 客户份额 ----------
@@ -151,9 +155,9 @@ def test_客户份额加起来等于渠道应付(base):
     _row(base, UID_A1, 700.00)
     _row(base, UID_A2, 300.00)
 
-    result = CommissionQueryService(base, settings=Settings()).query(alice, "2026-03")
+    result = CommissionQueryService(base, settings=Settings()).query(alice, ["2026-03"])
 
-    referral = result.referrals[0]
+    referral = result.referrals_in("2026-03")[0]
     total_share = sum((referral.client_share(c) for c in referral.clients.values()), Decimal("0"))
     assert referral.payable == Decimal("200.00")  # 1000 × 20%
     assert total_share == referral.payable
@@ -166,9 +170,9 @@ def test_负值客户不会让份额被单独归零(base):
     _row(base, UID_A1, 800.00)
     _row(base, UID_A2, -300.00)
 
-    result = CommissionQueryService(base, settings=Settings()).query(alice, "2026-03")
+    result = CommissionQueryService(base, settings=Settings()).query(alice, ["2026-03"])
 
-    referral = result.referrals[0]
+    referral = result.referrals_in("2026-03")[0]
     assert referral.revenue_total == Decimal("500.00")
     assert referral.payable == Decimal("100.00")  # 500 × 20%
 
@@ -185,9 +189,9 @@ def test_整月负值时所有份额归零(base):
     _row(base, UID_A1, -800.00)
     _row(base, UID_A2, -200.00)
 
-    result = CommissionQueryService(base, settings=Settings()).query(alice, "2026-03")
+    result = CommissionQueryService(base, settings=Settings()).query(alice, ["2026-03"])
 
-    referral = result.referrals[0]
+    referral = result.referrals_in("2026-03")[0]
     assert referral.is_loss_month
     assert referral.payable == Decimal("0")
     for client in referral.clients.values():
@@ -201,50 +205,82 @@ def test_只算指定月份(base):
     _row(base, UID_A1, 1000.00, "2026/02/15")
     _row(base, UID_A1, 3000.00, "2026/03/02")
 
-    result = CommissionQueryService(base, settings=Settings()).query(alice, "2026-03")
+    result = CommissionQueryService(base, settings=Settings()).query(alice, ["2026-03"])
 
-    assert result.referrals[0].revenue_total == Decimal("3000.00")
+    assert result.referrals_in("2026-03")[0].revenue_total == Decimal("3000.00")
 
 
-def test_latest_period_返回看板最大月份(base):
+def test_一次查几个月_看板只扫一遍(base):
     _row(base, UID_A1, 1000.00, "2026/01/15")
-    _row(base, UID_A1, 2000.00, "2026/03/02")
-    _row(base, UID_A1, 1500.00, "2026/02/10")
+    _row(base, UID_A1, 2000.00, "2026/02/10")
+    _row(base, UID_A1, 3000.00, "2026/03/02")
+    _row(base, UID_A1, 9999.00, "2025/12/31")
 
-    assert CommissionQueryService(base, settings=Settings()).latest_period() == "2026-03"
+    result = CommissionQueryService(base, settings=Settings()).query(
+        alice, ["2026-01", "2026-02", "2026-03"]
+    )
 
-
-def test_latest_period_空表返回空串(base):
-    assert CommissionQueryService(base, settings=Settings()).latest_period() == ""
-
-
-# ---------- 展示 ----------
-
-
-def test_summarize_包含渠道客户和佣金(base):
-    _row(base, UID_A1, 1000.00)
-    result = CommissionQueryService(base, settings=Settings()).query(alice, "2026-03")
-
-    text = summarize(result, viewer_name="Alice")
-
-    assert "R001" in text
-    assert "普罗米修斯" in text
-    assert UID_A1 in text
-    assert "200.00" in text  # 应付
-    assert "2026-03" in text
+    assert base.tables[TBL_BOARD].scan_count == 1
+    assert [result.total_payable(p) for p in result.periods] == [
+        Decimal("200.00"),
+        Decimal("400.00"),
+        Decimal("600.00"),
+    ]
 
 
-def test_summarize_没数据时给出友好提示(base):
-    result = CommissionQueryService(base, settings=Settings()).query(alice, "2026-03")
+def test_没有交易的月份不编一个零出来(base):
+    _row(base, UID_A1, 1000.00, "2026/03/02")
 
-    text = summarize(result, viewer_name="Alice")
-    assert "没有可展示" in text
+    result = CommissionQueryService(base, settings=Settings()).query(
+        alice, ["2026-01", "2026-02", "2026-03"]
+    )
+
+    (channel,) = result.channels()
+    assert channel.payable == {"2026-03": Decimal("200.00")}
+    assert result.referrals_in("2026-01") == []
 
 
-# ---------- 卡片上的总数 ----------
+def test_空结果(base):
+    result = CommissionQueryService(base, settings=Settings()).query(alice, ["2026-03"])
+    assert result.is_empty
+
+
+# ---------- 按渠道展开 ----------
+
+
+def test_渠道下的客户份额按月列开(base):
+    _row(base, UID_A1, 700.00, "2026/02/10")
+    _row(base, UID_A2, 300.00, "2026/02/11")
+    _row(base, UID_A1, 1000.00, "2026/03/02")
+
+    result = CommissionQueryService(base, settings=Settings()).query(alice, ["2026-02", "2026-03"])
+
+    (channel,) = result.channels()
+    assert channel.referral_no == "R001"
+    assert channel.payable == {"2026-02": Decimal("200.00"), "2026-03": Decimal("200.00")}
+    by_name = {c.name: c.shares for c in channel.clients}
+    assert by_name == {
+        "普罗米修斯": {"2026-02": Decimal("140.00"), "2026-03": Decimal("200.00")},
+        "青柠": {"2026-02": Decimal("60.00")},
+    }
+    # 几个月合计大的排前面
+    assert [c.name for c in channel.clients] == ["普罗米修斯", "青柠"]
+
+
+def test_整月为负的月份被标出来(base):
+    _row(base, UID_A1, -800.00)
+
+    result = CommissionQueryService(base, settings=Settings()).query(alice, ["2026-03"])
+
+    (channel,) = result.channels()
+    assert channel.loss_periods == ("2026-03",)
+    assert channel.payable == {"2026-03": Decimal("0")}
+
+
+# ---------- 每月合计 ----------
 #
 # 光有一个「合计应付」，看的人没法判断它合不合理。少了一个渠道、少了一个客户，
-# 金额照样是一个像样的数字 —— 把渠道数、客户数、收入合计摆出来，缺了就立刻看得出。
+# 金额照样是一个像样的数字 —— 结果卡上的「每月合计」把渠道数、客户数一起摆出来。
 
 
 def _breakdown(no: str, rate: str, clients: list[tuple[str, str, int]]) -> ReferralBreakdown:
@@ -259,54 +295,52 @@ def _breakdown(no: str, rate: str, clients: list[tuple[str, str, int]]) -> Refer
 
 def test_顶部三个总数都算对():
     result = QueryResult(
-        period="2026-08",
-        referrals=[
-            _breakdown("R001", "20", [("uid1", "25600", 47), ("uid2", "12000", 9)]),
-            _breakdown("R002", "15", [("uid3", "8000", 3)]),
-        ],
-        unmapped_uids=[],
+        periods=["2026-08"],
+        months={
+            "2026-08": [
+                _breakdown("R001", "20", [("uid1", "25600", 47), ("uid2", "12000", 9)]),
+                _breakdown("R002", "15", [("uid3", "8000", 3)]),
+            ]
+        },
     )
-    assert result.referral_count == 2
-    assert result.client_count == 3
-    assert result.revenue_total == Decimal("45600")
-    assert result.total_payable == Decimal("8720.00")
-
-    text = summarize(result, viewer_name="Alice")
-    assert "2 个渠道 · 3 个客户 · 收入合计 45,600.00" in text
+    assert result.referral_count("2026-08") == 2
+    assert result.client_count("2026-08") == 3
+    assert result.revenue_total("2026-08") == Decimal("45600")
+    assert result.total_payable("2026-08") == Decimal("8720.00")
 
 
 def test_同一个客户挂在两个渠道下只数一次():
     """客户表被人手改过之后 UID 不保证只挂一个渠道。不去重的话
     「12 个客户」其实是同一个人数了两遍。"""
     result = QueryResult(
-        period="2026-08",
-        referrals=[
-            _breakdown("R001", "20", [("uid1", "100", 1)]),
-            _breakdown("R002", "20", [("uid1", "100", 1)]),
-        ],
-        unmapped_uids=[],
+        periods=["2026-08"],
+        months={
+            "2026-08": [
+                _breakdown("R001", "20", [("uid1", "100", 1)]),
+                _breakdown("R002", "20", [("uid1", "100", 1)]),
+            ]
+        },
     )
-    assert result.client_count == 1
+    assert result.client_count("2026-08") == 1
 
 
-def test_每个渠道下都有小计():
+def test_每个渠道的客户数和笔数():
     result = QueryResult(
-        period="2026-08",
-        referrals=[_breakdown("R001", "20", [("uid1", "25600", 47), ("uid2", "12000", 9)])],
-        unmapped_uids=[],
+        periods=["2026-08"],
+        months={
+            "2026-08": [_breakdown("R001", "20", [("uid1", "25600", 47), ("uid2", "12000", 9)])]
+        },
     )
-    (ref,) = result.referrals
+    (ref,) = result.referrals_in("2026-08")
     assert ref.client_count == 2
     assert ref.row_count == 56  # 笔数和客户数是两回事：一个客户一个月能有几十笔
-    assert "小计：收入 37,600.00 · 2 个客户 · 56 笔" in summarize(result, viewer_name="Alice")
 
 
 def test_收入合计不做保底而应付做():
     """保底是应付金额的规则。收入也截成 0 的话，看报表的人看不出这个月是负的。"""
     result = QueryResult(
-        period="2026-08",
-        referrals=[_breakdown("R001", "20", [("uid1", "-5000", 2)])],
-        unmapped_uids=[],
+        periods=["2026-08"],
+        months={"2026-08": [_breakdown("R001", "20", [("uid1", "-5000", 2)])]},
     )
-    assert result.revenue_total == Decimal("-5000")
-    assert result.total_payable == Decimal("0")
+    assert result.revenue_total("2026-08") == Decimal("-5000")
+    assert result.total_payable("2026-08") == Decimal("0")

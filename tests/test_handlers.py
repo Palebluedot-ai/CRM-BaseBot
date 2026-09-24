@@ -1,18 +1,24 @@
 """卡片回调的入口行为。
 
-这一层没有任何单测的时候最容易漏掉两类事：
+这一层没有任何单测的时候最容易漏掉三类事：
 
 1. **回调响应的结构**。飞书对响应体的形状有硬要求，写错了平台回 200672/200673，
    用户看到「出错了，请稍后重试」，而服务端这边一切正常、什么都不知道。所以这里
    不是断言我们构造的那个 dict，而是断言 **SDK 序列化之后真正发出去的 JSON**。
-2. **表单值的边界**。选填项没填时平台可能不给 key，也可能给 null；下拉的回传值
-   可能是裸字符串也可能包一层。这些都到不了业务代码，得在入口挡住。
+2. **被点的卡留不留得住**（2026-09-24 反馈：「紀錄會消失」）。回调响应里带 card 就是
+   原地换卡。现在只有翻页和「已提交」回执可以带；其余一律空响应或一句 toast，
+   内容作为新消息推出去。
+3. **表单值的边界**。选填项没填时平台可能不给 key，也可能给 null；下拉的回传值
+   可能是裸字符串也可能包一层；日期选择器回传 ``2026-01-15 +0800``。这些都到不了
+   业务代码，得在入口挡住。
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date
+from decimal import Decimal
 from typing import Any
 
 import lark_oapi as lark
@@ -34,9 +40,11 @@ from .conftest import TBL_AUDIT, TBL_CLIENT, TBL_REFERRAL, TBL_SALES
 ALICE = "ou_alice000000000000000000000000"
 STRANGER = "ou_stranger0000000000000000000"
 UID = "577809207768677761"
+TODAY = date(2026, 9, 24)
 
-# 日期选择器回传的是毫秒时间戳字符串，按真实回调的形状造值
 START_DATE = date(2026, 1, 15)
+# 日期选择器的真实回传：日历日 + 选的人设备的时区（飞书「卡片回传交互」文档）。
+START_DATE_PICKED = "2026-01-15 +0800"
 START_DATE_MS = str(date_to_ms(START_DATE, tz=DEFAULT_BUSINESS_TIMEZONE))
 
 
@@ -48,24 +56,35 @@ class _StubResponse:
         return True
 
 
-class StubLarkClient:
-    """卡片回调走同步分支时根本不碰 client；``_submit_client`` 走异步分支后
-    需要 ``im.v1.message.create`` 推结果消息，所以这里给个最小可用的 stub，
-    把最后一次调用记下来供断言。"""
+class _Rejected:
+    code = 230099
+    msg = "Failed to create card content"
 
-    def __init__(self) -> None:
+    def success(self) -> bool:
+        return False
+
+
+class StubLarkClient:
+    """推新消息走 ``im.v1.message.create``，这里把每次调用记下来供断言。
+
+    ``reject_tables=True`` 时模拟飞书不收带表格的卡，用来钉住「改发列点版」。
+    """
+
+    def __init__(self, *, reject_tables: bool = False) -> None:
         self.sent: list[Any] = []
+        self.reject_tables = reject_tables
         self.im = self  # type: ignore[assignment]
         self.v1 = self  # type: ignore[assignment]
         self.message = self  # type: ignore[assignment]
 
-    def create(self, request: Any) -> _StubResponse:
+    def create(self, request: Any):
         self.sent.append(request)
+        if self.reject_tables and '"tag": "table"' in request.request_body.content:
+            return _Rejected()
         return _StubResponse()
 
 
-@pytest.fixture
-def handlers(fake_bitable):
+def make_handlers(fake_bitable, **overrides) -> BotHandlers:
     fake_bitable.table(TBL_SALES).add_existing(
         {
             schema.SALES_OPEN_ID: ALICE,
@@ -75,14 +94,22 @@ def handlers(fake_bitable):
         }
     )
     audit = AuditLog(fake_bitable, TBL_AUDIT)
-    return BotHandlers(
+    kwargs = dict(
         client=StubLarkClient(),
         directory=SalesDirectory(fake_bitable, TBL_SALES),
         referrals=ReferralService(fake_bitable, TBL_REFERRAL, audit),
         clients=ReferredClientService(fake_bitable, TBL_CLIENT, TBL_REFERRAL, audit),
         # 同步执行后台任务，避免线程竞态干扰断言
         background=lambda fn: fn(),
+        today=lambda: TODAY,
     )
+    kwargs.update(overrides)
+    return BotHandlers(**kwargs)
+
+
+@pytest.fixture
+def handlers(fake_bitable):
+    return make_handlers(fake_bitable)
 
 
 def trigger(
@@ -125,11 +152,24 @@ def marshalled(response) -> dict[str, Any]:
     return json.loads(lark.JSON.marshal(response))
 
 
+def click(bots, action: str, **kwargs) -> dict[str, Any]:
+    return marshalled(bots.on_card_action(trigger(action, **kwargs)))
+
+
+def pushed(bots) -> list[dict[str, Any]]:
+    """推出去的新消息里的卡片，按发送顺序。"""
+    return [json.loads(r.request_body.content) for r in bots._client.sent]
+
+
+def last_pushed(bots) -> dict[str, Any]:
+    return pushed(bots)[-1]
+
+
 def referral_form(**overrides) -> dict[str, Any]:
     form = {
         cards.F_REFERRAL_NAME: "北极星资本",
         cards.F_REFERRAL_EMAIL: "ops@polaris.example",
-        cards.F_REFERRAL_START_DATE: START_DATE_MS,
+        cards.F_REFERRAL_START_DATE: START_DATE_PICKED,
         cards.F_REFERRAL_RATE: "20",
         cards.F_REFERRAL_PAYOUT: schema.PAYOUT_MONTHLY,
     }
@@ -142,154 +182,242 @@ def submit_referral(handlers, form: dict[str, Any] | None = None) -> dict[str, A
     return marshalled(handlers.on_card_action(event))
 
 
-# ---------- 回调响应的结构 ----------
+def client_form(**overrides) -> dict[str, Any]:
+    form = {
+        cards.F_CLIENT_UID: UID,
+        cards.F_CLIENT_NAME: "PLUTO STUDIO LIMITED",
+        cards.F_CLIENT_REFERRAL: "R001",
+    }
+    form.update(overrides)
+    return form
 
 
-def test_回调响应序列化成平台要求的结构(handlers):
-    """``{"toast": {...}, "card": {"type": "raw", "data": <卡片 JSON>}}``
-
-    这三个 key 的名字和嵌套关系是平台定的，改错一个就是 200672。
-    """
-    response = handlers.on_card_action(trigger(cards.ACTION_OPEN_REFERRAL_FORM))
-    payload = marshalled(response)
-
-    assert set(payload) <= {"toast", "card"}
-    assert payload["card"]["type"] == "raw"
-    assert payload["card"]["data"]["schema"] == "2.0"
-    assert payload["card"]["data"]["header"]["title"]["content"] == "登记新渠道"
+def cards_walk(node: Any):
+    if isinstance(node, dict):
+        yield node
+        for value in node.values():
+            yield from cards_walk(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from cards_walk(item)
 
 
-def test_成功时带上_toast(handlers):
-    payload = submit_referral(handlers)
-
-    # type 只能是 info / success / error / warning
-    assert payload["toast"]["type"] == "success"
-    assert "R001" in payload["toast"]["content"]
-
-
-def _card_buttons(payload: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+def _buttons(card: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     found = []
-
-    def walk(node: Any) -> None:
-        if isinstance(node, dict):
-            if node.get("tag") == "button":
-                (callback,) = [b for b in node["behaviors"] if b["type"] == "callback"]
-                found.append((node["text"]["content"], callback["value"]))
-            for value in node.values():
-                walk(value)
-        elif isinstance(node, list):
-            for item in node:
-                walk(item)
-
-    walk(payload["card"]["data"])
+    for node in cards_walk(card):
+        if node.get("tag") != "button":
+            continue
+        (callback,) = [b for b in node["behaviors"] if b["type"] == "callback"]
+        found.append((node["text"]["content"], callback["value"]))
     return found
 
 
-def test_返回目录换回主菜单(handlers):
-    payload = marshalled(handlers.on_card_action(trigger(cards.ACTION_OPEN_MENU)))
-
-    assert "toast" not in payload
-    assert payload["card"]["data"]["header"]["title"]["content"] == "渠道佣金助手"
-    actions = {value["action"] for _, value in _card_buttons(payload)}
-    assert cards.ACTION_LIST_REFERRALS in actions
-    assert cards.ACTION_OPEN_MENU not in actions
+def _actions(card: dict[str, Any]) -> set[str]:
+    return {value["action"] for _, value in _buttons(card)}
 
 
-def test_渠道列表翻到第二页(handlers, monkeypatch):
-    """页大小生产是 60，测试里调小 —— 要测的是「页码传得下去」，不是六十条数据。"""
-    monkeypatch.setattr(cards, "REFERRAL_PAGE_SIZE", 2)
-    for index in range(3):
-        submit_referral(handlers, referral_form(**{cards.F_REFERRAL_NAME: f"渠道{index + 1}"}))
-
-    payload = marshalled(
-        handlers.on_card_action(
-            trigger(
-                cards.ACTION_LIST_REFERRALS,
-                value={"action": cards.ACTION_LIST_REFERRALS, "page": 1},
-            )
-        )
-    )
-    opened = [value["referral_no"] for _, value in _card_buttons(payload) if "referral_no" in value]
-    assert opened == ["R003"]
+def _text(card: dict[str, Any]) -> str:
+    return "\n".join(node["content"] for node in cards_walk(card) if node.get("tag") == "markdown")
 
 
-def test_点进自己的渠道看到特别信息(handlers):
-    submit_referral(handlers)
-    payload = marshalled(
-        handlers.on_card_action(
-            trigger(
-                "",
-                value={"action": cards.ACTION_OPEN_REFERRAL, "referral_no": "R001"},
-            )
-        )
-    )
-    card = payload["card"]["data"]
-    assert card["header"]["title"]["content"] == "北极星资本"
-    text = json.dumps(card, ensure_ascii=False)
-    assert "特别信息" in text
-    assert "地址：未填写" in text
-    assert "收款信息：未填写" in text
-    assert "分佣比例：20%" in text
-    assert ("返回列表", {"action": cards.ACTION_LIST_REFERRALS}) in _card_buttons(payload)
+MENU_ACTIONS = {
+    cards.ACTION_OPEN_REFERRAL_FORM,
+    cards.ACTION_OPEN_CLIENT_FORM,
+    cards.ACTION_LIST_REFERRALS,
+    cards.ACTION_OPEN_COMMISSION_QUERY,
+    cards.ACTION_OPEN_ECAS_QUERY,
+}
 
 
-def test_点进别人的渠道被拒绝(fake_bitable, handlers):
-    fake_bitable.table(TBL_REFERRAL).add_existing(
-        {
-            schema.REFERRAL_NO: "R099",
-            schema.REFERRAL_NAME: "别人的渠道",
-            schema.REFERRAL_OWNER_OPEN_ID: STRANGER,
-            schema.REFERRAL_ADDRESS: "不该被看到的地址",
-        }
-    )
-    payload = marshalled(
-        handlers.on_card_action(
-            trigger(
-                "",
-                value={"action": cards.ACTION_OPEN_REFERRAL, "referral_no": "R099"},
-            )
-        )
-    )
-    card = payload["card"]["data"]
-    text = json.dumps(card, ensure_ascii=False)
-    assert card["header"]["title"]["content"] == "找不到这个渠道"
-    assert "别人的渠道" not in text
-    assert "不该被看到的地址" not in text
-    actions = {value["action"] for _, value in _card_buttons(payload)}
-    assert actions == {cards.ACTION_LIST_REFERRALS, cards.ACTION_OPEN_MENU}
+# ---------- 被点的卡留得住：内容作为新消息推出去 ----------
 
 
-def test_没有_toast_时不发空字段(handlers):
-    """``toast: null`` 会被 SDK 的 filter_null 抹掉，这里钉住这个前提。"""
-    payload = marshalled(handlers.on_card_action(trigger(cards.ACTION_LIST_REFERRALS)))
-    assert "toast" not in payload
-
-
-def test_交互后仍然是_2_0_结构的卡片(handlers):
-    """平台规定 2.0 卡片交互后不能退回 1.0，否则报 200830。"""
-    for action in (
+@pytest.mark.parametrize(
+    "action",
+    [
+        cards.ACTION_OPEN_MENU,
         cards.ACTION_OPEN_REFERRAL_FORM,
         cards.ACTION_OPEN_CLIENT_FORM,
         cards.ACTION_LIST_REFERRALS,
-        "谁也不认识的动作",
-    ):
-        payload = marshalled(handlers.on_card_action(trigger(action)))
-        assert payload["card"]["data"]["schema"] == "2.0"
+    ],
+)
+def test_点按钮不换卡_新卡作为新消息发出去(handlers, action):
+    """回调响应里带 card 就是原地换卡，被点的那张就没了（「紀錄會消失」）。"""
+    payload = click(handlers, action)
+
+    assert payload == {}, "空响应：飞书收到 {} 就不动那张卡"
+    assert len(pushed(handlers)) == 1
+    assert last_pushed(handlers)["schema"] == "2.0"
 
 
-# ---------- 表单值的边界 ----------
+def test_空响应序列化出来就是空对象(handlers):
+    """``toast: null`` / ``card: null`` 会被 SDK 的 filter_null 抹掉，这里钉住这个前提。"""
+    assert lark.JSON.marshal(handlers.on_card_action(trigger(cards.ACTION_OPEN_MENU))) == "{}"
+
+
+def test_返回目录发一张新的主菜单(handlers):
+    click(handlers, cards.ACTION_OPEN_MENU)
+
+    menu = last_pushed(handlers)
+    assert menu["header"]["title"]["content"] == "渠道佣金助手"
+    assert _actions(menu) == MENU_ACTIONS
+
+
+def test_点进渠道_详情作为新消息_列表留着(handlers):
+    submit_referral(handlers)
+    payload = click(
+        handlers,
+        cards.ACTION_OPEN_REFERRAL,
+        value={"action": cards.ACTION_OPEN_REFERRAL, "referral_no": "R001"},
+    )
+
+    assert "card" not in payload
+    assert payload["toast"] == {"type": "info", "content": "正在打开 R001"}
+    detail = last_pushed(handlers)
+    assert detail["header"]["title"]["content"] == "北极星资本"
+    assert "分佣比例：20%" in _text(detail)
+    assert ("返回列表", {"action": cards.ACTION_LIST_REFERRALS}) in _buttons(detail)
+
+
+def test_翻页是唯一原地换列表的(handlers, monkeypatch):
+    """翻的是同一张列表，不是做完了一件事。页大小测试里调小。"""
+    monkeypatch.setattr(cards, "REFERRAL_PAGE_SIZE", 2)
+    for index in range(3):
+        submit_referral(handlers, referral_form(**{cards.F_REFERRAL_NAME: f"渠道{index + 1}"}))
+    sent_before = len(pushed(handlers))
+
+    payload = click(
+        handlers,
+        cards.ACTION_REFERRAL_PAGE,
+        value={"action": cards.ACTION_REFERRAL_PAGE, "page": 1},
+    )
+    assert payload["card"]["type"] == "raw"
+    assert payload["card"]["data"]["schema"] == "2.0"
+    opened = [v["referral_no"] for _, v in _buttons(payload["card"]["data"]) if "referral_no" in v]
+    assert opened == ["R003"]
+    assert len(pushed(handlers)) == sent_before, "翻页不发新消息"
+
+
+def test_从详情返回列表发一张新列表(handlers):
+    submit_referral(handlers)
+    payload = click(handlers, cards.ACTION_LIST_REFERRALS)
+
+    assert payload == {}
+    codes = [v["referral_no"] for _, v in _buttons(last_pushed(handlers)) if "referral_no" in v]
+    assert codes == ["R001"]
+
+
+def test_后台出错时推一张带菜单的报错卡(handlers, monkeypatch):
+    """人点了一下，总得看到点什么。"""
+
+    def boom(_sales):
+        raise RuntimeError("Base 炸了")
+
+    monkeypatch.setattr(handlers._referrals, "list_for", boom)
+    payload = click(handlers, cards.ACTION_LIST_REFERRALS)
+
+    assert payload == {}
+    card = last_pushed(handlers)
+    assert card["header"]["title"]["content"] == "没能完成"
+    assert MENU_ACTIONS <= _actions(card)
+
+
+def test_认不出的动作也推一张带菜单的卡而不是死路(handlers):
+    payload = click(handlers, "谁也不认识的动作")
+    assert payload == {}
+    assert MENU_ACTIONS <= _actions(last_pushed(handlers))
+
+
+# ---------- 表带表格的卡被拒时改发列点版 ----------
+
+
+def test_带表格的卡被拒时改发列点版(fake_bitable, caplog):
+    """表格组件线下只能照文档和 SDK 对。真机上万一不收，整条消息就发不出去 ——
+    所以同样的内容换成列点再发一次，日志里留下平台回的错误码。"""
+    bots = make_handlers(
+        fake_bitable,
+        client=StubLarkClient(reject_tables=True),
+        commission_query=StubCommissionQuery(),
+    )
+    with caplog.at_level(logging.WARNING):
+        click(bots, cards.ACTION_QUERY_COMMISSION, form={cards.F_QUERY_PERIOD: "2026-09"})
+
+    first, second = pushed(bots)
+    assert any(node.get("tag") == "table" for node in cards_walk(first))
+    assert not any(node.get("tag") == "table" for node in cards_walk(second))
+    assert "R076" in _text(second)
+    assert "230099" in caplog.text
+
+
+def test_不带表格的卡被拒时不重发(fake_bitable):
+    class RejectAll(StubLarkClient):
+        def create(self, request):
+            self.sent.append(request)
+            return _Rejected()
+
+    bots = make_handlers(fake_bitable, client=RejectAll())
+    click(bots, cards.ACTION_OPEN_MENU)
+    assert len(bots._client.sent) == 1
+
+
+# ---------- 登记渠道：校验回 toast，写入在后台 ----------
+
+
+def test_登记渠道提交后表单换成已提交回执(handlers):
+    """表单原样留着就能再点一次提交，登记出两条一样的渠道。回执把填过的列出来。"""
+    payload = submit_referral(handlers)
+
+    assert payload["toast"] == {"type": "success", "content": "已提交"}
+    receipt = payload["card"]["data"]
+    assert receipt["schema"] == "2.0"
+    assert receipt["header"]["title"]["content"] == "登记新渠道 · 已提交"
+    text = _text(receipt)
+    assert "渠道名称：北极星资本" in text
+    assert "开始日期：2026-01-15" in text
+    assert "分佣比例：20%" in text
+    assert _actions(receipt) == set(), "回执上不能再有提交按钮"
+
+
+def test_登记结果作为新消息推出来且带菜单(handlers):
+    submit_referral(handlers)
+
+    result = last_pushed(handlers)
+    assert result["header"]["title"]["content"] == "渠道已登记"
+    assert "R001" in _text(result)
+    assert "分佣比例 20%" in _text(result)
+    assert MENU_ACTIONS <= _actions(result)
+
+
+def test_登记写入失败时推报错卡(handlers, monkeypatch):
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("写冲突")
+
+    monkeypatch.setattr(handlers._referrals, "create", boom)
+    payload = submit_referral(handlers)
+
+    assert payload["card"]["data"]["header"]["title"]["content"] == "登记新渠道 · 已提交"
+    result = last_pushed(handlers)
+    assert result["header"]["title"]["content"] == "没能完成"
+    assert MENU_ACTIONS <= _actions(result)
+
+
+def _assert_rejected(payload: dict[str, Any], words: str) -> None:
+    """填错了：一句红字，**不带 card** —— 表单原样留着，改一个字就能再提交。"""
+    assert "card" not in payload
+    assert payload["toast"]["type"] == "error"
+    assert words in payload["toast"]["content"]
 
 
 def test_文本项回传_null_不会把回调打挂(handlers):
     """邮箱是选填的。平台对没填的项可能给 null，而不是干脆不给这个 key。
 
     ``form.get(key, "")`` 挡不住 null —— 默认值只在 key 缺失时生效。None 一路
-    传到 ``.strip()`` 才炸，在 3 秒回调里就是一句「系统出错了」，看不出是哪个字段。
+    传到 ``.strip()`` 才炸，就是一句「系统出错了」，看不出是哪个字段。
     """
     payload = submit_referral(handlers, referral_form(**{cards.F_REFERRAL_EMAIL: None}))
 
     assert payload["toast"]["type"] == "success"
-    assert payload["card"]["data"]["header"]["title"]["content"] == "渠道已登记"
+    assert last_pushed(handlers)["header"]["title"]["content"] == "渠道已登记"
 
 
 def test_文本项整个缺失也能提交(handlers):
@@ -307,40 +435,41 @@ def _referral_fields(fake_bitable) -> dict[str, Any]:
     return written
 
 
-def test_日期时间戳落成业务时区的日历日(fake_bitable, handlers):
-    """选择器给的是毫秒时间戳，写进 Base 的是业务时区那一天的零点，和导入脚本同口径。"""
-    submit_referral(handlers)
+def test_日期选择器的真实回传能登记(fake_bitable, handlers):
+    """``2026-01-15 +0800`` 是飞书日期选择器的真实回传。原先只认毫秒时间戳和纯日期，
+    选了日期照样报「开始日期要选一个日期」（2026-09-24 反馈）。"""
+    payload = submit_referral(handlers)
+
+    assert payload["toast"]["type"] == "success"
+    assert _referral_fields(fake_bitable)[schema.REFERRAL_START_DATE] == date_to_ms(
+        START_DATE, tz=DEFAULT_BUSINESS_TIMEZONE
+    )
+
+
+@pytest.mark.parametrize(
+    "picked",
+    [
+        START_DATE_PICKED,
+        "2026-01-15 -0500",  # 人在别的时区也是他点的那一天
+        "2026-01-15",
+        "2026-01-15 10:00 +0800",
+        {"value": START_DATE_PICKED},
+        START_DATE_MS,
+        {"value": START_DATE_MS},
+    ],
+)
+def test_日期的几种回传形态都落成同一天(fake_bitable, handlers, picked):
+    submit_referral(handlers, referral_form(**{cards.F_REFERRAL_START_DATE: picked}))
 
     assert _referral_fields(fake_bitable)[schema.REFERRAL_START_DATE] == date_to_ms(
         START_DATE, tz=DEFAULT_BUSINESS_TIMEZONE
     )
 
 
-def test_日期包成字典也认(fake_bitable, handlers):
-    submit_referral(
-        handlers, referral_form(**{cards.F_REFERRAL_START_DATE: {"value": START_DATE_MS}})
-    )
-
-    assert _referral_fields(fake_bitable)[schema.REFERRAL_START_DATE] == date_to_ms(
-        START_DATE, tz=DEFAULT_BUSINESS_TIMEZONE
-    )
-
-
-def test_日期回传_YYYY_MM_DD_文本也认(fake_bitable, handlers):
-    """少一种「明明填了合法日期却报错」的情况。"""
-    submit_referral(handlers, referral_form(**{cards.F_REFERRAL_START_DATE: "2026-01-15"}))
-
-    assert _referral_fields(fake_bitable)[schema.REFERRAL_START_DATE] == date_to_ms(
-        START_DATE, tz=DEFAULT_BUSINESS_TIMEZONE
-    )
-
-
-@pytest.mark.parametrize("missing", [None, "", "不是日期"])
+@pytest.mark.parametrize("missing", [None, "", "不是日期", "2026-02-30 +0800"])
 def test_日期取不到时给出人话报错(handlers, missing):
     payload = submit_referral(handlers, referral_form(**{cards.F_REFERRAL_START_DATE: missing}))
-
-    assert payload["card"]["data"]["header"]["title"]["content"] == "没能完成"
-    assert "开始日期" in json.dumps(payload, ensure_ascii=False)
+    _assert_rejected(payload, "开始日期")
 
 
 def test_结算频率原样写进_Base(fake_bitable, handlers):
@@ -362,16 +491,12 @@ def test_结算频率包成字典也认(fake_bitable, handlers):
 @pytest.mark.parametrize("bad", [None, "", "按月", "monthly"])
 def test_结算频率不是模板原文时给出人话报错(handlers, bad):
     payload = submit_referral(handlers, referral_form(**{cards.F_REFERRAL_PAYOUT: bad}))
-
-    assert payload["card"]["data"]["header"]["title"]["content"] == "没能完成"
-    assert "结算频率" in json.dumps(payload, ensure_ascii=False)
+    _assert_rejected(payload, "结算频率")
 
 
 def test_必填项回传_null_给出人话报错(handlers):
     payload = submit_referral(handlers, referral_form(**{cards.F_REFERRAL_NAME: None}))
-
-    assert payload["card"]["data"]["header"]["title"]["content"] == "没能完成"
-    assert "渠道名称" in json.dumps(payload, ensure_ascii=False)
+    _assert_rejected(payload, "渠道名称")
 
 
 @pytest.mark.parametrize("typed", ["20", " 20 ", "20%", "20 %"])
@@ -383,35 +508,69 @@ def test_比例带百分号也认(handlers, typed):
 
 def test_比例填了不是数字给出人话报错(handlers):
     payload = submit_referral(handlers, referral_form(**{cards.F_REFERRAL_RATE: "两成"}))
-    assert "分佣比例" in json.dumps(payload, ensure_ascii=False)
+    _assert_rejected(payload, "分佣比例")
+
+
+def test_校验失败时什么都不写也不推(fake_bitable, handlers):
+    submit_referral(handlers, referral_form(**{cards.F_REFERRAL_RATE: "两成"}))
+
+    assert fake_bitable.writes == []
+    assert pushed(handlers) == []
+
+
+# ---------- 登记客户 ----------
 
 
 def test_下拉回传裸字符串和包字典两种形态都认(handlers):
-    handlers.on_card_action(trigger(cards.ACTION_SUBMIT_REFERRAL, form=referral_form()))
+    submit_referral(handlers)
 
-    plain = handlers.on_card_action(
-        trigger(
-            cards.ACTION_SUBMIT_CLIENT,
-            form={
-                cards.F_CLIENT_UID: UID,
-                cards.F_CLIENT_NAME: "普罗米修斯资本",
-                cards.F_CLIENT_REFERRAL: "R001",
-            },
-        )
-    )
-    assert marshalled(plain)["toast"]["type"] == "success"
+    plain = click(handlers, cards.ACTION_SUBMIT_CLIENT, form=client_form())
+    assert plain["toast"]["type"] == "success"
+    assert last_pushed(handlers)["header"]["title"]["content"] == "客户已登记"
 
-    wrapped = handlers.on_card_action(
-        trigger(
-            cards.ACTION_SUBMIT_CLIENT,
-            form={
+    wrapped = click(
+        handlers,
+        cards.ACTION_SUBMIT_CLIENT,
+        form=client_form(
+            **{
                 cards.F_CLIENT_UID: "577809207768677762",
                 cards.F_CLIENT_NAME: "普罗米修斯投资",
                 cards.F_CLIENT_REFERRAL: {"value": "R001"},
-            },
-        )
+            }
+        ),
     )
-    assert marshalled(wrapped)["toast"]["type"] == "success"
+    assert wrapped["toast"]["type"] == "success"
+    assert last_pushed(handlers)["header"]["title"]["content"] == "客户已登记"
+
+
+def test_登记客户提交后换成已提交回执_结果另推带菜单(handlers):
+    submit_referral(handlers)
+    payload = click(handlers, cards.ACTION_SUBMIT_CLIENT, form=client_form())
+
+    receipt = payload["card"]["data"]
+    assert receipt["header"]["title"]["content"] == "登记新客户 · 已提交"
+    assert f"客户UID：{UID}" in _text(receipt)
+    assert _actions(receipt) == set()
+    assert MENU_ACTIONS <= _actions(last_pushed(handlers))
+
+
+def test_UID_不是数字时回红字_表单留着(handlers):
+    submit_referral(handlers)
+    payload = click(
+        handlers, cards.ACTION_SUBMIT_CLIENT, form=client_form(**{cards.F_CLIENT_UID: "abc"})
+    )
+    _assert_rejected(payload, "纯数字")
+
+
+def test_UID_重复时推一张报错卡(handlers):
+    """查重要读客户表，放在后台做；表单已经换成回执，结果卡说清楚为什么没登记上。"""
+    submit_referral(handlers)
+    click(handlers, cards.ACTION_SUBMIT_CLIENT, form=client_form())
+    click(handlers, cards.ACTION_SUBMIT_CLIENT, form=client_form())
+
+    result = last_pushed(handlers)
+    assert result["header"]["title"]["content"] == "没能完成"
+    assert "已经登记过了" in _text(result)
 
 
 def test_回传值必须是对象不能是字符串():
@@ -442,12 +601,14 @@ def test_所有卡片的回传值都是对象():
 # ---------- 身份 ----------
 
 
-def test_名册外的人被拒且拿到_2_0_卡片(handlers):
-    payload = marshalled(
-        handlers.on_card_action(trigger(cards.ACTION_OPEN_REFERRAL_FORM, open_id=STRANGER))
-    )
-    assert payload["card"]["data"]["schema"] == "2.0"
-    assert payload["card"]["data"]["header"]["template"] == "red"
+def test_名册外的人只拿到一句红字(handlers):
+    """给一排按钮，点了还是同一句拒绝 —— 不如不给。也不换掉他点的那张卡。"""
+    payload = click(handlers, cards.ACTION_OPEN_REFERRAL_FORM, open_id=STRANGER)
+
+    assert "card" not in payload
+    assert payload["toast"]["type"] == "error"
+    assert "销售名册" in payload["toast"]["content"]
+    assert pushed(handlers) == []
 
 
 def test_归属取自回调而不是表单(fake_bitable, handlers):
@@ -459,112 +620,47 @@ def test_归属取自回调而不是表单(fake_bitable, handlers):
         )
     )
 
-    (_, written) = next(
-        (table_id, fields) for table_id, fields in fake_bitable.writes if table_id == TBL_REFERRAL
-    )
+    written = _referral_fields(fake_bitable)
     assert written[schema.REFERRAL_OWNER_OPEN_ID] == ALICE
     assert written[schema.REFERRAL_OWNER] == [{"id": ALICE}]
 
 
-# ---------- 做完一件事之后，下一轮入口要在原地 ----------
-#
-# 卡片回调的返回值是**原地替换**：点「登记新渠道」，菜单卡被表单卡盖掉；点「提交」，
-# 表单卡又被成功卡盖掉。结果卡上没有按钮的话，要做下一件只能重新打字。
-# 下面这几条钉的就是「每一张结果卡都带着菜单」。
+def test_推给谁取自回调里的_open_id(handlers):
+    click(handlers, cards.ACTION_OPEN_MENU)
+
+    (request,) = handlers._client.sent
+    assert request.receive_id_type == "open_id"
+    assert request.request_body.receive_id == ALICE
 
 
-def _actions_in(payload: dict[str, Any]) -> set[str]:
-    found = set()
-    for node in cards_walk(payload["card"]["data"]):
-        if node.get("tag") != "button":
-            continue
-        for behavior in node.get("behaviors", []):
-            if behavior.get("type") == "callback":
-                found.add(behavior["value"]["action"])
-    return found
-
-
-def cards_walk(node: Any):
-    if isinstance(node, dict):
-        yield node
-        for value in node.values():
-            yield from cards_walk(value)
-    elif isinstance(node, list):
-        for item in node:
-            yield from cards_walk(item)
-
-
-MENU_ACTIONS = {
-    cards.ACTION_OPEN_REFERRAL_FORM,
-    cards.ACTION_OPEN_CLIENT_FORM,
-    cards.ACTION_LIST_REFERRALS,
-    cards.ACTION_OPEN_COMMISSION_QUERY,
-    cards.ACTION_OPEN_ECAS_QUERY,
-}
-
-
-def test_登记成功的卡片上带着下一轮菜单(handlers):
-    assert MENU_ACTIONS <= _actions_in(submit_referral(handlers))
+# ---------- 结果卡带菜单，导览卡带退路 ----------
 
 
 def test_我的渠道走返回目录而不是叠一层菜单(handlers):
     """导览卡的下一步是往回走，不是重开一件事 —— 所以它给「返回目录」，不给五个入口。"""
-    payload = marshalled(handlers.on_card_action(trigger(cards.ACTION_LIST_REFERRALS)))
-    actions = _actions_in(payload)
+    click(handlers, cards.ACTION_LIST_REFERRALS)
+    actions = _actions(last_pushed(handlers))
     assert cards.ACTION_OPEN_MENU in actions
     assert cards.ACTION_OPEN_REFERRAL_FORM not in actions
 
 
-def test_返回目录真的回到主菜单(handlers):
-    payload = marshalled(handlers.on_card_action(trigger(cards.ACTION_OPEN_MENU)))
-    assert _actions_in(payload) == MENU_ACTIONS
-
-
-def test_认不出的动作也给菜单而不是死路(handlers):
-    payload = marshalled(handlers.on_card_action(trigger("谁也不认识的动作")))
-    assert MENU_ACTIONS <= _actions_in(payload)
-
-
-def test_校验失败的卡片上也带菜单(handlers):
-    """填错一项就要重新打字唤出菜单，是这次要修掉的体验里最烦的一种。"""
-    payload = submit_referral(handlers, referral_form(**{cards.F_REFERRAL_RATE: "不是数字"}))
-    assert MENU_ACTIONS <= _actions_in(payload)
-
-
-def test_名册里没有的人不给菜单(handlers):
-    """给一排按钮，点了还是同一句拒绝 —— 不如不给。"""
-    payload = marshalled(
-        handlers.on_card_action(trigger(cards.ACTION_LIST_REFERRALS, open_id=STRANGER))
-    )
-    assert _actions_in(payload) == set()
-
-
 def test_表单卡给退路不给整个菜单(handlers):
     """按错了进来得走得掉，但表单有自己的提交按钮，底下再堆五个入口只会让人点错。"""
-    payload = marshalled(handlers.on_card_action(trigger(cards.ACTION_OPEN_REFERRAL_FORM)))
-    assert _actions_in(payload) == {cards.ACTION_SUBMIT_REFERRAL, cards.ACTION_OPEN_MENU}
+    click(handlers, cards.ACTION_OPEN_REFERRAL_FORM)
+    assert _actions(last_pushed(handlers)) == {cards.ACTION_SUBMIT_REFERRAL, cards.ACTION_OPEN_MENU}
 
 
-def test_异步提交的等待卡不挂菜单而结果卡挂(handlers):
-    """等待卡的下一步是「等结果」，不是「再做一件事」。菜单要跟着结果走。"""
+def test_登记客户的表单卡也有退路(handlers):
     submit_referral(handlers)
-    ack = marshalled(
-        handlers.on_card_action(
-            trigger(
-                cards.ACTION_SUBMIT_CLIENT,
-                form={
-                    cards.F_CLIENT_UID: UID,
-                    cards.F_CLIENT_NAME: "PLUTO STUDIO LIMITED",
-                    cards.F_CLIENT_REFERRAL: "R001",
-                },
-            )
-        )
-    )
-    assert _actions_in(ack) == set()
+    click(handlers, cards.ACTION_OPEN_CLIENT_FORM)
+    assert cards.ACTION_OPEN_MENU in _actions(last_pushed(handlers))
 
-    # background 是同步执行器，结果卡这时已经推出去了
-    pushed = json.loads(handlers._client.sent[-1].request_body.content)
-    assert MENU_ACTIONS <= _actions_in({"card": {"data": pushed}})
+
+def test_没有渠道时登记客户给提示和菜单(handlers):
+    click(handlers, cards.ACTION_OPEN_CLIENT_FORM)
+    card = last_pushed(handlers)
+    assert card["header"]["title"]["content"] == "还不能登记客户"
+    assert MENU_ACTIONS <= _actions(card)
 
 
 # ---------- 我的渠道：权限 ----------
@@ -577,12 +673,8 @@ def test_别的销售的渠道不会出现在我的列表里(fake_bitable, handl
         {schema.REFERRAL_NO: "R999", schema.REFERRAL_OWNER_OPEN_ID: STRANGER}
     )
 
-    payload = marshalled(handlers.on_card_action(trigger(cards.ACTION_LIST_REFERRALS)))
-    codes = {
-        node["value"].get("referral_no")
-        for node in cards_walk(payload["card"]["data"])
-        if node.get("type") == "callback" and isinstance(node.get("value"), dict)
-    }
+    click(handlers, cards.ACTION_LIST_REFERRALS)
+    codes = {v.get("referral_no") for _, v in _buttons(last_pushed(handlers))}
     assert "R001" in codes
     assert "R999" not in codes
 
@@ -590,18 +682,136 @@ def test_别的销售的渠道不会出现在我的列表里(fake_bitable, handl
 def test_点别人的渠道编号进不去(fake_bitable, handlers):
     """编号来自按钮回传，客户端改得了。权限判断不能只在列表那一步做。"""
     fake_bitable.table(TBL_REFERRAL).add_existing(
-        {schema.REFERRAL_NO: "R999", schema.REFERRAL_OWNER_OPEN_ID: STRANGER}
+        {
+            schema.REFERRAL_NO: "R999",
+            schema.REFERRAL_NAME: "别人的渠道",
+            schema.REFERRAL_OWNER_OPEN_ID: STRANGER,
+        }
     )
 
-    payload = marshalled(
-        handlers.on_card_action(
-            trigger(
-                cards.ACTION_OPEN_REFERRAL,
-                value={"action": cards.ACTION_OPEN_REFERRAL, "referral_no": "R999"},
-            )
-        )
+    click(
+        handlers,
+        cards.ACTION_OPEN_REFERRAL,
+        value={"action": cards.ACTION_OPEN_REFERRAL, "referral_no": "R999"},
     )
-    assert payload["card"]["data"]["header"]["title"]["content"] == "找不到这个渠道"
+    card = last_pushed(handlers)
+    assert card["header"]["title"]["content"] == "找不到这个渠道"
+    assert "别人的渠道" not in json.dumps(card, ensure_ascii=False)
+    assert _actions(card) == {cards.ACTION_LIST_REFERRALS, cards.ACTION_OPEN_MENU}
+
+
+# ---------- 佣金查询 ----------
+
+
+class StubCommissionQuery:
+    """记下被问了哪几个月，回一个 R076 的结果。"""
+
+    def __init__(self) -> None:
+        self.asked: list[list[str]] = []
+
+    def query(self, sales, periods):
+        from crm_basebot.domain.commission_query import (
+            ClientBreakdown,
+            QueryResult,
+            ReferralBreakdown,
+        )
+
+        self.asked.append(list(periods))
+        breakdown = ReferralBreakdown("R076", "DAI CANGWEI", Decimal("30"))
+        breakdown.clients[UID] = ClientBreakdown(uid=UID, name="客户甲", revenue=Decimal("1000"))
+        return QueryResult(periods=list(periods), months={periods[-1]: [breakdown]})
+
+
+def test_佣金查询预选本月_不去扫看板(fake_bitable):
+    """以前为了预选一个月份扫一遍上万行的看板；现在预选本月，一个请求都不发。"""
+    query = StubCommissionQuery()
+    bots = make_handlers(fake_bitable, commission_query=query)
+
+    assert click(bots, cards.ACTION_OPEN_COMMISSION_QUERY) == {}
+    card = last_pushed(bots)
+    (select,) = [n for n in cards_walk(card) if n.get("tag") == "select_static"]
+    assert select["initial_option"] == "2026-09"
+    options = [o["value"] for o in select["options"]]
+    assert options[0] == "2026-09"
+    assert options[-1] == "2025-10"
+    assert len(options) == 12
+    assert query.asked == []
+
+
+def test_佣金查询查选中月份和前两个月_表单留着(fake_bitable):
+    query = StubCommissionQuery()
+    bots = make_handlers(fake_bitable, commission_query=query)
+
+    payload = click(bots, cards.ACTION_QUERY_COMMISSION, form={cards.F_QUERY_PERIOD: "2026-09"})
+
+    assert "card" not in payload, "查询表单留着，可以换个月份再查"
+    assert payload["toast"] == {"type": "info", "content": "正在查询 2026-07 ~ 2026-09"}
+    assert query.asked == [["2026-07", "2026-08", "2026-09"]]
+    result = last_pushed(bots)
+    assert result["header"]["title"]["content"] == "佣金明细  2026-07 ~ 2026-09"
+    assert UID not in json.dumps(result, ensure_ascii=False)
+    assert MENU_ACTIONS <= _actions(result)
+
+
+def test_佣金查询本月那一列标至今(fake_bitable):
+    bots = make_handlers(fake_bitable, commission_query=StubCommissionQuery())
+    click(bots, cards.ACTION_QUERY_COMMISSION, form={cards.F_QUERY_PERIOD: "2026-09"})
+
+    tables = [n for n in cards_walk(last_pushed(bots)) if n.get("tag") == "table"]
+    headers = [c["display_name"] for c in tables[-1]["columns"]]
+    assert headers == ["渠道 / 客户", "7月", "8月", "9月至今"]
+
+
+@pytest.mark.parametrize("bad", ["2026-13", "", "九月"])
+def test_佣金查询月份不对时弹红字(fake_bitable, bad):
+    bots = make_handlers(fake_bitable, commission_query=StubCommissionQuery())
+    payload = click(bots, cards.ACTION_QUERY_COMMISSION, form={cards.F_QUERY_PERIOD: bad})
+    _assert_rejected(payload, "YYYY-MM")
+    assert pushed(bots) == []
+
+
+def test_佣金查询失败时推一张说清楚的报错卡(fake_bitable):
+    class Broken(StubCommissionQuery):
+        def query(self, sales, periods):
+            raise RuntimeError("看板读不到")
+
+    bots = make_handlers(fake_bitable, commission_query=Broken())
+    click(bots, cards.ACTION_QUERY_COMMISSION, form={cards.F_QUERY_PERIOD: "2026-09"})
+
+    card = last_pushed(bots)
+    assert "查询佣金明细失败" in _text(card)
+    assert MENU_ACTIONS <= _actions(card)
+
+
+def test_没配佣金查询时推一句未启用(handlers):
+    assert click(handlers, cards.ACTION_OPEN_COMMISSION_QUERY) == {}
+    assert "未启用" in _text(last_pushed(handlers))
+
+
+# ---------- ECAS 返佣 ----------
+
+
+class StubEcasQuery:
+    def periods_for(self, sales):
+        return ["2026-08", "2026-09"]
+
+    def query(self, sales, period):
+        return []
+
+
+def test_ECAS查询表单作为新消息_结果也是(fake_bitable):
+    bots = make_handlers(fake_bitable, ecas_query=StubEcasQuery())
+
+    assert click(bots, cards.ACTION_OPEN_ECAS_QUERY) == {}
+    (select,) = [n for n in cards_walk(last_pushed(bots)) if n.get("tag") == "select_static"]
+    assert select["initial_option"] == "2026-09"
+
+    payload = click(bots, cards.ACTION_QUERY_ECAS, form={cards.F_ECAS_PERIOD: "2026-09"})
+    assert "card" not in payload
+    assert payload["toast"] == {"type": "info", "content": "正在查询 2026-09"}
+    result = last_pushed(bots)
+    assert result["header"]["title"]["content"] == "ECAS 返佣  2026-09"
+    assert MENU_ACTIONS <= _actions(result)
 
 
 # ---------- 打开会话就自动弹菜单 ----------
@@ -664,7 +874,7 @@ def test_打开会话就推一张主菜单(fake_bitable):
 
     (card,) = _pushed(bots)
     assert card["header"]["title"]["content"] == "渠道佣金助手"
-    assert MENU_ACTIONS <= _actions_in({"card": {"data": card}})
+    assert MENU_ACTIONS <= _actions(card)
 
 
 def test_冷却期内再进来不重复推(fake_bitable):
@@ -731,123 +941,98 @@ def test_事件里没有open_id时安静跳过(fake_bitable):
     assert _pushed(bots) == []
 
 
-def test_登记客户的表单卡也有退路(handlers):
-    submit_referral(handlers)
-    payload = marshalled(handlers.on_card_action(trigger(cards.ACTION_OPEN_CLIENT_FORM)))
-    assert cards.ACTION_OPEN_MENU in _actions_in(payload)
-
-
 # ---------- 详情卡：附加信息取不到时不能把整张卡换成报错 ----------
 
 
-def _open_r001(bots):
-    return marshalled(
-        bots.on_card_action(
-            trigger("", value={"action": cards.ACTION_OPEN_REFERRAL, "referral_no": "R001"})
-        )
+def _open_r001(bots) -> dict[str, Any]:
+    bots.on_card_action(
+        trigger("", value={"action": cards.ACTION_OPEN_REFERRAL, "referral_no": "R001"})
     )
-
-
-def _detail_text(payload) -> str:
-    return "\n".join(
-        node["content"]
-        for node in cards_walk(payload["card"]["data"])
-        if node.get("tag") == "markdown"
-    )
+    return last_pushed(bots)
 
 
 class StubHistory:
-    def __init__(self, fees=None, boom=False) -> None:
-        self._fees = fees or []
+    def __init__(self, months=None, boom=False) -> None:
+        self._months = months or []
         self._boom = boom
-        self.asked: list[str] = []
+        self.asked: list[tuple[str, date]] = []
 
-    def recent(self, referral_no, *, today, months=3):
-        self.asked.append(referral_no)
+    def recent(self, referral_record_id, *, today, months=3):
+        self.asked.append((referral_record_id, today))
         if self._boom:
             raise RuntimeError("Base 炸了")
-        return list(self._fees)
+        return list(self._months)
 
 
-def _with_history(fake_bitable, history) -> BotHandlers:
-    fake_bitable.table(TBL_SALES).add_existing(
-        {
-            schema.SALES_OPEN_ID: ALICE,
-            schema.SALES_NAME: "Alice",
-            schema.SALES_ROLE: schema.ROLE_SALES,
-            schema.SALES_STATUS: schema.SALES_STATUS_ACTIVE,
-        }
+def test_详情卡带出近三个月每个客户和客户名单(fake_bitable):
+    from crm_basebot.domain.referral_history import ChannelMonth, ClientMonth
+
+    history = StubHistory(
+        [
+            ChannelMonth(
+                "2026-08",
+                ecas=Decimal("60000"),
+                clients=(ClientMonth("PLUTO STUDIO LIMITED", None, Decimal("60000")),),
+            )
+        ]
     )
-    audit = AuditLog(fake_bitable, TBL_AUDIT)
-    return BotHandlers(
-        client=StubLarkClient(),
-        directory=SalesDirectory(fake_bitable, TBL_SALES),
-        referrals=ReferralService(fake_bitable, TBL_REFERRAL, audit),
-        clients=ReferredClientService(fake_bitable, TBL_CLIENT, TBL_REFERRAL, audit),
-        referral_history=history,
-        background=lambda fn: fn(),
-    )
-
-
-def test_详情卡带出近三个月和客户(fake_bitable):
-    from decimal import Decimal
-
-    from crm_basebot.domain.referral_history import MonthlyFee
-
-    history = StubHistory([MonthlyFee("2026-08", None, Decimal("60000"))])
-    bots = _with_history(fake_bitable, history)
+    bots = make_handlers(fake_bitable, referral_history=history)
     submit_referral(bots)
-    bots.on_card_action(
-        trigger(
-            cards.ACTION_SUBMIT_CLIENT,
-            form={
-                cards.F_CLIENT_UID: UID,
-                cards.F_CLIENT_NAME: "PLUTO STUDIO LIMITED",
-                cards.F_CLIENT_REFERRAL: "R001",
-            },
-        )
-    )
+    click(bots, cards.ACTION_SUBMIT_CLIENT, form=client_form())
 
-    text = _detail_text(_open_r001(bots))
-    assert history.asked == ["R001"]
-    assert "2026-08　交易 —　ECAS 60,000.00" in text
-    assert "PLUTO STUDIO LIMITED" in text
+    detail = _open_r001(bots)
+    text = _text(detail)
+    assert "**2026-08**　交易 — · ECAS 60,000.00" in text
+    assert "客户（1）" in text
+    (table,) = [n for n in cards_walk(detail) if n.get("tag") == "table"]
+    assert table["rows"] == [{"client": "PLUTO STUDIO LIMITED", "trade": "—", "ecas": "60,000.00"}]
+
+
+def test_详情卡按鉴过权的_record_id_和业务时区的今天去取(fake_bitable):
+    history = StubHistory()
+    bots = make_handlers(fake_bitable, referral_history=history)
+    submit_referral(bots)
+    _open_r001(bots)
+
+    ((record_id, today),) = history.asked
+    assert fake_bitable.table(TBL_REFERRAL).records[record_id][schema.REFERRAL_NO] == "R001"
+    assert today == TODAY
 
 
 def test_近三个月读不到时照样给资料(fake_bitable):
     """渠道资料已经在手上了。为了附加信息把整张卡换成报错，是拿有用的换没用的。"""
-    bots = _with_history(fake_bitable, StubHistory(boom=True))
+    bots = make_handlers(fake_bitable, referral_history=StubHistory(boom=True))
     submit_referral(bots)
 
-    text = _detail_text(_open_r001(bots))
+    text = _text(_open_r001(bots))
     assert "这次没查到" in text
     assert "分佣比例：20%" in text
 
 
 def test_客户读不到时照样给资料(fake_bitable, monkeypatch):
-    bots = _with_history(fake_bitable, StubHistory())
+    bots = make_handlers(fake_bitable, referral_history=StubHistory())
     submit_referral(bots)
 
     def boom(_record_id):
         raise RuntimeError("客户表炸了")
 
     monkeypatch.setattr(bots._clients, "names_for_referral", boom)
-    text = _detail_text(_open_r001(bots))
+    text = _text(_open_r001(bots))
     assert "分佣比例：20%" in text
     assert "客户（" not in text
 
 
 def test_没注入历史服务时那一节不显示(handlers):
-    """没配汇总表的租户照样能点进渠道详情。"""
+    """没配看板和 ECAS 表的租户照样能点进渠道详情。"""
     submit_referral(handlers)
-    text = _detail_text(_open_r001(handlers))
+    text = _text(_open_r001(handlers))
     assert "近 3 个月" not in text
     assert "分佣比例：20%" in text
 
 
 def test_别人的渠道下的客户不会漏进详情卡(fake_bitable):
     """names_for_referral 只按调用方鉴过权的那条 record_id 取数。"""
-    bots = _with_history(fake_bitable, StubHistory())
+    bots = make_handlers(fake_bitable, referral_history=StubHistory())
     submit_referral(bots)
     other = fake_bitable.table(TBL_REFERRAL).add_existing(
         {schema.REFERRAL_NO: "R999", schema.REFERRAL_OWNER_OPEN_ID: STRANGER}
@@ -856,4 +1041,4 @@ def test_别人的渠道下的客户不会漏进详情卡(fake_bitable):
         {schema.CLIENT_NAME: "别人的客户", schema.CLIENT_REFERRAL_LINK: [other]}
     )
 
-    assert "别人的客户" not in _detail_text(_open_r001(bots))
+    assert "别人的客户" not in _text(_open_r001(bots))

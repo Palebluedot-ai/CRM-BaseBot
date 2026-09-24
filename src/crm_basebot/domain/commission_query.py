@@ -1,8 +1,10 @@
-"""销售自查用的佣金明细：按渠道 × 客户展开某个月的应付佣金。
+"""销售自查用的佣金明细：按渠道 × 客户展开**连续几个月**的应付佣金。
 
 对账任务（jobs/reconcile.py）只写「按月 × 渠道」的粗粒度汇总到 Commission Summary
 表，因为 Base 里不需要按客户分行留存。但销售自查时想看到「我的 R001 里，客户 A
 贡献了多少佣金、客户 B 贡献了多少」，这个粒度必须在读取路径上现算。
+
+一次查几个月（2026-09-24 反馈：要看到近三个月），看板只扫一遍，只读算钱要的三列。
 
 设计约束：
 
@@ -10,44 +12,45 @@
    的口径，不新写一份鉴权。
 2. **只读**：这个模块不写任何东西，也不触碰 Commission Summary 表 —— 那是对账
    任务的写入面，跟自查是两个用途。
-3. **性能**：卡片回调只有 3 秒，扫全表 + 聚合可能超时。调用方（handlers.py）负责
-   走异步模式：立即 ack「处理中」，实际计算和结果消息在后台线程里做。
+3. **性能**：扫全表 + 聚合要好几秒，压不进卡片回调的 3 秒。调用方（handlers.py）
+   在后台线程里跑，算完把结果作为新消息推出去。
+4. **同一段算法**：「我的渠道」详情卡上的每客户数字也走 ``accumulate`` 和
+   ``ReferralBreakdown``（见 ``referral_history.py``）。两张卡上同一个渠道同一个月的
+   数出自同一段代码，才一定对得上。
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from zoneinfo import ZoneInfo
 
 from ..bot.auth import Sales
-from ..lark.bitable import BitableClient
+from ..lark.bitable import BitableClient, Record
 from ..lark.values import extract_text, to_number, to_uid
 from . import schema
 from .commission import CENTS, Referral, _link_ids, period_of
 
 logger = logging.getLogger(__name__)
 
+# 算钱只要这三列。看板有十几列，全字段读回来大半是白搬。
+BOARD_FIELDS = [schema.BOARD_CLIENT_UID, schema.BOARD_ORDER_DATE, schema.BOARD_TOTAL_REVENUE]
+
 
 @dataclass
 class ClientBreakdown:
-    """某个渠道下某个客户在一个月里的贡献。"""
+    """某个渠道下某个客户在一个月里的贡献。
+
+    单客户的收入有可能是负（退款/冲销集中在这一个客户），但那不影响客户应不应该被
+    展示 —— 它只影响渠道合计后要不要被保底，保底在 ``ReferralBreakdown`` 那层。
+    """
 
     uid: str
     name: str
     revenue: Decimal = Decimal("0")
     row_count: int = 0
-
-    @property
-    def gross_payable(self) -> Decimal:
-        """先按客户级算个原始金额。渠道级保底 max(0, ...) 在 ReferralBreakdown 那层。
-
-        单客户的原始金额有可能是负（退款/冲销集中在这一个客户），但那不影响客户
-        应不应该被展示 —— 它只影响渠道合计后要不要被保底。
-        """
-        # 客户级 gross 只是拿来展示的，具体的 rate 从渠道那边带下来
-        return self.revenue
 
 
 @dataclass
@@ -92,56 +95,211 @@ class ReferralBreakdown:
     def is_loss_month(self) -> bool:
         return self.revenue_total < Decimal("0")
 
-    def client_share(self, client: ClientBreakdown) -> Decimal:
-        """把渠道级的应付按各客户的收入占比分下去，方便展示。
+    def client_shares(self) -> dict[str, Decimal]:
+        """把渠道级的应付按各客户的收入占比分下去，**加起来一分不差**等于渠道应付。
 
         为什么按占比分而不是「客户收入 × 分佣比例」：因为渠道级要过一次 max(0,...)
         保底，如果直接按客户算再相加，负客户会被单独归零、正客户不受影响 —— 加起来
-        就会大于渠道应付。占比法保证 sum(客户份额) == 渠道应付。
+        就会大于渠道应付。
+
+        为什么不是逐个四舍五入：客户一多，各自进位之后的合计会和渠道应付差一两分，
+        而卡片上写着「加起来就是渠道应付」。所以用最大余数法：先都往下取到分，差的
+        那几分给被截掉最多的几个客户。
 
         整月合计为负、或者 revenue_total 恰好为 0 时，客户份额都归 0；对应的
         payable 本来也是 0，占比无从算起。
         """
         if self.revenue_total <= 0 or self.payable == 0:
-            return Decimal("0")
-        share = client.revenue / self.revenue_total
-        return (self.payable * share).quantize(CENTS, rounding=ROUND_HALF_UP)
+            return {uid: Decimal("0") for uid in self.clients}
+
+        exact = {
+            uid: self.payable * client.revenue / self.revenue_total
+            for uid, client in self.clients.items()
+        }
+        shares = {uid: value.quantize(CENTS, rounding=ROUND_FLOOR) for uid, value in exact.items()}
+        missing = int(
+            ((self.payable - sum(shares.values(), Decimal("0"))) / CENTS).to_integral_value(
+                rounding=ROUND_HALF_UP
+            )
+        )
+        by_remainder = sorted(exact, key=lambda uid: (shares[uid] - exact[uid], uid))
+        for uid in by_remainder[:missing]:
+            shares[uid] += CENTS
+        return shares
+
+    def client_share(self, client: ClientBreakdown) -> Decimal:
+        """一个客户分到的那份，见 ``client_shares``。"""
+        return self.client_shares()[client.uid]
+
+
+def referral_from_record(record: Record) -> Referral | None:
+    """渠道表的一行 -> 算钱用的 ``Referral``。没有编号的行返回 None（算不了，也认不出）。"""
+    no = extract_text(record.fields.get(schema.REFERRAL_NO))
+    if not no:
+        return None
+    rate = to_number(record.fields.get(schema.REFERRAL_RATE)) or 0.0
+    return Referral(
+        record_id=record.record_id,
+        no=no,
+        name=extract_text(record.fields.get(schema.REFERRAL_NAME)),
+        rate_percent=Decimal(str(rate)),
+        status=extract_text(record.fields.get(schema.REFERRAL_STATUS)),
+    )
+
+
+def accumulate(
+    records: Iterable[Record],
+    client_map: dict[str, Referral],
+    client_names: dict[str, str],
+    periods: Collection[str],
+    *,
+    tz,
+) -> dict[str, dict[str, ReferralBreakdown]]:
+    """看板行 -> ``{月份: {渠道编号: ReferralBreakdown}}``。
+
+    只收 ``periods`` 里的月份、``client_map`` 里的客户（UID -> 所属渠道）；其余的行
+    跳过。佣金查询和渠道详情卡共用这一个函数，见模块开头第 4 条。
+    """
+    wanted = set(periods)
+    out: dict[str, dict[str, ReferralBreakdown]] = {}
+    for record in records:
+        uid = to_uid(record.fields.get(schema.BOARD_CLIENT_UID))
+        if not uid:
+            continue
+        referral = client_map.get(uid)
+        if referral is None:
+            continue
+        period = period_of(record.fields.get(schema.BOARD_ORDER_DATE), tz=tz)
+        if period not in wanted:
+            continue
+        revenue = to_number(record.fields.get(schema.BOARD_TOTAL_REVENUE))
+        if revenue is None:
+            continue
+
+        month = out.setdefault(period, {})
+        breakdown = month.get(referral.no)
+        if breakdown is None:
+            breakdown = ReferralBreakdown(
+                referral_no=referral.no,
+                referral_name=referral.name,
+                rate_percent=referral.rate_percent,
+            )
+            month[referral.no] = breakdown
+        entry = breakdown.clients.get(uid)
+        if entry is None:
+            entry = ClientBreakdown(uid=uid, name=client_names.get(uid, ""))
+            breakdown.clients[uid] = entry
+        entry.revenue += Decimal(str(revenue))
+        entry.row_count += 1
+    return out
+
+
+@dataclass(frozen=True)
+class ClientLine:
+    """结果卡上的一个客户：各月分到的佣金。那个月没有交易就不在 ``shares`` 里。"""
+
+    uid: str
+    name: str
+    shares: dict[str, Decimal]
+
+    @property
+    def total(self) -> Decimal:
+        return sum(self.shares.values(), Decimal("0"))
+
+
+@dataclass(frozen=True)
+class ChannelLine:
+    """结果卡上的一个渠道：各月应付（保底后），和它名下每个客户各月分到的。
+
+    ``payable`` 里没有的月份就是那个月没有交易，和「有交易、应付 0」分得开。
+    ``loss_periods`` 是整月合计为负、按规则保底成 0 的月份，卡片上要单独说一句。
+    """
+
+    referral_no: str
+    referral_name: str
+    payable: dict[str, Decimal]
+    loss_periods: tuple[str, ...]
+    clients: tuple[ClientLine, ...]
 
 
 @dataclass
 class QueryResult:
-    period: str
-    referrals: list[ReferralBreakdown]
-    unmapped_uids: list[str]
-    """在这次查询范围里出现、但没登记归属的 UID。管理员看全表，销售只看空 —— 因为
-    未登记归属的客户根本不知道该算谁的，普通销售不该看到别的销售的孤儿。"""
+    periods: list[str]
+    """从早到晚。"""
+
+    months: dict[str, list[ReferralBreakdown]] = field(default_factory=dict)
+    """月份 -> 那个月有交易的渠道，按编号排序。没有交易的月份可以不在里面。"""
+
+    def referrals_in(self, period: str) -> list[ReferralBreakdown]:
+        return self.months.get(period, [])
 
     @property
-    def total_payable(self) -> Decimal:
-        return sum((r.payable for r in self.referrals), Decimal("0"))
+    def is_empty(self) -> bool:
+        return not any(self.referrals_in(period) for period in self.periods)
 
-    @property
-    def referral_count(self) -> int:
-        return len(self.referrals)
+    def total_payable(self, period: str) -> Decimal:
+        return sum((r.payable for r in self.referrals_in(period)), Decimal("0"))
 
-    @property
-    def client_count(self) -> int:
+    def referral_count(self, period: str) -> int:
+        return len(self.referrals_in(period))
+
+    def client_count(self, period: str) -> int:
         """去重后的客户数。
 
         同一个 UID 理论上只挂一个渠道，但客户表被人手改过之后不保证 ——
         按 UID 去重，免得「12 个客户」其实是同一个人数了两遍。
         """
-        return len({uid for ref in self.referrals for uid in ref.clients})
+        return len({uid for ref in self.referrals_in(period) for uid in ref.clients})
 
-    @property
-    def revenue_total(self) -> Decimal:
+    def revenue_total(self, period: str) -> Decimal:
         """收入合计。**不做 max(0, ...) 保底** —— 保底是应付金额的规则，
         收入该是多少就是多少，截成 0 会让人看不出这个月是负的。"""
-        return sum((r.revenue_total for r in self.referrals), Decimal("0"))
+        return sum((r.revenue_total for r in self.referrals_in(period)), Decimal("0"))
+
+    def channels(self) -> list[ChannelLine]:
+        """按渠道展开成卡片要的形状：渠道按编号，渠道下的客户按几个月合计从大到小。
+
+        客户份额用 ``ReferralBreakdown.client_shares``（按收入占比分渠道应付），所以
+        同一个月里一个渠道下各客户的数加起来一分不差就是这个渠道的应付。
+        """
+        by_no: dict[str, dict[str, ReferralBreakdown]] = {}
+        for period in self.periods:
+            for ref in self.referrals_in(period):
+                by_no.setdefault(ref.referral_no, {})[period] = ref
+
+        lines: list[ChannelLine] = []
+        for no in sorted(by_no):
+            months = by_no[no]
+            latest = months[max(months)]
+            shares: dict[str, dict[str, Decimal]] = {}
+            names: dict[str, str] = {}
+            for period, ref in months.items():
+                month_shares = ref.client_shares()
+                for uid, client in ref.clients.items():
+                    shares.setdefault(uid, {})[period] = month_shares[uid]
+                    names[uid] = client.name or names.get(uid, "")
+            clients = sorted(
+                (ClientLine(uid=uid, name=names[uid], shares=shares[uid]) for uid in shares),
+                key=lambda c: (-c.total, c.name, c.uid),
+            )
+            lines.append(
+                ChannelLine(
+                    referral_no=no,
+                    referral_name=latest.referral_name,
+                    payable={period: ref.payable for period, ref in months.items()},
+                    loss_periods=tuple(
+                        period
+                        for period in self.periods
+                        if period in months and months[period].is_loss_month
+                    ),
+                    clients=tuple(clients),
+                )
+            )
+        return lines
 
 
 class CommissionQueryService:
-    """按 (销售, 月份) 查佣金明细。
+    """按 (销售, 连续几个月) 查佣金明细。
 
     不缓存维表 —— 每次查询都重新读渠道表和客户表。渠道数量小（几十到几百），成本
     可控；缓存反而会导致「销售刚新登记的渠道查不到」这类隔层问题，得不偿失。
@@ -153,8 +311,8 @@ class CommissionQueryService:
         # 归月用的业务时区，和 CommissionCalculator 读同一份配置
         self._tz = ZoneInfo(settings.business_timezone)
 
-    def query(self, sales: Sales, period: str) -> QueryResult:
-        """算出这名销售在 ``period``（YYYY-MM）能看到的佣金明细。"""
+    def query(self, sales: Sales, periods: Sequence[str]) -> QueryResult:
+        """这名销售在 ``periods``（YYYY-MM，从早到晚）里能看到的佣金明细。看板只扫一遍。"""
         referrals_by_record = self._load_referrals()
 
         # 管理员看全部；销售只看归属自己的渠道 record_id。
@@ -166,87 +324,34 @@ class CommissionQueryService:
         # UID -> Referral，只包含 allowed 里的渠道所对应的客户
         client_map, client_names = self._load_allowed_clients(allowed_referrals)
 
-        breakdowns: dict[str, ReferralBreakdown] = {}
-        unmapped: set[str] = set()
-
-        for record in self._bitable.iter_records(self._settings.table_daily_board):
-            uid = to_uid(record.fields.get(schema.BOARD_CLIENT_UID))
-            if not uid:
-                continue
-
-            row_period = period_of(record.fields.get(schema.BOARD_ORDER_DATE), tz=self._tz)
-            if row_period != period:
-                continue
-
-            referral = client_map.get(uid)
-            if referral is None:
-                # 只有管理员看得到未登记归属的孤儿 —— 普通销售看到别人渠道的孤儿也没用
-                if sales.is_admin:
-                    unmapped.add(uid)
-                continue
-
-            revenue = to_number(record.fields.get(schema.BOARD_TOTAL_REVENUE))
-            if revenue is None:
-                continue
-
-            breakdown = breakdowns.get(referral.no)
-            if breakdown is None:
-                breakdown = ReferralBreakdown(
-                    referral_no=referral.no,
-                    referral_name=referral.name,
-                    rate_percent=referral.rate_percent,
-                )
-                breakdowns[referral.no] = breakdown
-
-            client_entry = breakdown.clients.get(uid)
-            if client_entry is None:
-                client_entry = ClientBreakdown(
-                    uid=uid,
-                    name=client_names.get(uid, ""),
-                )
-                breakdown.clients[uid] = client_entry
-
-            client_entry.revenue += Decimal(str(revenue))
-            client_entry.row_count += 1
-
-        ordered = sorted(breakdowns.values(), key=lambda b: b.referral_no)
+        months: dict[str, dict[str, ReferralBreakdown]] = {}
+        # 名下一个客户都没有就不去扫那张上万行的看板了：扫完也是空的。
+        if client_map:
+            months = accumulate(
+                self._bitable.iter_records(
+                    self._settings.table_daily_board, field_names=BOARD_FIELDS
+                ),
+                client_map,
+                client_names,
+                periods,
+                tz=self._tz,
+            )
         return QueryResult(
-            period=period,
-            referrals=ordered,
-            unmapped_uids=sorted(unmapped),
+            periods=list(periods),
+            months={
+                period: sorted(months.get(period, {}).values(), key=lambda b: b.referral_no)
+                for period in periods
+            },
         )
-
-    def latest_period(self) -> str:
-        """看板里最新有数据的月份。空表返回空串。
-
-        用来在没显式传月份时给一个合理的默认值，同 reconcile 的策略。
-        """
-        latest = ""
-        for record in self._bitable.iter_records(
-            self._settings.table_daily_board,
-            field_names=[schema.BOARD_ORDER_DATE],
-        ):
-            row_period = period_of(record.fields.get(schema.BOARD_ORDER_DATE), tz=self._tz)
-            if row_period and row_period > latest:
-                latest = row_period
-        return latest
 
     # ---------- 内部辅助 ----------
 
     def _load_referrals(self) -> dict[str, Referral]:
         result: dict[str, Referral] = {}
         for record in self._bitable.iter_records(self._settings.table_referral):
-            no = extract_text(record.fields.get(schema.REFERRAL_NO))
-            if not no:
-                continue
-            rate = to_number(record.fields.get(schema.REFERRAL_RATE)) or 0.0
-            result[record.record_id] = Referral(
-                record_id=record.record_id,
-                no=no,
-                name=extract_text(record.fields.get(schema.REFERRAL_NAME)),
-                rate_percent=Decimal(str(rate)),
-                status=extract_text(record.fields.get(schema.REFERRAL_STATUS)),
-            )
+            referral = referral_from_record(record)
+            if referral is not None:
+                result[record.record_id] = referral
         return result
 
     def _owned_referral_ids(
@@ -282,57 +387,3 @@ class CommissionQueryService:
                     by_uid[uid] = referral
                     break
         return by_uid, names
-
-
-def summarize(result: QueryResult, *, viewer_name: str) -> str:
-    """把查询结果拼成一段人看的 markdown（供卡片展示）。"""
-    if not result.referrals:
-        return (
-            f"**{result.period}**  {viewer_name} 名下没有可展示的佣金明细。\n\n"
-            "可能原因：这个月看板里没有归属你名下客户的记录；或者你的客户还没登记归属。"
-        )
-
-    lines: list[str] = [
-        f"**{result.period}**",
-        f"合计应付  **{result.total_payable:,.2f}** USD",
-        # 三个总数摆在最上面：光有一个金额，看的人没法判断它合不合理。
-        # 「4 个渠道 12 个客户」少了一个就立刻看得出来，比逐行核对快得多。
-        f"{result.referral_count} 个渠道 · {result.client_count} 个客户 · "
-        f"收入合计 {result.revenue_total:,.2f}",
-        "",
-    ]
-
-    for ref in result.referrals:
-        lines.append(
-            f"**{ref.referral_no}** {ref.referral_name or '(未命名)'}  "
-            f"—— 应付 {ref.payable:,.2f} USD"
-        )
-        lines.append(
-            f"  小计：收入 {ref.revenue_total:,.2f} · "
-            f"{ref.client_count} 个客户 · {ref.row_count} 笔"
-        )
-        if ref.is_loss_month:
-            lines.append(
-                f"  ⚠︎ 整月合计为负 {abs(ref.revenue_total):,.2f} USD，本月按业务规则保底 0"
-            )
-
-        # 客户按贡献从大到小；负贡献放最后，一眼看得出是谁把这个渠道拉负了
-        clients_sorted = sorted(ref.clients.values(), key=lambda c: c.revenue, reverse=True)
-        for client in clients_sorted:
-            share = ref.client_share(client)
-            name = client.name or "(未命名客户)"
-            lines.append(
-                f"  · {name} `{client.uid}`  "
-                f"收入 {client.revenue:,.2f} × {ref.rate_percent}% ≈ 佣金 {share:,.2f}"
-            )
-        lines.append("")
-
-    if result.unmapped_uids:
-        lines.append(
-            f"另有 **{len(result.unmapped_uids)}** 个 UID 在看板里但未登记归属，"
-            "未计入任何渠道（示例）："
-        )
-        for uid in result.unmapped_uids[:5]:
-            lines.append(f"  · `{uid}`")
-
-    return "\n".join(lines)

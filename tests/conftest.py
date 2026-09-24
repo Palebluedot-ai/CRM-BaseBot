@@ -62,6 +62,9 @@ class FakeBitable:
         self.batch_delete_calls: list[tuple[str, int]] = []
         # 记录 update_record 的调用，便于测试断言主字段回填的实际写入
         self.updates: list[tuple[str, str, dict[str, Any]]] = []
+        # 服务端筛选（iter_records_where_in）每调一次记一笔 (table_id, 字段, 值)。
+        # 「详情卡不扫整张看板」靠它钉住。
+        self.filtered_reads: list[tuple[str, str, tuple[str, ...]]] = []
 
     def table(self, table_id: str) -> FakeTable:
         return self.tables.setdefault(table_id, FakeTable())
@@ -87,6 +90,14 @@ class FakeBitable:
         table.scan_count += 1
         for record_id, fields in list(table.records.items()):
             yield Record(record_id=record_id, fields=dict(fields))
+
+    def iter_records_where_in(self, table_id: str, field_name: str, values, **kwargs):
+        """服务端按「等于任一值」筛选。只比文本，和真实接口的 ``is`` 条件一样逐字符。"""
+        wanted = tuple(sorted({value for value in values if value}))
+        self.filtered_reads.append((table_id, field_name, wanted))
+        for record_id, fields in list(self.table(table_id).records.items()):
+            if str(fields.get(field_name) or "") in wanted:
+                yield Record(record_id=record_id, fields=dict(fields))
 
     def list_fields(self, table_id: str) -> list[FieldInfo]:
         return list(self.table(table_id).fields)

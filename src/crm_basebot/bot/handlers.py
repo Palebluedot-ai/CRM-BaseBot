@@ -1,25 +1,31 @@
 """机器人事件与卡片回调处理。
 
-一条硬约束：卡片回调必须在 **3 秒内**返回，否则客户端弹「延时未响应」，而
-「延时未响应」是客户端本地文案，改不掉服务端也拦不到 —— 唯一的办法是让回调
-在 3 秒内返回。所以这里只做「校验 + 一次写入」，不做批量扫描、不做佣金计算，
-那些放 jobs/ 里跑。
+**每点一下都是一条新消息，被点的那张卡原样留着。**（2026-09-24 反馈：「每次处理完一个
+request，譬如看完渠道，紀錄會消失」。）卡片回调的返回值会**原地替换**被点的那张卡：点
+「我的渠道」，菜单就变成列表；点一条渠道，列表就变成详情；查询表单点「查询」，就变成
+一张永远停在「正在查询」的卡。会话里留不下任何记录。
 
-对超预算的路径（比如客户登记，要 4 个串行往返），走「立即 ack + 后台写入
-+ 结果推送为新消息」的异步模式，见 ``_submit_client``。
+所以现在回调**几乎不换卡**：立即回一个空响应（或者一句 toast），真正的内容在后台算好，
+作为新消息推出去（``_push``）。被点的卡原样留着，想再点还能点。只有两处原地换：
+
+  · 渠道列表的「上一页 / 下一页」—— 翻的是同一张列表，不是做完了一件事；
+  · 登记表单提交之后换成「已提交」回执 —— 表单原样留着就能再点一次提交，登记出两条
+    一样的渠道。回执把填过的内容一项项列出来，记录照样在。
+
+顺带解决了 3 秒预算：卡片回调必须 3 秒内返回，否则客户端弹「延时未响应」（客户端本地
+文案，服务端拦不到）。现在回调里只剩「校验 + 回一个响应」，读表、算钱都在后台线程里。
+
+**填错了回一句红色 toast，表单原样留着**，改一个字就能再提交 —— 不再把整张表单换成一张
+报错卡，让人从头填一遍。
 
 另一条：open_id 只从 ``data.event.operator.open_id`` 取。这个值由飞书平台签发，
 客户端伪造不了。任何从 form_value 或消息文本里取身份的写法都是漏洞。
 
-**结果卡要过 ``cards.with_menu``，导览卡不要。** 卡片回调的返回值是原地替换，做完
-一件事会话里就只剩一张没有按钮的卡，要做下一件只能重新打字 —— 所以登记成功、查询
-出结果、校验失败这些**结果**卡，底部接上主菜单。
+**结果卡要过 ``cards.with_menu``，导览卡不要。** 结果落在会话最底下，登记成功、查询
+出结果、出错这些**结果**卡底部接上主菜单，下一件事不用往上翻。「我的渠道」那条路（列表 /
+详情 / 找不到）是**导览**卡，自己带「返回列表 / 返回目录」。
 
-「我的渠道」那条路（列表 / 详情 / 找不到）是**导览**卡，自己带「返回列表 / 返回目录」，
-不再叠一层菜单：看完一条渠道，下一步是往回走，不是重开一件事。两种卡片的下一步本来
-就不同，给的按钮也就不同。
-
-鉴权失败那张两样都不给 —— 名册里没有的人拿到一排按钮，点了还是同一句拒绝。
+鉴权失败只回一句 toast —— 名册里没有的人拿到一排按钮，点了还是同一句拒绝。
 """
 
 from __future__ import annotations
@@ -45,7 +51,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
     P2CardActionTriggerResponse,
 )
 
-from ..domain.dates import DEFAULT_BUSINESS_TIMEZONE, ms_to_date
+from ..domain.dates import DEFAULT_BUSINESS_TIMEZONE, months_ending, ms_to_date, period_of_day
 from ..domain.referral import ReferralInput, ValidationError
 from ..domain.referred_client import ClientInput
 from ..lark.values import to_number
@@ -54,11 +60,18 @@ from .auth import AuthError
 
 logger = logging.getLogger(__name__)
 
+SYSTEM_ERROR = "系统出错了，请稍后再试。管理员可以在服务端日志里看到详情。"
 
 # 同一个人多久之内不重复自动弹菜单。进入会话的事件开得很勤（切回会话、手机上划一下
 # 都可能触发），不设冷却期的话会话会被菜单卡填满。五分钟是个折中：出去办点别的再回来
 # 有菜单，点开表单临时切走再切回来不会被顶掉。
 GREET_COOLDOWN_SECONDS = 300.0
+
+# 佣金查询、详情卡都看「近三个月」：含那个月在内往回三个月（domain.dates.months_ending）。
+RECENT_MONTHS = 3
+
+# 佣金查询下拉里列多少个月。数据可能追溯到很早，一次性列出几十个月对销售没意义。
+QUERY_MONTH_OPTIONS = 12
 
 
 def _entered_open_id(data: P2ImChatAccessEventBotP2pChatEnteredV1) -> str:
@@ -83,12 +96,13 @@ class BotHandlers:
     ``ecas_query`` 同理：ECAS 是独立的第二套账（见 ``docs/ECAS.md``），没上 ECAS 的
     租户不注入它，「ECAS 返佣」按钮就回一句「未启用」。
 
-    ``background`` 是后台任务的执行器，用于卡片回调超预算时把实际写入丢到后台
-    去跑（见 ``_submit_client``）。默认起一个 daemon 线程；测试里传
-    ``lambda fn: fn()`` 走同步，避免线程竞态。
+    ``background`` 是后台任务的执行器：几乎每个回调都把真正的活丢给它，算完把结果作为
+    新消息推出去（见 ``_push``）。默认起一个 daemon 线程；测试里传 ``lambda fn: fn()``
+    走同步，避免线程竞态。
 
-    ``tz`` 是业务时区：卡片上选的日期要按它落成日历日（见 ``_form_date``）。默认值
-    和 ``domain/dates.py`` 里的一致，生产在 app.py 里注入 ``BUSINESS_TIMEZONE``。
+    ``tz`` 是业务时区：卡片上选的日期要按它落成日历日（见 ``_form_date``），「本月」
+    也按它算。默认值和 ``domain/dates.py`` 里的一致，生产在 app.py 里注入
+    ``BUSINESS_TIMEZONE``。
     """
 
     def __init__(
@@ -105,6 +119,7 @@ class BotHandlers:
         tz: tzinfo = DEFAULT_BUSINESS_TIMEZONE,
         greet_cooldown_seconds: float = GREET_COOLDOWN_SECONDS,
         clock: Callable[[], float] = time.monotonic,
+        today: Callable[[], date] | None = None,
     ) -> None:
         self._client = client
         self._directory = directory
@@ -121,6 +136,8 @@ class BotHandlers:
         self._tz = tz
         self._greet_cooldown = greet_cooldown_seconds
         self._clock = clock
+        # 业务时区的「今天」。测试里钉死一个日期，免得断言随真实日历漂。
+        self._today = today or (lambda: datetime.now(self._tz).date())
         # open_id -> 上次自动弹菜单的时刻。见 on_p2p_chat_entered。
         self._greeted: dict[str, float] = {}
 
@@ -184,7 +201,7 @@ class BotHandlers:
         try:
             sales = self._directory.require(open_id)
         except AuthError as exc:
-            return _card_response(cards.error_card(str(exc)))
+            return _toast(str(exc), kind="error")
 
         try:
             return self._dispatch(
@@ -194,14 +211,11 @@ class BotHandlers:
                 action_value if isinstance(action_value, dict) else {},
             )
         except (ValidationError, AuthError) as exc:
-            return _card_response(cards.with_menu(cards.error_card(str(exc))))
+            # 填错了：一句红字，卡片原样留着，改完直接再点。
+            return _toast(str(exc), kind="error")
         except Exception:
             logger.exception("处理卡片动作 %s 失败", action)
-            return _card_response(
-                cards.with_menu(
-                    cards.error_card("系统出错了，请稍后再试。管理员可以在服务端日志里看到详情。")
-                )
-            )
+            return _toast(SYSTEM_ERROR, kind="error")
 
     def _dispatch(
         self,
@@ -213,33 +227,37 @@ class BotHandlers:
         action_value = action_value or {}
 
         if action == cards.ACTION_OPEN_MENU:
-            return _card_response(cards.menu_card(sales.name))
+            return self._push(sales, lambda: cards.menu_card(sales.name))
 
         if action == cards.ACTION_OPEN_REFERRAL_FORM:
-            return _card_response(cards.referral_form_card())
+            return self._push(sales, cards.referral_form_card)
 
         if action == cards.ACTION_OPEN_CLIENT_FORM:
-            options = self._referrals.list_for(sales)
-            card = cards.client_form_card(options)
-            # 没有渠道时返回的是一张「还不能登记客户」的提示卡，不是表单 ——
-            # 那种情况下人接着就想点「登记新渠道」，菜单要在。
-            if not options:
-                card = cards.with_menu(card)
-            return _card_response(card)
+            return self._push(sales, lambda: self._client_form_card(sales))
 
         if action == cards.ACTION_LIST_REFERRALS:
+            page = _page_index(action_value)
+            return self._push(
+                sales,
+                lambda: cards.referral_list_card(self._referrals.list_for(sales), page=page),
+            )
+
+        if action == cards.ACTION_REFERRAL_PAGE:
+            # 翻页是这张卡里唯一原地换的：翻的是同一张列表，不是做完了一件事。
+            # 读的是一张一百来行的渠道表，一个请求，压得进 3 秒。
             return _card_response(
                 cards.referral_list_card(
-                    self._referrals.list_for(sales),
-                    page=_page_index(action_value),
+                    self._referrals.list_for(sales), page=_page_index(action_value)
                 )
             )
 
         if action == cards.ACTION_OPEN_REFERRAL:
-            detail = self._referrals.get_for(sales, _referral_no(action_value))
-            if detail is None:
-                return _card_response(cards.referral_missing_card())
-            return _card_response(self._referral_detail_card(detail))
+            referral_no = _referral_no(action_value)
+            return self._push(
+                sales,
+                lambda: self._referral_detail_card(sales, referral_no),
+                toast=f"正在打开 {referral_no}" if referral_no else None,
+            )
 
         if action == cards.ACTION_SUBMIT_REFERRAL:
             return self._submit_referral(sales, form)
@@ -260,23 +278,70 @@ class BotHandlers:
             return self._query_ecas(sales, form)
 
         logger.warning("未知的卡片动作: %r", action)
-        return _card_response(cards.with_menu(cards.error_card("这个操作我不认识，请重新开始。")))
+        return self._push(
+            sales, lambda: cards.with_menu(cards.error_card("这个操作我不认识，请重新开始。"))
+        )
 
-    def _referral_detail_card(self, detail) -> dict[str, Any]:
-        """详情卡。近 3 个月和客户名单要多读三张表，所以单独一个方法。
+    def _push(
+        self,
+        sales,
+        build: Callable[[], dict[str, Any]],
+        *,
+        toast: str | None = None,
+        failure: str = SYSTEM_ERROR,
+    ) -> P2CardActionTriggerResponse:
+        """在后台把 ``build()`` 出来的卡作为**新消息**发给这个人；回调立即返回，不换卡。
 
-        **三张表的读取都包着 try**：渠道本身的资料已经在手上了，为了附加信息把整张卡
-        换成一句报错，是拿有用的东西去换没用的。取不到就那一节不显示，并在卡片上说明。
-
-        这一步是同步的，压在卡片回调的 3 秒预算里。三张表都很小（渠道一百多行、两张
-        汇总表每月每渠道一行、客户表几百行），而且都只读要用的那几列。真发现慢了，
-        改成和佣金查询一样的异步：先 ack 一张「正在读」，算完 push。
+        ``build`` 里读表、算钱都行 —— 它不在 3 秒预算里。它抛出来的异常变成一张带菜单
+        的报错卡，同样作为新消息发出去：人点了一下，总得看到点什么。
         """
-        fees = None
+        target = sales.open_id
+
+        def worker() -> None:
+            try:
+                card = build()
+            except (ValidationError, AuthError) as exc:
+                card = cards.with_menu(cards.error_card(str(exc)))
+            except Exception:
+                logger.exception("生成卡片失败 open_id=%s", target)
+                card = cards.with_menu(cards.error_card(failure))
+            self._send_to_user(target, card)
+
+        self._background(worker)
+        return _toast(toast, kind="info") if toast else _no_change()
+
+    def _unavailable(self, sales, what: str) -> P2CardActionTriggerResponse:
+        """没配这项功能的租户点了按钮：推一句「未启用」，而不是去读一个空 table_id。"""
+        return self._push(
+            sales, lambda: cards.with_menu(cards.error_card(f"{what}未启用，请联系管理员。"))
+        )
+
+    def _client_form_card(self, sales) -> dict[str, Any]:
+        options = self._referrals.list_for(sales)
+        card = cards.client_form_card(options)
+        # 没有渠道时返回的是一张「还不能登记客户」的提示卡，不是表单 ——
+        # 那种情况下人接着就想点「登记新渠道」，菜单要在。
+        return card if options else cards.with_menu(card)
+
+    def _referral_detail_card(self, sales, referral_no: str) -> dict[str, Any]:
+        """详情卡。近 3 个月和客户名单要多读几张表，所以单独一个方法。
+
+        编号来自按钮回传，客户端改得了：先过 ``get_for``（按 owned_records 鉴权），拿到
+        的 record_id 才往下传。别人的渠道在这一步就变成「找不到」。
+
+        **近 3 个月和客户名单各自包着 try**：渠道本身的资料已经在手上了，为了附加信息
+        把整张卡换成一句报错，是拿有用的东西去换没用的。取不到就那一节不显示，并在卡片
+        上说明。
+        """
+        detail = self._referrals.get_for(sales, referral_no)
+        if detail is None:
+            return cards.referral_missing_card()
+
+        months = None
         history_failed = False
         if self._referral_history is not None:
             try:
-                fees = self._referral_history.recent(detail.no, today=datetime.now(self._tz).date())
+                months = self._referral_history.recent(detail.record_id, today=self._today())
             except Exception:  # noqa: BLE001 - 见 docstring
                 logger.exception("读取渠道 %s 的近几个月失败", detail.no)
                 history_failed = True
@@ -290,21 +355,22 @@ class BotHandlers:
         return cards.referral_detail_card(
             no=detail.no,
             name=detail.name,
-            status=detail.status,
-            sales_name=detail.sales_name,
             start_date=detail.start_date,
             rate=detail.rate,
             payout=detail.payout,
             email=detail.email,
             submitted_on=detail.submitted_on,
-            address=detail.address,
-            payment=detail.payment,
-            recent_fees=fees,
+            months=months,
             client_names=clients,
             history_failed=history_failed,
         )
 
     def _submit_referral(self, sales, form) -> P2CardActionTriggerResponse:
+        """校验在回调里做（填错了回 toast，表单留着）；写入在后台做，结果推新消息。
+
+        写入要 4-5 个串行往返（锁里扫编号、写审计、写记录、回读），和客户登记一样会撑破
+        3 秒预算。表单原地换成「已提交」回执：记录留着，又不能再点一次提交。
+        """
         # 输入框的标签就写着「分佣比例 (%)」，照着填「20%」是很自然的事。
         # 不去掉这个百分号，to_number 会返回 None，人看到的是「要填数字」——
         # 而他明明填的就是数字。
@@ -312,37 +378,60 @@ class BotHandlers:
         if rate is None:
             raise ValidationError("分佣比例要填数字，例如 20")
 
-        # 日期选择器不给值的话（理论上必填项不会，但平台确实有回 null 的版本），
-        # 这里给出人话的报错，而不是让 date_to_ms 在领域层炸成「系统出错了」。
+        # 取不到日期时给人话的报错，而不是让 date_to_ms 在领域层炸成「系统出错了」。
         start_date = _form_date(form, cards.F_REFERRAL_START_DATE, tz=self._tz)
         if start_date is None:
             raise ValidationError("开始日期要选一个日期")
 
         # 下拉给的中文标签不回传，回传的是 value，正好是写进 Base 的原文（Monthly /
-        # Quarterly）；不是这两个值的话，领域层的 validated() 会拦下来。
-        payout_frequency = _select_value(form.get(cards.F_REFERRAL_PAYOUT))
+        # Quarterly）；不是这两个值的话，validated() 会拦下来。
+        data = ReferralInput(
+            name=_form_text(form, cards.F_REFERRAL_NAME),
+            email=_form_text(form, cards.F_REFERRAL_EMAIL),
+            start_date=start_date,
+            commission_rate=rate,
+            payout_frequency=_select_value(form.get(cards.F_REFERRAL_PAYOUT)),
+        ).validated()
+        target = sales.open_id
 
-        referral_no, _ = self._referrals.create(
-            sales,
-            ReferralInput(
-                name=_form_text(form, cards.F_REFERRAL_NAME),
-                email=_form_text(form, cards.F_REFERRAL_EMAIL),
-                start_date=start_date,
-                commission_rate=rate,
-                payout_frequency=payout_frequency,
-            ),
-        )
+        def worker() -> None:
+            try:
+                referral_no, _ = self._referrals.create(sales, data)
+            except (ValidationError, AuthError) as exc:
+                self._send_to_user(target, cards.with_menu(cards.error_card(str(exc))))
+                return
+            except Exception:
+                logger.exception("登记渠道失败 open_id=%s", target)
+                self._send_to_user(target, cards.with_menu(cards.error_card(SYSTEM_ERROR)))
+                return
+
+            self._send_to_user(
+                target,
+                cards.with_menu(
+                    cards.success_card(
+                        "渠道已登记",
+                        f"**{data.name}** 编号 **{referral_no}**，已生效。\n\n"
+                        f"开始日期 {data.start_date.isoformat()}，"
+                        f"结算频率 {data.payout_frequency}。\n\n"
+                        f"分佣比例 {_percent(data.commission_rate)}。",
+                    )
+                ),
+            )
+
+        self._background(worker)
 
         return _card_response(
-            cards.with_menu(
-                cards.success_card(
-                    "渠道已登记",
-                    f"编号 **{referral_no}**，已生效。\n\n"
-                    f"开始日期 {start_date.isoformat()}，结算频率 {payout_frequency}。\n\n"
-                    f"分佣比例 {rate}%。",
-                )
+            cards.submitted_card(
+                "登记新渠道",
+                [
+                    ("渠道名称", data.name),
+                    ("邮箱", data.email),
+                    ("开始日期", data.start_date.isoformat()),
+                    ("分佣比例", _percent(data.commission_rate)),
+                    ("结算频率", data.payout_frequency),
+                ],
             ),
-            toast=f"已登记 {referral_no}",
+            toast="已提交",
         )
 
     def _submit_client(self, sales, form) -> P2CardActionTriggerResponse:
@@ -350,36 +439,28 @@ class BotHandlers:
         # 写客户。真机测下来经常撑爆 3 秒预算，客户端就会弹「延时未响应」——
         # 尽管服务端其实已经写成功了。
         #
-        # 所以走异步模式：立即 ack 一张「已提交，处理中」的卡片让客户端满意，
-        # 真正的写入丢到后台线程；结果（成功或失败）通过 im.v1.message.create
-        # 推一条新的消息给这名销售。
+        # 所以格式校验在这里做（填错回 toast，表单留着），归属和查重这两个要读表的
+        # 检查连同写入一起放到后台，结果推一条新消息。
         client_input = ClientInput(
             uid=_form_text(form, cards.F_CLIENT_UID),
             name=_form_text(form, cards.F_CLIENT_NAME),
             referral_no=_select_value(form.get(cards.F_CLIENT_REFERRAL)),
-        )
-        target_open_id = sales.open_id
+        ).validated()
+        target = sales.open_id
 
         def worker() -> None:
             try:
                 self._clients.create(sales, client_input)
             except (ValidationError, AuthError) as exc:
-                self._send_to_user(target_open_id, cards.with_menu(cards.error_card(str(exc))))
+                self._send_to_user(target, cards.with_menu(cards.error_card(str(exc))))
                 return
             except Exception:
-                logger.exception("异步登记客户失败 open_id=%s", target_open_id)
-                self._send_to_user(
-                    target_open_id,
-                    cards.with_menu(
-                        cards.error_card(
-                            "系统出错了，请稍后再试。管理员可以在服务端日志里看到详情。"
-                        )
-                    ),
-                )
+                logger.exception("异步登记客户失败 open_id=%s", target)
+                self._send_to_user(target, cards.with_menu(cards.error_card(SYSTEM_ERROR)))
                 return
 
             self._send_to_user(
-                target_open_id,
+                target,
                 cards.with_menu(
                     cards.success_card(
                         "客户已登记",
@@ -392,85 +473,54 @@ class BotHandlers:
         self._background(worker)
 
         return _card_response(
-            cards.notice_card(
-                "已收到，正在提交",
-                "客户信息正在写入 Base，处理完会作为新消息推送给你（通常 3-10 秒）。",
-                template="blue",
+            cards.submitted_card(
+                "登记新客户",
+                [
+                    ("所属渠道", client_input.referral_no),
+                    ("客户UID", client_input.uid),
+                    ("客户名称", client_input.name),
+                ],
             ),
-            toast="已提交，处理中",
+            toast="已提交",
         )
 
     def _open_commission_query(self, sales) -> P2CardActionTriggerResponse:
-        """打开「佣金查询」表单：从看板取月份列表，销售在里面选一个。
+        """打开「佣金查询」表单：下拉列本月往回 12 个月，预选本月。
 
-        取月份列表这一步要扫整张看板；只挑「交易日期」一列，比全字段读省得多。
-        真实数据下几万行的扫描仍然可能超 3 秒 —— 这里刻意保持同步，是因为下拉
-        月份对回填初值有依赖，异步弹卡的话得先返回一张空卡再改，交互反而更绕。
-        真发现慢，再改成异步：立即弹一张「加载中」的卡，后台读完月份后 push 新卡。
+        以前是扫一遍看板找「最新有数据的月份」来预选 —— 上万行扫下来要好几秒，只为了
+        一个几乎总是等于本月的值。月初看板还没有本月数据时，选本月照样列得出上两个月。
         """
         if self._commission_query is None:
-            return _card_response(
-                cards.with_menu(cards.error_card("佣金查询功能未启用，请联系管理员。"))
-            )
+            return self._unavailable(sales, "佣金查询功能")
 
-        try:
-            latest = self._commission_query.latest_period()
-        except Exception:  # noqa: BLE001 - 查询失败不该让整个卡片挂掉
-            logger.exception("读取看板最新月份失败 open_id=%s", sales.open_id)
-            return _card_response(
-                cards.with_menu(cards.error_card("读取月份列表失败，请稍后重试。"))
-            )
-
-        # 月份列表：优先给最近 12 个月，避免下拉太长
-        options = _recent_months(latest, count=12) if latest else []
-        return _card_response(cards.commission_query_card(latest or "", options))
+        current = period_of_day(self._today())
+        options = list(reversed(months_ending(current, QUERY_MONTH_OPTIONS)))
+        return self._push(sales, lambda: cards.commission_query_card(current, options))
 
     def _query_commission(self, sales, form) -> P2CardActionTriggerResponse:
-        """执行佣金查询。走异步：立即 ack，后台跑，结果 push。
-
-        全表扫描 + 聚合几乎肯定超 3 秒。同步返回会看到「延时未响应」的红字，
-        而服务端其实还在跑；异步能让人清楚看到「已提交」→ 独立结果卡。
-        """
+        """执行佣金查询：选中的月份和前两个月。后台跑，结果推新消息，表单原样留着。"""
         if self._commission_query is None:
-            return _card_response(
-                cards.with_menu(cards.error_card("佣金查询功能未启用，请联系管理员。"))
-            )
+            return self._unavailable(sales, "佣金查询功能")
 
-        period = _form_text(form, cards.F_QUERY_PERIOD)
+        period = _form_text(form, cards.F_QUERY_PERIOD).strip()
         if not _is_period(period):
             raise ValidationError(f"月份格式要是 YYYY-MM，你选/填的是「{period}」")
 
-        target_open_id = sales.open_id
+        periods = months_ending(period, RECENT_MONTHS)
+        current = period_of_day(self._today())
         query_service = self._commission_query
-        # 领域层里定义好的展示函数，handlers 不应该自己拼字符串
-        from ..domain.commission_query import summarize as summarize_commission
 
-        def worker() -> None:
-            try:
-                result = query_service.query(sales, period)
-            except Exception:
-                logger.exception("佣金查询失败 open_id=%s period=%s", target_open_id, period)
-                self._send_to_user(
-                    target_open_id,
-                    cards.with_menu(cards.error_card("查询佣金明细失败，请稍后重试或联系管理员。")),
-                )
-                return
-
-            body = summarize_commission(result, viewer_name=sales.name)
-            title = f"佣金明细  {period}"
-            self._send_to_user(
-                target_open_id, cards.with_menu(cards.commission_result_card(title, body))
+        def build() -> dict[str, Any]:
+            result = query_service.query(sales, periods)
+            return cards.with_menu(
+                cards.commission_result_card(result, viewer_name=sales.name, current_period=current)
             )
 
-        self._background(worker)
-
-        return _card_response(
-            cards.notice_card(
-                "正在查询",
-                f"{period} 的佣金明细正在算，结果会作为新消息推给你（通常 3-10 秒）。",
-                template="blue",
-            ),
-            toast="已提交",
+        return self._push(
+            sales,
+            build,
+            toast=f"正在查询 {periods[0]} ~ {periods[-1]}",
+            failure="查询佣金明细失败，请稍后重试或联系管理员。",
         )
 
     # ---------- ECAS 返佣 ----------
@@ -483,69 +533,39 @@ class BotHandlers:
         """打开「ECAS 返佣」表单：从申请表取这名销售有数据的月份。
 
         月份列表按**本人能看到的**算 —— 下拉里列一个他点进去必然是空的月份，
-        只会让人以为系统坏了。申请表只有一百多行，扫一遍压得进 3 秒。
+        只会让人以为系统坏了。
         """
         if self._ecas_query is None:
-            return _card_response(
-                cards.with_menu(cards.error_card("ECAS 返佣查询未启用，请联系管理员。"))
-            )
+            return self._unavailable(sales, "ECAS 返佣查询")
 
-        try:
-            periods = self._ecas_query.periods_for(sales)
-        except Exception:  # noqa: BLE001 - 查询失败不该让整个卡片挂掉
-            logger.exception("读取 ECAS 月份列表失败 open_id=%s", sales.open_id)
-            return _card_response(
-                cards.with_menu(cards.error_card("读取 ECAS 月份列表失败，请稍后重试。"))
-            )
+        query_service = self._ecas_query
 
-        latest = periods[-1] if periods else ""
-        return _card_response(cards.ecas_query_card(latest, periods))
+        def build() -> dict[str, Any]:
+            periods = query_service.periods_for(sales)
+            latest = periods[-1] if periods else ""
+            return cards.ecas_query_card(latest, periods)
+
+        return self._push(sales, build, failure="读取 ECAS 月份列表失败，请稍后重试。")
 
     def _query_ecas(self, sales, form) -> P2CardActionTriggerResponse:
-        """执行 ECAS 返佣查询。走异步：立即 ack，后台跑，结果 push。
-
-        申请表比日读看板小得多，同步多半也来得及 —— 但「多半」不够：超了 3 秒客户端
-        就弹「延时未响应」的红字，而服务端其实算得好好的。和佣金查询保持同一条路。
-        """
+        """执行 ECAS 返佣查询。后台跑，结果推新消息，表单原样留着。"""
         if self._ecas_query is None:
-            return _card_response(
-                cards.with_menu(cards.error_card("ECAS 返佣查询未启用，请联系管理员。"))
-            )
+            return self._unavailable(sales, "ECAS 返佣查询")
 
-        period = _form_text(form, cards.F_ECAS_PERIOD)
+        period = _form_text(form, cards.F_ECAS_PERIOD).strip()
         if not _is_period(period):
             raise ValidationError(f"月份格式要是 YYYY-MM，你选/填的是「{period}」")
 
-        target_open_id = sales.open_id
         query_service = self._ecas_query
         from ..domain.ecas_query import summarize as summarize_ecas
 
-        def worker() -> None:
-            try:
-                rows = query_service.query(sales, period)
-            except Exception:
-                logger.exception("ECAS 查询失败 open_id=%s period=%s", target_open_id, period)
-                self._send_to_user(
-                    target_open_id,
-                    cards.with_menu(cards.error_card("查询 ECAS 返佣失败，请稍后重试。")),
-                )
-                return
-
+        def build() -> dict[str, Any]:
+            rows = query_service.query(sales, period)
             body = summarize_ecas(rows, period=period, viewer_name=sales.name)
-            self._send_to_user(
-                target_open_id,
-                cards.with_menu(cards.ecas_result_card(f"ECAS 返佣  {period}", body)),
-            )
+            return cards.with_menu(cards.ecas_result_card(f"ECAS 返佣  {period}", body))
 
-        self._background(worker)
-
-        return _card_response(
-            cards.notice_card(
-                "正在查询",
-                f"{period} 的 ECAS 返佣正在算，结果会作为新消息推给你（通常 3-10 秒）。",
-                template="turquoise",
-            ),
-            toast="已提交",
+        return self._push(
+            sales, build, toast=f"正在查询 {period}", failure="查询 ECAS 返佣失败，请稍后重试。"
         )
 
     # ---------- 发消息 ----------
@@ -556,28 +576,52 @@ class BotHandlers:
     def _send_to_user(self, open_id: str, card: dict[str, Any]) -> None:
         """按 open_id 主动发一条卡片消息给用户。
 
-        供异步回调（``_submit_client``）在后台写入完成后推送结果用 —— 卡片
-        callback 已经在 3 秒内 ack 掉了，这一路是新起的独立请求，飞书按 open_id
-        路由到该用户和机器人的单聊会话，不需要事先记住 chat_id。
+        卡片回调已经立即返回了，这一路是新起的独立请求，飞书按 open_id 路由到该用户
+        和机器人的单聊会话，不需要事先记住 chat_id。
         """
         self._send_card(receive_id=open_id, receive_id_type="open_id", card=card)
 
     def _send_card(self, *, receive_id: str, receive_id_type: str, card: dict[str, Any]) -> None:
-        request = (
-            CreateMessageRequest.builder()
-            .receive_id_type(receive_id_type)
-            .request_body(
-                CreateMessageRequestBody.builder()
-                .receive_id(receive_id)
-                .msg_type("interactive")
-                .content(json.dumps(card, ensure_ascii=False))
-                .build()
-            )
+        """发一张卡。带表格的卡被拒时，换成列点版再发一次。
+
+        表格组件是这套卡片里最新、字段最多的组件，线下只能照文档和 SDK 的写法对，
+        真机上万一不收，**整条消息**就发不出去 —— 人点了按钮什么都看不到。所以被拒时
+        同样的内容换成列点（``cards.flatten_tables``）再发一次，并在日志里留下平台回的
+        错误码，照着改就是。
+        """
+        response = self._client.im.v1.message.create(_message(receive_id, receive_id_type, card))
+        if response.success():
+            return
+        logger.error("发送卡片失败: %s %s", response.code, response.msg)
+        if not cards.has_tables(card):
+            return
+
+        flat = cards.flatten_tables(card)
+        response = self._client.im.v1.message.create(_message(receive_id, receive_id_type, flat))
+        if response.success():
+            logger.warning("带表格的卡被拒，已改发列点版。上面那行是平台回的错误。")
+        else:
+            logger.error("列点版也没发出去: %s %s", response.code, response.msg)
+
+
+def _message(receive_id: str, receive_id_type: str, card: dict[str, Any]) -> CreateMessageRequest:
+    return (
+        CreateMessageRequest.builder()
+        .receive_id_type(receive_id_type)
+        .request_body(
+            CreateMessageRequestBody.builder()
+            .receive_id(receive_id)
+            .msg_type("interactive")
+            .content(json.dumps(card, ensure_ascii=False))
             .build()
         )
-        response = self._client.im.v1.message.create(request)
-        if not response.success():
-            logger.error("发送卡片失败: %s %s", response.code, response.msg)
+        .build()
+    )
+
+
+def _percent(rate: float) -> str:
+    """20.0 -> "20%"，12.5 -> "12.5%"。别让卡片上出现 20.0%。"""
+    return f"{rate:g}%"
 
 
 def _page_index(action_value: dict[str, Any]) -> int:
@@ -602,7 +646,7 @@ def _form_text(form: dict[str, Any], key: str) -> str:
 
     ``dict.get(key, "")`` 不够：选填项没填时平台可能不给这个 key，也可能给
     ``null``。后者会让默认值失效，一路 None 传到 ``.strip()`` 才炸，而且是在
-    3 秒回调里炸成一句「系统出错了」，看不出是哪个字段。
+    回调里炸成一句「系统出错了」，看不出是哪个字段。
     """
     value = form.get(key)
     return "" if value is None else str(value)
@@ -615,16 +659,24 @@ def _select_value(raw: Any) -> str:
     return str(raw or "")
 
 
-_ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# 日期选择器的真实回传：``2026-08-01 +0800`` —— 日历日，加上选的人那台设备的时区。
+# 也认不带时区的 ``2026-08-01`` 和带时刻的 ``2026-08-01 10:00 +0800``（日期时间选择器）。
+_PICKER_DATE_PATTERN = re.compile(
+    r"^(\d{4}-\d{2}-\d{2})(?:[ T]\d{2}:\d{2}(?::\d{2})?)?(?:\s*(?:[+-]\d{2}:?\d{2}|Z))?$"
+)
 
 
 def _form_date(form: dict[str, Any], key: str, *, tz: tzinfo) -> date | None:
-    """从 form_value 里取日期选择器的值，转成业务时区的日历日；取不到返回 None。
+    """从 form_value 里取日期选择器的值，转成日历日；取不到返回 None。
 
-    飞书日期选择器回传的是**毫秒时间戳**，可能是字符串也可能是数字，也可能被包成
-    ``{"value": ...}``。时间戳按业务时区取日历日：界面里手工填的日期就是那一天的业务
-    时区零点，和 ``domain/dates.py`` 写库的口径一致。顺手也认 ``YYYY-MM-DD`` 文本，
-    少一种「明明填了合法日期却报错」的情况。
+    飞书日期选择器回传的是 ``"2026-08-01 +0800"`` 这样的文本（「卡片回传交互」文档）。
+    **取的是前面那个日历日**：那就是人在选择器里点的那一天；后缀只是他设备的时区，
+    不改变他选的是哪一天。
+
+    这里原先只认毫秒时间戳和纯 ``YYYY-MM-DD``，带后缀的真实回传两样都不是 ——
+    选了日期照样报「开始日期要选一个日期」，登记新渠道一次都没成功过（2026-09-24
+    反馈）。毫秒时间戳仍然认（按业务时区 ``tz`` 取日历日），也认 ``{"value": ...}``
+    包一层的形态。
 
     解析不出来一律返回 None，由调用方决定报什么错 —— 校验失败要说人话。
     """
@@ -638,9 +690,10 @@ def _form_date(form: dict[str, Any], key: str, *, tz: tzinfo) -> date | None:
     if not text:
         return None
 
-    if _ISO_DATE_PATTERN.match(text):
+    matched = _PICKER_DATE_PATTERN.match(text)
+    if matched:
         try:
-            return date.fromisoformat(text)
+            return date.fromisoformat(matched.group(1))
         except ValueError:  # 形似而非法，比如 2026-02-30
             return None
 
@@ -663,29 +716,20 @@ def _is_period(text: str) -> bool:
     return 1 <= month <= 12
 
 
-def _recent_months(anchor: str, *, count: int) -> list[str]:
-    """以 ``anchor``（YYYY-MM）为最新月份，倒推 ``count`` 个月。
+def _no_change() -> P2CardActionTriggerResponse:
+    """空响应：飞书收到 ``{}`` 就不动那张卡。"""
+    return P2CardActionTriggerResponse({})
 
-    包含 anchor 本身。用来限制佣金查询下拉的长度：数据可能追溯到很早，一次性
-    列出几十个月对销售没意义，绝大多数查询都是「本月 / 上个月」。
-    """
-    if not _is_period(anchor):
-        return []
-    year, month = int(anchor[:4]), int(anchor[5:])
-    months: list[str] = []
-    for _ in range(count):
-        months.append(f"{year:04d}-{month:02d}")
-        month -= 1
-        if month == 0:
-            month = 12
-            year -= 1
-    return months
+
+def _toast(content: str, *, kind: str = "info") -> P2CardActionTriggerResponse:
+    """只弹一句提示，不换卡。``kind`` 是平台的 info / success / error / warning。"""
+    return P2CardActionTriggerResponse({"toast": {"type": kind, "content": content}})
 
 
 def _card_response(
     card: dict[str, Any], *, toast: str | None = None
 ) -> P2CardActionTriggerResponse:
-    """按平台要求的回调响应体构造返回值。
+    """原地换卡。现在只有翻页和「已提交」回执用它，见模块开头。
 
     结构是 ``{"toast": {...}, "card": {"type": "raw", "data": <卡片 JSON>}}``。
     SDK 拿到这个对象后直接 ``JSON.marshal``，所以这里的 key 名就是最终上线的
