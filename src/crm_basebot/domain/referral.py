@@ -14,15 +14,15 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, tzinfo
 
 from ..bot.auth import Sales
 from ..lark.bitable import _WRITE_LOCK, BitableClient
-from ..lark.values import extract_text, to_number
+from ..lark.values import extract_text
 from . import schema
 from .audit import ACTION_CREATE_REFERRAL, AuditLog
-from .dates import DEFAULT_BUSINESS_TIMEZONE, date_to_ms, today_in
+from .dates import DEFAULT_BUSINESS_TIMEZONE, date_to_ms, ms_to_date, today_in
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,23 @@ REFERRAL_NO_PATTERN = re.compile(r"^R(\d+)$")
 
 class ValidationError(ValueError):
     """销售填的内容不合法。"""
+
+
+@dataclass(frozen=True)
+class ReferralDetail:
+    """一条渠道拿给卡片展示的只读内容。空字符串表示这一列没填。"""
+
+    no: str
+    name: str
+    status: str
+    sales_name: str
+    start_date: str
+    rate: str
+    payout: str
+    email: str
+    submitted_on: str
+    address: str
+    payment: str
 
 
 @dataclass(frozen=True)
@@ -75,22 +92,6 @@ class ReferralInput:
             commission_rate=self.commission_rate,
             payout_frequency=self.payout_frequency,
         )
-
-
-@dataclass
-class ReferralDetail:
-    """展示「我的渠道」用的一行。
-
-    ``client_names`` 由调用方补 —— 客户在另一张表，见 ``list_detail_for``。
-    刻意不是 frozen：补客户名是正常流程的一步，不是「修改了不该改的东西」。
-    """
-
-    record_id: str
-    no: str
-    name: str
-    rate_percent: float | None
-    status: str
-    client_names: list[str] = field(default_factory=list)
 
 
 def parse_referral_no(value: str) -> int | None:
@@ -272,33 +273,81 @@ class ReferralService:
             logger.exception("回填渠道主字段失败 record_id=%s primary=%s", record_id, primary)
 
     def list_for(self, sales: Sales) -> list[tuple[str, str]]:
-        """该销售名下的渠道，返回 [(编号, 名称)]。管理员看全部。
-
-        只给「登记新客户」那个下拉用 —— 它只需要编号和名字。要展示给人看的清单
-        用 ``list_detail_for``。
-        """
-        return [(item.no, item.name) for item in self.list_detail_for(sales)]
-
-    def list_detail_for(self, sales: Sales) -> list[ReferralDetail]:
-        """该销售名下的渠道，带比例和状态。管理员看全部。
-
-        ``client_names`` 在这里一律是空的 —— 客户住在另一张表，这个服务够不到它。
-        由调用方（``bot/handlers.py``）拿 ``record_id`` 去客户服务那边补上。
-        这样两个服务各自只认自己那张表，不用互相持有对方的 table_id。
-        """
+        """该销售名下的渠道，返回 [(编号, 名称)]。管理员看全部。"""
         from ..bot.auth import owned_records
 
-        result: list[ReferralDetail] = []
+        result: list[tuple[str, str]] = []
         records = self._bitable.iter_records(self._table_id)
         for record in owned_records(sales, records, schema.REFERRAL_OWNER_OPEN_ID):
             result.append(
-                ReferralDetail(
-                    record_id=record.record_id,
-                    no=extract_text(record.fields.get(schema.REFERRAL_NO)),
-                    name=extract_text(record.fields.get(schema.REFERRAL_NAME)),
-                    rate_percent=to_number(record.fields.get(schema.REFERRAL_RATE)),
-                    status=extract_text(record.fields.get(schema.REFERRAL_STATUS)),
+                (
+                    extract_text(record.fields.get(schema.REFERRAL_NO)),
+                    extract_text(record.fields.get(schema.REFERRAL_NAME)),
                 )
             )
-        result.sort(key=lambda item: (item.no, item.name))
+        result.sort()
         return result
+
+    def get_for(self, sales: Sales, referral_no: str) -> ReferralDetail | None:
+        """按编号取该销售名下的一条渠道。不在名下、或没有这个编号，返回 None。
+
+        编号来自按钮回传，客户端改得了，所以这里不单独写一套权限判断，
+        先过 ``owned_records`` 再按编号对。
+        """
+        from ..bot.auth import owned_records
+
+        wanted = referral_no.strip()
+        if not wanted:
+            return None
+
+        records = self._bitable.iter_records(self._table_id)
+        for record in owned_records(sales, records, schema.REFERRAL_OWNER_OPEN_ID):
+            fields = record.fields
+            if extract_text(fields.get(schema.REFERRAL_NO)) != wanted:
+                continue
+            return ReferralDetail(
+                no=wanted,
+                name=extract_text(fields.get(schema.REFERRAL_NAME)),
+                status=extract_text(fields.get(schema.REFERRAL_STATUS)),
+                sales_name=extract_text(fields.get(schema.REFERRAL_SALES_NAME)),
+                start_date=_format_day(fields.get(schema.REFERRAL_START_DATE), tz=self._tz),
+                rate=_format_rate(fields.get(schema.REFERRAL_RATE)),
+                payout=extract_text(fields.get(schema.REFERRAL_PAYOUT)),
+                email=extract_text(fields.get(schema.REFERRAL_EMAIL)),
+                submitted_on=_format_day(fields.get(schema.REFERRAL_SUBMITTED_ON), tz=self._tz),
+                address=extract_text(fields.get(schema.REFERRAL_ADDRESS)),
+                payment=extract_text(fields.get(schema.REFERRAL_PAYMENT)),
+            )
+        return None
+
+
+_ISO_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _format_rate(value: object) -> str:
+    text = extract_text(value)
+    if not text:
+        return ""
+    try:
+        number = float(text)
+    except ValueError:
+        return text
+    if number == int(number):
+        return f"{int(number)}%"
+    return f"{number:g}%"
+
+
+def _format_day(value: object, *, tz: tzinfo) -> str:
+    """日期列可能是毫秒时间戳，也可能已经是 YYYY-MM-DD。空的返回空字符串。"""
+    if isinstance(value, date):
+        return value.isoformat()
+    text = extract_text(value)
+    if not text:
+        return ""
+    if _ISO_DAY.match(text):
+        return text
+    try:
+        ms = int(float(text))
+    except ValueError:
+        return text
+    return ms_to_date(ms, tz=tz).isoformat()

@@ -11,10 +11,15 @@
 另一条：open_id 只从 ``data.event.operator.open_id`` 取。这个值由飞书平台签发，
 客户端伪造不了。任何从 form_value 或消息文本里取身份的写法都是漏洞。
 
-**每一张结果卡都要过 ``cards.with_menu``。** 卡片回调的返回值是原地替换，做完一件事
-会话里就只剩一张没有按钮的结果卡，要做下一件只能重新打字。把菜单接在结果卡底部，
-下一轮入口就在原地。唯一的例外是鉴权失败那张 —— 名册里没有的人拿到一排按钮，
-点了还是同一句拒绝，不如不给。
+**结果卡要过 ``cards.with_menu``，导览卡不要。** 卡片回调的返回值是原地替换，做完
+一件事会话里就只剩一张没有按钮的卡，要做下一件只能重新打字 —— 所以登记成功、查询
+出结果、校验失败这些**结果**卡，底部接上主菜单。
+
+「我的渠道」那条路（列表 / 详情 / 找不到）是**导览**卡，自己带「返回列表 / 返回目录」，
+不再叠一层菜单：看完一条渠道，下一步是往回走，不是重开一件事。两种卡片的下一步本来
+就不同，给的按钮也就不同。
+
+鉴权失败那张两样都不给 —— 名册里没有的人拿到一排按钮，点了还是同一句拒绝。
 """
 
 from __future__ import annotations
@@ -122,7 +127,12 @@ class BotHandlers:
             return _card_response(cards.error_card(str(exc)))
 
         try:
-            return self._dispatch(action, sales, form)
+            return self._dispatch(
+                action,
+                sales,
+                form,
+                action_value if isinstance(action_value, dict) else {},
+            )
         except (ValidationError, AuthError) as exc:
             return _card_response(cards.with_menu(cards.error_card(str(exc))))
         except Exception:
@@ -133,7 +143,18 @@ class BotHandlers:
                 )
             )
 
-    def _dispatch(self, action, sales, form) -> P2CardActionTriggerResponse:
+    def _dispatch(
+        self,
+        action,
+        sales,
+        form,
+        action_value: dict | None = None,
+    ) -> P2CardActionTriggerResponse:
+        action_value = action_value or {}
+
+        if action == cards.ACTION_OPEN_MENU:
+            return _card_response(cards.menu_card(sales.name))
+
         if action == cards.ACTION_OPEN_REFERRAL_FORM:
             return _card_response(cards.referral_form_card())
 
@@ -147,7 +168,32 @@ class BotHandlers:
             return _card_response(card)
 
         if action == cards.ACTION_LIST_REFERRALS:
-            return _card_response(cards.with_menu(self._referral_list_card(sales)))
+            return _card_response(
+                cards.referral_list_card(
+                    self._referrals.list_for(sales),
+                    page=_page_index(action_value),
+                )
+            )
+
+        if action == cards.ACTION_OPEN_REFERRAL:
+            detail = self._referrals.get_for(sales, _referral_no(action_value))
+            if detail is None:
+                return _card_response(cards.referral_missing_card())
+            return _card_response(
+                cards.referral_detail_card(
+                    no=detail.no,
+                    name=detail.name,
+                    status=detail.status,
+                    sales_name=detail.sales_name,
+                    start_date=detail.start_date,
+                    rate=detail.rate,
+                    payout=detail.payout,
+                    email=detail.email,
+                    submitted_on=detail.submitted_on,
+                    address=detail.address,
+                    payment=detail.payment,
+                )
+            )
 
         if action == cards.ACTION_SUBMIT_REFERRAL:
             return self._submit_referral(sales, form)
@@ -169,33 +215,6 @@ class BotHandlers:
 
         logger.warning("未知的卡片动作: %r", action)
         return _card_response(cards.with_menu(cards.error_card("这个操作我不认识，请重新开始。")))
-
-    def _referral_list_card(self, sales) -> dict[str, Any]:
-        """「我的渠道」：渠道清单 + 每个渠道名下的客户名。
-
-        两张表各扫一遍。客户那一遍只读名称和关联两列，而且只认已经鉴过权的那批
-        渠道 record_id —— 别的销售的客户不会漏出去。
-
-        客户表读不出来时**照样把渠道列出来**，只在末尾说明客户没取到。渠道清单本身
-        是有用的，为了一个附加信息把整张卡换成报错，是拿有用的东西去换没用的。
-        """
-        details = self._referrals.list_detail_for(sales)
-        if not details:
-            return cards.referral_list_card([])
-
-        try:
-            names = self._clients.names_by_referral({d.record_id for d in details})
-        except Exception:  # noqa: BLE001 - 见 docstring
-            logger.exception("读取渠道名下客户失败 open_id=%s", sales.open_id)
-            card = cards.referral_list_card(details)
-            card["body"]["elements"].append(
-                cards.footnote("客户名单这次没取到，上面的渠道和比例是准的。")
-            )
-            return card
-
-        for detail in details:
-            detail.client_names = names.get(detail.record_id, [])
-        return cards.referral_list_card(details)
 
     def _submit_referral(self, sales, form) -> P2CardActionTriggerResponse:
         # 输入框的标签就写着「分佣比例 (%)」，照着填「20%」是很自然的事。
@@ -471,6 +490,23 @@ class BotHandlers:
         response = self._client.im.v1.message.create(request)
         if not response.success():
             logger.error("发送卡片失败: %s %s", response.code, response.msg)
+
+
+def _page_index(action_value: dict[str, Any]) -> int:
+    """翻页按钮带回的页码。不是非负整数就当第一页，别让回调因为一个坏页码炸成系统错误。"""
+    raw = action_value.get("page", 0)
+    if isinstance(raw, bool):
+        return 0
+    if isinstance(raw, int):
+        return raw if raw > 0 else 0
+    if isinstance(raw, str) and raw.isdigit():
+        return int(raw)
+    return 0
+
+
+def _referral_no(action_value: dict[str, Any]) -> str:
+    raw = action_value.get("referral_no")
+    return "" if raw is None else str(raw).strip()
 
 
 def _form_text(form: dict[str, Any], key: str) -> str:

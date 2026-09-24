@@ -19,10 +19,15 @@ ACTION_OPEN_CLIENT_FORM = "open_client_form"
 ACTION_SUBMIT_REFERRAL = "submit_referral"
 ACTION_SUBMIT_CLIENT = "submit_client"
 ACTION_LIST_REFERRALS = "list_referrals"
+ACTION_OPEN_REFERRAL = "open_referral"
+ACTION_OPEN_MENU = "open_menu"
 ACTION_OPEN_COMMISSION_QUERY = "open_commission_query"
 ACTION_QUERY_COMMISSION = "query_commission"
 ACTION_OPEN_ECAS_QUERY = "open_ecas_query"
 ACTION_QUERY_ECAS = "query_ecas"
+
+# 管理员名下能有上百条渠道。一页八条，卡片还放得下按钮，也不至于只露出前半段。
+REFERRAL_PAGE_SIZE = 8
 
 # 表单项标识，回调的 form_value 里用它取值
 F_REFERRAL_NAME = "referral_name"
@@ -118,23 +123,33 @@ PAYOUT_CHOICES: list[tuple[str, str]] = [
 ]
 
 
-def _menu_button(text: str, action: str, *, primary: bool = False) -> dict[str, Any]:
+def _callback_button(text: str, value: dict[str, Any], *, primary: bool = False) -> dict[str, Any]:
+    """表单外的按钮。``value`` 必须是对象，裸字符串飞书反序列化时会直接抛掉。"""
     return {
         "tag": "button",
         "text": {"tag": "plain_text", "content": text},
         "type": "primary" if primary else "default",
         "width": "fill",
         "margin": "0px 0px 8px 0px",
-        "behaviors": [{"type": "callback", "value": {"action": action}}],
+        "behaviors": [{"type": "callback", "value": value}],
     }
 
 
-def _menu_buttons() -> list[dict[str, Any]]:
-    """主菜单那四个按钮。
+def _menu_button(text: str, action: str, *, primary: bool = False) -> dict[str, Any]:
+    return _callback_button(text, {"action": action}, primary=primary)
 
-    三个按钮垂直堆叠、每个撑满宽度。之前用 column_set 三等分横排，手机屏窄的时候
-    每列只放得下 3-4 个字，「登记新渠道」被截成「登记..」。垂直排列纵向多占一点
-    空间，但任何设备都能把标签完整显示出来。
+
+def _filled(value: str) -> str:
+    text = value.strip() if value else ""
+    return text if text else "未填写"
+
+
+def _menu_buttons() -> list[dict[str, Any]]:
+    """主菜单那几个按钮。
+
+    垂直堆叠、每个撑满宽度。之前用 column_set 三等分横排，手机屏窄的时候每列只放得下
+    3-4 个字，「登记新渠道」被截成「登记..」。垂直排列纵向多占一点空间，但任何设备
+    都能把标签完整显示出来。
     """
     return [
         _menu_button("登记新渠道", ACTION_OPEN_REFERRAL_FORM, primary=True),
@@ -148,15 +163,15 @@ def _menu_buttons() -> list[dict[str, Any]]:
 
 
 def with_menu(card: dict[str, Any]) -> dict[str, Any]:
-    """在一张结果卡的底部接上主菜单。
+    """在一张**结果**卡的底部接上主菜单。
 
-    **为什么每张结果卡都要带菜单**：卡片回调的返回值是「原地替换」——
-    点「登记新渠道」，菜单卡就被表单卡盖掉；点「提交」，表单卡又被成功卡盖掉。
-    做完一件事，会话里只剩一张没有任何按钮的成功卡，要再做下一件只能重新打字。
+    卡片回调的返回值是「原地替换」：点「提交」，表单卡就被成功卡盖掉，会话里只剩
+    一张没有任何按钮的卡，要再做下一件事只能重新打字。
 
-    另一条路是提交完之后再 push 一条新的菜单消息，但那样每操作一次就多两条消息，
-    会话很快被刷满。接在结果卡底部，做完的结果和下一步的入口在同一张卡上，
-    消息数不变。
+    **只给结果卡用，不给导览卡用。** 「我的渠道」那条路上的列表卡、详情卡、找不到卡
+    自己带「返回列表 / 返回目录」—— 看完一条渠道，下一步是往回走，不是重开一件事；
+    而登记成功、查询出结果之后，下一步恰恰是重开一件事。两种卡片的下一步本来就不同，
+    所以给的按钮也不同。在导览卡底下再堆五个入口只会让人点错。
 
     返回的是新 dict，不改传进来的那张 —— 调用方常常复用同一张卡的构造结果。
     """
@@ -164,8 +179,7 @@ def with_menu(card: dict[str, Any]) -> dict[str, Any]:
     elements = list(body.get("elements", []))
     # 分割线就写成 SDK 自己 `CardBuilder.divider()` 发出去的那个形状：裸的
     # `{"tag": "hr"}`，不加 margin。这是整套卡片里唯一一个没在真机上发过的组件，
-    # 而它现在会出现在**每一张**结果卡上 —— 渲染不出来的话是全线故障，不是一处。
-    # 按钮和上面那行字本来就各自带 margin，省掉它不影响间距。
+    # 而它会出现在每一张结果卡上 —— 渲染不出来的话是全线故障，不是一处。
     elements.append({"tag": "hr"})
     elements.append(_text("**接下来做什么？**"))
     elements.extend(_menu_buttons())
@@ -290,52 +304,150 @@ def error_card(body: str) -> dict[str, Any]:
     return notice_card("没能完成", body, template="red")
 
 
-# 一个渠道下最多列几个客户名。超过就折叠 —— 客户多的渠道会把整张卡撑到要滑很久，
-# 而「我的渠道」的用途是快速确认「有哪些渠道、各自多大」，不是客户名册。
-MAX_CLIENTS_SHOWN = 10
+def _referral_button_label(no: str, name: str) -> str:
+    if name:
+        return f"{no} {name}".strip()
+    if no:
+        return f"{no}（未命名）"
+    return "（未命名）"
 
 
-def _rate_text(rate_percent: float | None) -> str:
-    """20.0 -> "20%"，None -> "比例未填"。
+def referral_list_card(items: list[tuple[str, str]], *, page: int = 0) -> dict[str, Any]:
+    """一页渠道，每条可点进详情，底部能回目录。
 
-    去掉没意义的尾零：Base 里存的是数字，读回来是 float，直接拼会显示成「20.0%」。
+    空列表也留「返回目录」。不然这张卡换掉目录之后，只能再发一句话才能回去。
     """
-    if rate_percent is None:
-        return "比例未填"
-    text = f"{rate_percent:.10f}".rstrip("0").rstrip(".")
-    return f"{text or '0'}%"
-
-
-def referral_list_card(items: list[Any]) -> dict[str, Any]:
-    """``items`` 是 ``domain.referral.ReferralDetail``，每个带比例和名下客户。"""
+    back = _callback_button("返回目录", {"action": ACTION_OPEN_MENU})
     if not items:
-        return notice_card("我的渠道", "你名下还没有登记任何渠道。")
+        return {
+            "schema": "2.0",
+            "header": {
+                "title": {"tag": "plain_text", "content": "我的渠道"},
+                "template": "blue",
+            },
+            "body": {
+                "elements": [
+                    _text("你名下还没有登记任何渠道。"),
+                    back,
+                ]
+            },
+        }
 
-    blocks: list[str] = []
-    for item in items:
-        # 名字为空时留一个占位（比如 R006 是在 Base 里直接建的、渠道名称字段没填），
-        # 避免渲染成「**R006** 」这种末尾一个空格、看着像 bug 的行。
-        name = item.name or "（未命名，建议到 Base 里补齐）"
-        head = f"**{item.no}** {name} · {_rate_text(item.rate_percent)}"
-        # 状态只在不是「生效」时才标出来。正常的渠道每行都缀一个「生效」是噪音，
-        # 但停用的渠道混在列表里不作声，会让人以为它还在算钱。
-        if item.status and item.status != schema.STATUS_ACTIVE:
-            head += f" · **{item.status}**"
-        head += f" · {len(item.client_names)} 个客户"
-        lines = [head]
+    page_size = REFERRAL_PAGE_SIZE
+    page_count = (len(items) + page_size - 1) // page_size
+    current = min(max(page, 0), page_count - 1)
+    start = current * page_size
+    elements: list[dict[str, Any]] = [
+        _text(f"共 {len(items)} 个，第 {current + 1}/{page_count} 页。点一条查看。"),
+    ]
+    for no, name in items[start : start + page_size]:
+        elements.append(
+            _callback_button(
+                _referral_button_label(no, name),
+                {"action": ACTION_OPEN_REFERRAL, "referral_no": no},
+            )
+        )
+    if current > 0:
+        elements.append(
+            _callback_button(
+                "上一页",
+                {"action": ACTION_LIST_REFERRALS, "page": current - 1},
+            )
+        )
+    if current + 1 < page_count:
+        elements.append(
+            _callback_button(
+                "下一页",
+                {"action": ACTION_LIST_REFERRALS, "page": current + 1},
+            )
+        )
+    elements.append(back)
+    return {
+        "schema": "2.0",
+        "header": {
+            "title": {"tag": "plain_text", "content": "我的渠道"},
+            "template": "blue",
+        },
+        "body": {"elements": elements},
+    }
 
-        for client in item.client_names[:MAX_CLIENTS_SHOWN]:
-            lines.append(f"　· {client or '（未命名客户）'}")
-        hidden = len(item.client_names) - MAX_CLIENTS_SHOWN
-        if hidden > 0:
-            lines.append(f"　· …… 还有 {hidden} 个，完整名单在 Base 里")
-        if not item.client_names:
-            lines.append("　· 还没有登记客户")
-        blocks.append("\n".join(lines))
 
-    total_clients = sum(len(item.client_names) for item in items)
-    body = f"共 **{len(items)}** 个渠道、**{total_clients}** 个客户\n\n" + "\n\n".join(blocks)
-    return notice_card("我的渠道", body, template="blue")
+def referral_detail_card(
+    *,
+    no: str,
+    name: str,
+    status: str,
+    sales_name: str,
+    start_date: str,
+    rate: str,
+    payout: str,
+    email: str,
+    submitted_on: str,
+    address: str,
+    payment: str,
+) -> dict[str, Any]:
+    """只读。地址和收款信息登记表单不收，但历史行里有，单独放在「特别信息」。"""
+    title = name.strip() if name and name.strip() else (no.strip() or "渠道详情")
+    who = "\n".join(
+        [
+            "**是谁**",
+            f"编号：{_filled(no)}",
+            f"名称：{_filled(name)}",
+            f"状态：{_filled(status)}",
+            f"负责销售：{_filled(sales_name)}",
+        ]
+    )
+    terms = "\n".join(
+        [
+            "**怎么分**",
+            f"开始日期：{_filled(start_date)}",
+            f"分佣比例：{_filled(rate)}",
+            f"结算频率：{_filled(payout)}",
+            f"邮箱：{_filled(email)}",
+            f"提交日期：{_filled(submitted_on)}",
+        ]
+    )
+    special = "\n".join(
+        [
+            "**特别信息**",
+            f"地址：{_filled(address)}",
+            f"收款信息：{_filled(payment)}",
+        ]
+    )
+    return {
+        "schema": "2.0",
+        "header": {
+            "title": {"tag": "plain_text", "content": title},
+            "template": "blue",
+        },
+        "body": {
+            "elements": [
+                _text(who),
+                _text(terms),
+                _text(special),
+                _callback_button("返回列表", {"action": ACTION_LIST_REFERRALS}),
+                _callback_button("返回目录", {"action": ACTION_OPEN_MENU}),
+            ]
+        },
+    }
+
+
+def referral_missing_card() -> dict[str, Any]:
+    """编号不存在，或不在当前这个人名下。不走共用的 error_card，否则回不去。"""
+    return {
+        "schema": "2.0",
+        "header": {
+            "title": {"tag": "plain_text", "content": "找不到这个渠道"},
+            "template": "red",
+        },
+        "body": {
+            "elements": [
+                _text("这个编号不存在，或者不在你名下。"),
+                _callback_button("返回列表", {"action": ACTION_LIST_REFERRALS}),
+                _callback_button("返回目录", {"action": ACTION_OPEN_MENU}),
+            ]
+        },
+    }
 
 
 def _period_selector(name: str, default_period: str, period_options: list[str]) -> dict[str, Any]:
