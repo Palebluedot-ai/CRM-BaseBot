@@ -100,7 +100,8 @@ def _verify_formulas(
 
     平台**不校验**公式表达式：写错的公式照样建得出来，接口照样回 code=0，只是那一列永远
     是空的（2026-09-18 实测）。所以「建好了」这一步光看返回值不算数，得拿记录核对：
-    挂了「客户」关联却一行都算不出佣金的，就是公式的问题。
+    挂了「客户」关联却一行都反查不出「分佣比例」的，就是公式的问题。（以前看的是「本笔佣金」，
+    那一列 2026-09-25 删了。）
 
     「月份」还要单独对一遍时区：公式里的 TEXT() 按**平台**时区算（实测 UTC+8），业务时区
     不是 UTC+8 时它会错月 —— 而错月不报任何错，只会在报表上把 8 月的钱算进 7 月。
@@ -110,7 +111,7 @@ def _verify_formulas(
 
     columns = [
         schema.BOARD_CLIENT_LINK,
-        schema.BOARD_ROW_COMMISSION,
+        schema.BOARD_CLIENT_RATE,
         schema.BOARD_MONTH,
         schema.BOARD_ORDER_DATE,
     ]
@@ -136,7 +137,7 @@ def _verify_formulas(
         if not link_ids(fields.get(schema.BOARD_CLIENT_LINK)):
             continue
         linked += 1
-        if to_number(fields.get(schema.BOARD_ROW_COMMISSION)) is not None:
+        if to_number(fields.get(schema.BOARD_CLIENT_RATE)) is not None:
             computed += 1
 
     print(f"\n公式自检（抽查前 {scanned} 行）：")
@@ -146,12 +147,12 @@ def _verify_formulas(
 
     print(
         f"  挂了「{schema.BOARD_CLIENT_LINK}」关联的有 {linked} 行，"
-        f"其中算得出「{schema.BOARD_ROW_COMMISSION}」的 {computed} 行。"
+        f"其中反查得出「{schema.BOARD_CLIENT_RATE}」的 {computed} 行。"
     )
     if linked and not computed:
         print(
             "  ! 挂了关联却一行都没算出来，公式多半没生效。"
-            f"去 Base 里点开「{schema.BOARD_ROW_COMMISSION}」那一列，看公式是不是变成了错误值。"
+            f"去 Base 里点开「{schema.BOARD_CLIENT_RATE}」那一列，看公式是不是变成了错误值。"
         )
     elif linked:
         print("  公式在算。")

@@ -165,6 +165,7 @@ def all_cards() -> list[tuple[str, dict[str, Any]]]:
     )
     return [
         ("menu_card", cards.menu_card("张三")),
+        ("ai_form_card", cards.ai_form_card()),
         ("referral_form_card", cards.referral_form_card()),
         ("client_form_card", cards.client_form_card(REFERRAL_OPTIONS)),
         ("client_form_card_空渠道", cards.client_form_card([])),
@@ -323,9 +324,10 @@ def test_提交按钮带回调_behavior(card):
 
 def test_渠道下拉的选项结构符合文档():
     card = cards.client_form_card(REFERRAL_OPTIONS)
-    (select,) = components(card, "select_static")
+    (select,) = [
+        s for s in components(card, "select_static") if s["name"] == cards.F_CLIENT_REFERRAL
+    ]
 
-    assert select["name"] == cards.F_CLIENT_REFERRAL
     assert select["required"] is True
 
     values = []
@@ -348,8 +350,9 @@ def test_下拉选择不带文档里没有的_label_字段():
     不知道要选什么。标题得单独用一个富文本组件顶上。
     """
     card = cards.client_form_card(REFERRAL_OPTIONS)
-    (select,) = components(card, "select_static")
-    assert "label" not in select
+    selects = components(card, "select_static")
+    assert selects
+    assert all("label" not in select for select in selects)
 
     form = components(card, "form")[0]
     labels = [n["content"] for n in components(form, "markdown")]
@@ -614,6 +617,7 @@ MENU_ACTIONS = {
     cards.ACTION_OPEN_COMMISSION_QUERY,
     # ECAS 单独一个入口，不并进「佣金查询」：两笔钱、两套比例、两张汇总表。
     cards.ACTION_OPEN_ECAS_QUERY,
+    cards.ACTION_OPEN_AI_FORM,
 }
 
 
@@ -943,3 +947,33 @@ def test_已提交回执列出填过的内容_没有按钮():
     assert "渠道名称：北极星" in text
     assert "邮箱：未填写" in text
     assert components(card, "button") == []
+
+
+# ---------- AI 状态（2026-09-25） ----------
+
+
+def test_登记客户表单有AI状态三选一和升级日期():
+    card = cards.client_form_card(REFERRAL_OPTIONS)
+    (status,) = [
+        s for s in components(card, "select_static") if s["name"] == cards.F_CLIENT_AI_STATUS
+    ]
+    assert [o["value"] for o in status["options"]] == list(schema.AI_STATUS_OPTIONS)
+    assert status["required"] is True
+    (picker,) = components(card, "date_picker")
+    assert picker["name"] == cards.F_CLIENT_AI_DATE
+    assert picker["required"] is False, "只有选「升级为AI」才要日期，校验在服务端做"
+
+
+def test_更新AI表单用UID找客户():
+    """管理员名下几百个客户，下拉放不下，也翻不动。"""
+    card = cards.ai_form_card()
+    (uid,) = components(card, "input")
+    assert uid["name"] == cards.F_AI_UID
+    assert cards.ACTION_OPEN_MENU in _menu_actions(card)
+    top_level = [e for e in card["body"]["elements"] if e.get("tag") == "button"]
+    assert [b["text"]["content"] for b in top_level] == ["返回目录"]
+
+
+def test_主菜单有更新客户AI状态():
+    labels = [b["text"]["content"] for b in components(cards.menu_card("张三"), "button")]
+    assert labels[-1] == "更新客户AI状态"

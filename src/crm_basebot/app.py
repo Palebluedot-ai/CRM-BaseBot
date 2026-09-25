@@ -86,7 +86,7 @@ def build_handlers() -> BotHandlers:
             tz=tz,
         ),
         clients=ReferredClientService(
-            bitable, settings.table_client, settings.table_referral, audit
+            bitable, settings.table_client, settings.table_referral, audit, tz=tz
         ),
         commission_query=commission_query,
         ecas_query=ecas_query,

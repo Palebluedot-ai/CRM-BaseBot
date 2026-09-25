@@ -170,9 +170,9 @@ def test_看板客户关联声明指向客户表():
 
 def test_公式字段带上表达式和返回类型():
     """``formula_type=2`` 的多维表格必须带 ``property.type.data_type``，不带接口报错（实测）。"""
-    expression, data_type = schema.DAILY_BOARD_DERIVED_FORMULAS[schema.BOARD_ROW_COMMISSION]
+    expression, data_type = schema.DAILY_BOARD_DERIVED_FORMULAS[schema.BOARD_CLIENT_RATE]
     field = sync_base._build_field(
-        schema.BOARD_ROW_COMMISSION, FIELD_TYPE_FORMULA, formula=(expression, data_type)
+        schema.BOARD_CLIENT_RATE, FIELD_TYPE_FORMULA, formula=(expression, data_type)
     )
     payload = body(field)
 
@@ -184,7 +184,7 @@ def test_公式字段带上表达式和返回类型():
 def test_没给表达式就在本地停下():
     """少了表达式，接口只回一句「字段属性错误」，看不出是哪一环缺东西。"""
     with pytest.raises(ValueError, match="表达式"):
-        sync_base._build_field(schema.BOARD_ROW_COMMISSION, FIELD_TYPE_FORMULA)
+        sync_base._build_field(schema.BOARD_CLIENT_RATE, FIELD_TYPE_FORMULA)
 
 
 def test_建完表把table_id写回环境文件(tmp_path):
@@ -240,37 +240,33 @@ def test_反查公式里的字段名和_schema_一致():
     rate, _ = schema.DAILY_BOARD_DERIVED_FORMULAS[schema.BOARD_CLIENT_RATE]
     assert rate.endswith(f".[{schema.REFERRAL_RATE}]")
 
-    commission, _ = schema.DAILY_BOARD_DERIVED_FORMULAS[schema.BOARD_ROW_COMMISSION]
-    assert f"[{schema.BOARD_TOTAL_REVENUE}]" in commission
-    assert f"[{schema.BOARD_CLIENT_RATE}]" in commission
+
+def test_本笔佣金那一列不再建():
+    """2026-09-25 删了：AI 规则上线后它会和月结对不上，而月结从来不读它。
+    sync 的清单里要是还有它，人在 Base 里删掉，下次 sync 又会建回来。"""
+    assert "本笔佣金" not in schema.DAILY_BOARD_DERIVED_FIELDS
+    assert "本笔佣金" not in schema.DAILY_BOARD_DERIVED_FORMULAS
 
 
-def test_本笔佣金逐行如实不做保底():
-    """逐行 MAX(0, ...) 会让逐行相加大于月度应付，和 Python 对账对不上。
-    月度保底是 reconcile 的业务规则，不在公式里复制一份。"""
-    expression, _ = schema.DAILY_BOARD_DERIVED_FORMULAS[schema.BOARD_ROW_COMMISSION]
-    assert "MAX" not in expression.upper()
+def test_AI状态单选列建的时候带着三个选项():
+    payload = body(sync_base._build_field(schema.CLIENT_AI_STATUS, 3))
+    assert [o["name"] for o in payload["property"]["options"]] == list(schema.AI_STATUS_OPTIONS)
 
 
-def test_没挂渠道的行佣金留空而不是零():
-    """``0.00`` 在这一列是个错误陈述：它等于说「这笔没有佣金」。
-
-    没挂上关联（用户没登记渠道）实际是「不知道有没有」，得留空。
-    实测：不加保护时空值参与乘法会算出 0，当天 1,287 行全显示 0.00。
-    """
-    expression, _ = schema.DAILY_BOARD_DERIVED_FORMULAS[schema.BOARD_ROW_COMMISSION]
-    assert expression.startswith(f"IF(ISBLANK([{schema.BOARD_CLIENT_RATE}]),")
+def test_客户表要有AI那两列():
+    assert schema.CLIENT_FIELDS[schema.CLIENT_AI_STATUS] == 3
+    assert schema.CLIENT_FIELDS[schema.CLIENT_AI_DATE] == 5
 
 
-def test_本笔佣金公式逐字符就是线上那一版():
-    """线上那一列（2026-09-18 建的）就是这个字符串。
-
-    故意写成字面量而不是拼 schema 常量：差一个字符就是另一个公式，而平台不校验表达式，
-    只会静默算成空列或错值。生产迁移建出来的必须和已核对过的那一版一模一样。
-    """
-    expression, data_type = schema.DAILY_BOARD_DERIVED_FORMULAS[schema.BOARD_ROW_COMMISSION]
-    assert expression == ('IF(ISBLANK([分佣比例]), "", [总收入(opt+现货+合约)] * [分佣比例] / 100)')
-    assert data_type == schema.FORMULA_DATA_TYPE_NUMBER
+def test_公式自检看分佣比例列(fake_bitable, capsys):
+    """以前看「本笔佣金」算没算出来；那一列删了之后改看「分佣比例」反查得出没有。"""
+    fake_bitable.tables[TBL_BOARD].add_existing(
+        {schema.BOARD_CLIENT_LINK: {"link_record_ids": ["rec1"]}, schema.BOARD_CLIENT_RATE: 20}
+    )
+    sync_base._verify_formulas(fake_bitable, TBL_BOARD, tz=SGT, sample=10)
+    out = capsys.readouterr().out
+    assert "反查得出「分佣比例」的 1 行" in out
+    assert "公式在算" in out
 
 
 def test_月份列是_yyyy_MM_文本():

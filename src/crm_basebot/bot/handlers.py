@@ -53,7 +53,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 
 from ..domain.dates import DEFAULT_BUSINESS_TIMEZONE, months_ending, ms_to_date, period_of_day
 from ..domain.referral import ReferralInput, ValidationError
-from ..domain.referred_client import ClientInput
+from ..domain.referred_client import ClientInput, validated_ai
 from ..lark.values import to_number
 from . import cards
 from .auth import AuthError
@@ -274,6 +274,12 @@ class BotHandlers:
         if action == cards.ACTION_OPEN_ECAS_QUERY:
             return self._open_ecas_query(sales)
 
+        if action == cards.ACTION_OPEN_AI_FORM:
+            return self._push(sales, cards.ai_form_card)
+
+        if action == cards.ACTION_SUBMIT_AI:
+            return self._submit_ai(sales, form)
+
         if action == cards.ACTION_QUERY_ECAS:
             return self._query_ecas(sales, form)
 
@@ -445,6 +451,8 @@ class BotHandlers:
             uid=_form_text(form, cards.F_CLIENT_UID),
             name=_form_text(form, cards.F_CLIENT_NAME),
             referral_no=_select_value(form.get(cards.F_CLIENT_REFERRAL)),
+            ai_status=_select_value(form.get(cards.F_CLIENT_AI_STATUS)),
+            ai_date=_form_date(form, cards.F_CLIENT_AI_DATE, tz=self._tz),
         ).validated()
         target = sales.open_id
 
@@ -465,7 +473,7 @@ class BotHandlers:
                     cards.success_card(
                         "客户已登记",
                         f"**{client_input.name}** 已挂到渠道 **{client_input.referral_no}**。\n\n"
-                        "这个客户的交易会自动计入对应渠道的佣金。",
+                        f"AI 状态：{_ai_text(client_input.ai_status, client_input.ai_date)}",
                     )
                 ),
             )
@@ -479,7 +487,50 @@ class BotHandlers:
                     ("所属渠道", client_input.referral_no),
                     ("客户UID", client_input.uid),
                     ("客户名称", client_input.name),
+                    ("AI状态", _ai_text(client_input.ai_status, client_input.ai_date)),
                 ],
+            ),
+            toast="已提交",
+        )
+
+    def _submit_ai(self, sales, form) -> P2CardActionTriggerResponse:
+        """补 / 改客户的 AI 状态。和登记一样：格式在回调里校验，改写在后台，结果推新消息。"""
+        uid = _form_text(form, cards.F_AI_UID).strip()
+        if not uid.isdigit():
+            raise ValidationError(f"客户UID 应该是纯数字，你填的是「{uid}」")
+        status, ai_date = validated_ai(
+            _select_value(form.get(cards.F_AI_STATUS)),
+            _form_date(form, cards.F_AI_DATE, tz=self._tz),
+        )
+        target = sales.open_id
+
+        def worker() -> None:
+            try:
+                name, referral_no = self._clients.update_ai(sales, uid, status, ai_date)
+            except (ValidationError, AuthError) as exc:
+                self._send_to_user(target, cards.with_menu(cards.error_card(str(exc))))
+                return
+            except Exception:
+                logger.exception("更新客户 AI 状态失败 open_id=%s", target)
+                self._send_to_user(target, cards.with_menu(cards.error_card(SYSTEM_ERROR)))
+                return
+
+            self._send_to_user(
+                target,
+                cards.with_menu(
+                    cards.success_card(
+                        "AI 状态已更新",
+                        f"**{name}**（{referral_no}）：{_ai_text(status, ai_date)}",
+                    )
+                ),
+            )
+
+        self._background(worker)
+
+        return _card_response(
+            cards.submitted_card(
+                "更新客户AI状态",
+                [("客户UID", uid), ("AI状态", _ai_text(status, ai_date))],
             ),
             toast="已提交",
         )
@@ -617,6 +668,11 @@ def _message(receive_id: str, receive_id_type: str, card: dict[str, Any]) -> Cre
         )
         .build()
     )
+
+
+def _ai_text(status: str, ai_date: date | None) -> str:
+    """「升级为AI（2026-08-24 起）」这样的一句。"""
+    return f"{status}（{ai_date.isoformat()} 起）" if ai_date else status
 
 
 def _percent(rate: float) -> str:

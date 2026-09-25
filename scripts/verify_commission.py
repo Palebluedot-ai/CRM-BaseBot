@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""按 UID 复算佣金并对账（只读）。
+"""按 UID 核对看板上的客户关联和分佣比例（只读）。
 
 ## 为什么要有这个脚本
 
@@ -11,10 +11,11 @@
     看板行的 用户ID ──按 UID 匹配──► 客户表里那条客户
                                        └─► 该客户的「所属渠道」
                                              └─► 该渠道的「分佣比例」
-    本笔佣金 应该 = 总收入(opt+现货+合约) × 分佣比例 / 100
+再和看板上反查出来的比例逐行对比。（以前还对「本笔佣金」那一列，2026-09-25 那一列删了：
+AI 规则上线后它会和月结对不上，而月结从来不读它。）
 
-再和 Base 算出来的值逐行对比。**全程用 UID 和记录 id，不用姓名** —— 姓名会撞车、
-会大小写不一致、会因为「先名后姓 / 先姓后名」对不上，UID 不会。
+**全程用 UID 和记录 id，不用姓名** —— 姓名会撞车、会大小写不一致、
+会因为「先名后姓 / 先姓后名」对不上，UID 不会。
 
 ## 它报什么
 
@@ -24,7 +25,6 @@
 | 挂错 | 看板这行挂了关联，但那个客户的 UID ≠ 这行的 用户ID |
 | 漏挂 | 客户表里有这个 UID，看板这行却没挂关联（导入时还没登记） |
 | 比例不符 | 看板公式算出的比例 ≠ 从渠道表复算的比例 |
-| 金额不符 | 看板公式算出的佣金 ≠ 复算值 |
 
 ## 用法
 
@@ -42,7 +42,6 @@ import logging
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
-from decimal import Decimal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -54,8 +53,6 @@ from crm_basebot.startup import load_settings, require_settings  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-# 金额比对容差：公式返回的是浮点，复算用 Decimal，最后一位可能差一分以内。
-AMOUNT_TOLERANCE = Decimal("0.01")
 RATE_TOLERANCE = 0.001
 
 
@@ -86,9 +83,6 @@ class Report:
     wrong_link: list[str] = field(default_factory=list)
     missed_link: list[str] = field(default_factory=list)
     rate_mismatch: list[str] = field(default_factory=list)
-    amount_mismatch: list[str] = field(default_factory=list)
-    by_channel_expected: dict[str, Decimal] = field(default_factory=lambda: defaultdict(Decimal))
-    by_channel_board: dict[str, Decimal] = field(default_factory=lambda: defaultdict(Decimal))
 
     @property
     def problems(self) -> int:
@@ -97,7 +91,6 @@ class Report:
             + len(self.wrong_link)
             + len(self.missed_link)
             + len(self.rate_mismatch)
-            + len(self.amount_mismatch)
         )
 
 
@@ -128,12 +121,6 @@ def load_clients(bitable: BitableClient, table_id: str) -> dict[str, list[Client
             )
         )
     return clients
-
-
-def expected_amount(total_revenue: float | None, rate: float | None) -> Decimal | None:
-    if total_revenue is None or rate is None:
-        return None
-    return Decimal(str(total_revenue)) * Decimal(str(rate)) / Decimal(100)
 
 
 def audit(
@@ -177,17 +164,6 @@ def audit(
             report.rate_mismatch.append(
                 f"uid={uid} 看板比例={board_rate} 复算比例={rate}（{label}）"
             )
-
-        want = expected_amount(to_number(fields.get(schema.BOARD_TOTAL_REVENUE)), rate)
-        got = to_number(fields.get(schema.BOARD_ROW_COMMISSION))
-        if want is not None and got is not None:
-            if abs(Decimal(str(got)) - want) > AMOUNT_TOLERANCE:
-                report.amount_mismatch.append(
-                    f"uid={uid} 看板佣金={got} 复算={want}"
-                    f"（收入={to_number(fields.get(schema.BOARD_TOTAL_REVENUE))} × {rate}%）"
-                )
-            report.by_channel_expected[label] += want
-            report.by_channel_board[label] += Decimal(str(got))
 
     return report
 
@@ -251,28 +227,6 @@ def run(args: argparse.Namespace, settings, bitable: BitableClient) -> int:
     show("挂错客户", report.wrong_link)
     show("漏挂（客户表里有却没挂）", report.missed_link)
     show("比例不符", report.rate_mismatch)
-    show("金额不符", report.amount_mismatch)
-
-    mismatched_channels = [
-        label
-        for label in set(report.by_channel_expected) | set(report.by_channel_board)
-        if abs(
-            report.by_channel_expected.get(label, Decimal(0))
-            - report.by_channel_board.get(label, Decimal(0))
-        )
-        > Decimal("0.05")
-    ]
-    if mismatched_channels:
-        print(f"\n  按渠道合计有差异的 {len(mismatched_channels)} 个：")
-        for label in sorted(mismatched_channels)[: args.examples]:
-            print(
-                f"      {label[:44]:<46}复算={report.by_channel_expected[label]:>14,.2f}"
-                f"  看板={report.by_channel_board[label]:>14,.2f}"
-            )
-
-    expected_total = sum(report.by_channel_expected.values())
-    board_total = sum(report.by_channel_board.values())
-    print(f"\n合计：复算 {expected_total:,.2f} / 看板 {board_total:,.2f}")
 
     if report.problems:
         print(f"\n结论：发现 {report.problems} 类差异，上面已列出。")

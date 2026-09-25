@@ -187,6 +187,8 @@ def client_form(**overrides) -> dict[str, Any]:
         cards.F_CLIENT_UID: UID,
         cards.F_CLIENT_NAME: "PLUTO STUDIO LIMITED",
         cards.F_CLIENT_REFERRAL: "R001",
+        cards.F_CLIENT_AI_STATUS: schema.AI_STATUS_UPGRADED,
+        cards.F_CLIENT_AI_DATE: "2026-08-24 +0800",
     }
     form.update(overrides)
     return form
@@ -226,6 +228,7 @@ MENU_ACTIONS = {
     cards.ACTION_LIST_REFERRALS,
     cards.ACTION_OPEN_COMMISSION_QUERY,
     cards.ACTION_OPEN_ECAS_QUERY,
+    cards.ACTION_OPEN_AI_FORM,
 }
 
 
@@ -1042,3 +1045,112 @@ def test_别人的渠道下的客户不会漏进详情卡(fake_bitable):
     )
 
     assert "别人的客户" not in _text(_open_r001(bots))
+
+
+# ---------- AI 状态（2026-09-25） ----------
+
+
+def test_登记客户把AI状态和日期写进Base(fake_bitable, handlers):
+    submit_referral(handlers)
+    payload = click(handlers, cards.ACTION_SUBMIT_CLIENT, form=client_form())
+
+    assert "AI状态：升级为AI（2026-08-24 起）" in _text(payload["card"]["data"])
+    (_, written) = [(t, f) for t, f in fake_bitable.writes if t == TBL_CLIENT][-1]
+    assert written[schema.CLIENT_AI_STATUS] == schema.AI_STATUS_UPGRADED
+    assert written[schema.CLIENT_AI_DATE] == date_to_ms(
+        date(2026, 8, 24), tz=DEFAULT_BUSINESS_TIMEZONE
+    )
+    assert "升级为AI（2026-08-24 起）" in _text(last_pushed(handlers))
+
+
+@pytest.mark.parametrize(
+    ("overrides", "words"),
+    [
+        ({cards.F_CLIENT_AI_STATUS: None}, "AI 状态要选一个"),
+        ({cards.F_CLIENT_AI_DATE: None}, "要填升级日期"),
+        ({cards.F_CLIENT_AI_STATUS: schema.AI_STATUS_NOT}, "不用填升级日期"),
+    ],
+)
+def test_AI状态填错了回红字_表单留着(handlers, overrides, words):
+    submit_referral(handlers)
+    before = len(pushed(handlers))
+    payload = click(handlers, cards.ACTION_SUBMIT_CLIENT, form=client_form(**overrides))
+    _assert_rejected(payload, words)
+    assert len(pushed(handlers)) == before
+
+
+def test_登记客户表单有AI状态和日期(handlers):
+    submit_referral(handlers)
+    click(handlers, cards.ACTION_OPEN_CLIENT_FORM)
+    names = {n.get("name") for n in cards_walk(last_pushed(handlers))}
+    assert {cards.F_CLIENT_AI_STATUS, cards.F_CLIENT_AI_DATE} <= names
+
+
+def _ai_form(**overrides) -> dict[str, Any]:
+    form = {
+        cards.F_AI_UID: UID,
+        cards.F_AI_STATUS: schema.AI_STATUS_UPGRADED,
+        cards.F_AI_DATE: "2026-09-10 +0800",
+    }
+    form.update(overrides)
+    return form
+
+
+def test_菜单里能打开更新AI状态的表单(handlers):
+    assert click(handlers, cards.ACTION_OPEN_AI_FORM) == {}
+    card = last_pushed(handlers)
+    assert card["header"]["title"]["content"] == "更新客户AI状态"
+    assert _actions(card) == {cards.ACTION_SUBMIT_AI, cards.ACTION_OPEN_MENU}
+
+
+def test_补上升级日期(fake_bitable, handlers):
+    submit_referral(handlers)
+    click(
+        handlers,
+        cards.ACTION_SUBMIT_CLIENT,
+        form=client_form(
+            **{cards.F_CLIENT_AI_STATUS: schema.AI_STATUS_NOT, cards.F_CLIENT_AI_DATE: None}
+        ),
+    )
+
+    payload = click(handlers, cards.ACTION_SUBMIT_AI, form=_ai_form())
+
+    assert payload["card"]["data"]["header"]["title"]["content"] == "更新客户AI状态 · 已提交"
+    result = last_pushed(handlers)
+    assert result["header"]["title"]["content"] == "AI 状态已更新"
+    assert "升级为AI（2026-09-10 起）" in _text(result)
+    assert MENU_ACTIONS <= _actions(result)
+    (row,) = fake_bitable.table(TBL_CLIENT).records.values()
+    assert row[schema.CLIENT_AI_STATUS] == schema.AI_STATUS_UPGRADED
+
+
+def test_更新别人的客户推一张找不到(fake_bitable, handlers):
+    fake_bitable.table(TBL_REFERRAL).add_existing(
+        {schema.REFERRAL_NO: "R999", schema.REFERRAL_OWNER_OPEN_ID: STRANGER}
+    )
+    other = next(iter(fake_bitable.table(TBL_REFERRAL).records))
+    fake_bitable.table(TBL_CLIENT).add_existing(
+        {
+            schema.CLIENT_UID: UID,
+            schema.CLIENT_NAME: "别人的客户",
+            schema.CLIENT_REFERRAL_LINK: [other],
+        }
+    )
+
+    click(handlers, cards.ACTION_SUBMIT_AI, form=_ai_form())
+
+    result = last_pushed(handlers)
+    assert result["header"]["title"]["content"] == "没能完成"
+    assert "没找到你名下" in _text(result)
+    assert "别人的客户" not in json.dumps(result, ensure_ascii=False)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "words"),
+    [
+        ({cards.F_AI_UID: "abc"}, "纯数字"),
+        ({cards.F_AI_DATE: None}, "要填升级日期"),
+    ],
+)
+def test_更新AI状态填错了回红字(handlers, overrides, words):
+    _assert_rejected(click(handlers, cards.ACTION_SUBMIT_AI, form=_ai_form(**overrides)), words)

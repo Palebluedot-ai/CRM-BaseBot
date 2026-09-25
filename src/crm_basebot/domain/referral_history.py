@@ -27,6 +27,7 @@ from zoneinfo import ZoneInfo
 from ..lark.bitable import BitableClient, Record
 from ..lark.values import extract_text, to_uid
 from . import ecas, schema
+from .ai_status import AiEligibility, eligibility_of
 from .commission import _link_ids
 from .commission_query import BOARD_FIELDS, ReferralBreakdown, accumulate, referral_from_record
 from .dates import months_ending, period_of_day
@@ -44,6 +45,7 @@ class ChannelClient:
 
     uid: str
     name: str
+    ai: AiEligibility = AiEligibility()
 
 
 @dataclass(frozen=True)
@@ -121,17 +123,18 @@ class ReferralHistoryService:
 
     def _clients(self, referral_record_id: str) -> list[ChannelClient]:
         found: dict[str, ChannelClient] = {}
-        for record in self._bitable.iter_records(
-            self._settings.table_client,
-            field_names=[schema.CLIENT_UID, schema.CLIENT_NAME, schema.CLIENT_REFERRAL_LINK],
-        ):
+        # 不限定列：AI 那两列是 2026-09-25 才加的，还没跑 sync 的 Base 里没有它们，
+        # 点名要一个不存在的列整个请求会被拒。客户表只有几百行，全列读回来也不贵。
+        for record in self._bitable.iter_records(self._settings.table_client):
             linked = _link_ids(record.fields.get(schema.CLIENT_REFERRAL_LINK) or [])
             if referral_record_id not in linked:
                 continue
             uid = to_uid(record.fields.get(schema.CLIENT_UID))
             name = extract_text(record.fields.get(schema.CLIENT_NAME))
             # 没有 UID 的客户按 record_id 占位：对不上交易，但 ECAS 那边还能按名字对。
-            found[uid or f"?{record.record_id}"] = ChannelClient(uid=uid, name=name)
+            found[uid or f"?{record.record_id}"] = ChannelClient(
+                uid=uid, name=name, ai=eligibility_of(record.fields, tz=self._tz)
+            )
         return list(found.values())
 
     def _trade(
@@ -143,7 +146,14 @@ class ReferralHistoryService:
             return {}
         client_map = {uid: referral for uid in uids}
         names = {c.uid: c.name for c in clients if c.uid}
-        months = accumulate(self._board_rows(board, uids), client_map, names, periods, tz=self._tz)
+        months = accumulate(
+            self._board_rows(board, uids),
+            client_map,
+            names,
+            periods,
+            tz=self._tz,
+            eligibility={c.uid: c.ai for c in clients if c.uid},
+        )
         return {period: by_no[referral.no] for period, by_no in months.items()}
 
     def _board_rows(self, board: str, uids: list[str]) -> list[Record]:

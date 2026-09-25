@@ -68,6 +68,10 @@ ECAS_REFERRAL_NO = "渠道编号"  # 公式：关联过去取编号
 ECAS_RATE = "分佣比例"  # 百分数，50 表示 50%
 ECAS_FEE = "ECAS佣金"  # 公式：金额 × 比例 / 100
 ECAS_MONTH = "月份"  # 公式：申请时间所属月份
+# ECAS 系统导出里每笔申请的「引用ID」，一笔一个。追加导入（scripts/append_ecas.py）靠它
+# 认出「这一笔已经在表里了」。**不是「审批单号」**：一张审批单可以批好几笔（HONG KONG
+# XIAOJIA 2026-09-11 三笔共用一个审批单号）。2026-09-25 之前整表导入的行没有这一列。
+ECAS_REF_ID = "引用ID"
 
 # 顺序就是界面上的列顺序。
 ECAS_FIELDS: dict[str, int] = {
@@ -83,6 +87,7 @@ ECAS_FIELDS: dict[str, int] = {
     ECAS_RATE: FIELD_TYPE_NUMBER,
     ECAS_FEE: FIELD_TYPE_FORMULA,
     ECAS_MONTH: FIELD_TYPE_FORMULA,
+    ECAS_REF_ID: FIELD_TYPE_TEXT,
 }
 
 ECAS_FORMULAS: dict[str, tuple[str, int]] = {
@@ -90,7 +95,7 @@ ECAS_FORMULAS: dict[str, tuple[str, int]] = {
         f"[{ECAS_REFERRAL_LINK}].[{schema.REFERRAL_NO}]",
         schema.FORMULA_DATA_TYPE_TEXT,
     ),
-    # 和看板的「本笔佣金」同一个写法，包括那层 ISBLANK 保护：没填比例的行（来源表里
+    # 带 ISBLANK 保护：没填比例的行（来源表里
     # 六成的申请没有介绍人）留空才是对的。空值参与乘法会算出 0，而 0 在这一列等于宣称
     # 「这笔没有返佣」，实际是「这笔没有介绍人」。
     ECAS_FEE: (

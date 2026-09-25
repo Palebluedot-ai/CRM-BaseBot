@@ -78,7 +78,9 @@ def written(fake_bitable, services):
             payout_frequency=schema.PAYOUT_MONTHLY,
         ),
     )
-    clients.create(alice, ClientInput(uid=UID, name="普罗米修斯资本", referral_no=no))
+    clients.create(
+        alice, ClientInput(uid=UID, name="普罗米修斯资本", referral_no=no, ai_status="开户即AI")
+    )
 
     _write_rows(
         fake_bitable,

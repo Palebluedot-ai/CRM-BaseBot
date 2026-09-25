@@ -251,6 +251,18 @@ def run(args: argparse.Namespace, settings, bitable: BitableClient) -> int:
         if len(unmapped) > 20:
             print(f"    …… 还有 {len(unmapped) - 20} 个")
 
+    excluded = sorted(
+        (p, uid) for p, uid in calculator.excluded_not_ai if args.all_periods or p == period
+    )
+    if excluded:
+        # 不是漏算：客户登记了，但那个月还不是 AI（domain/ai_status.py）。说一句，
+        # 免得有人拿看板对账时以为这几笔掉了。
+        print(f"\n另有 {len(excluded)} 个「客户 × 月份」因为那个月还不是 AI，交易没算佣金：")
+        for p, uid in excluded[:20]:
+            print(f"    {p}  {uid}")
+        if len(excluded) > 20:
+            print(f"    …… 还有 {len(excluded) - 20} 个")
+
     if not args.write:
         print("\n（只算没写。确认无误后加 --write 写进 Base）")
         return 0

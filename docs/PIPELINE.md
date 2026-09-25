@@ -9,7 +9,7 @@
   └─ scripts/import_daily_incremental.py --from-mail   ← 只下载，不改 Base
        └─ 本地解析 + 筛站点 + 算「哪些交易日是新的」
             └─ 增量导入 Daily Revenue Board（先删这些天，再写）
-                 └─ Base 公式算每笔佣金（本笔佣金 = 总收入 × 分佣比例 / 100）
+                 └─ 每月 3 号月结按「收入 × 比例」算应付（domain/commission.py）
 ```
 
 ## 只导新加坡站

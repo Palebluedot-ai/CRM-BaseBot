@@ -14,7 +14,12 @@
 唯一的交集是关联到 ``Referral Information`` —— 而且只为了拿**编号和名字**，
 不为了拿比例。ECAS 的比例逐行来自这份表，理由见 ``domain/ecas.py`` 开头。
 
-## 整张表替换，不做增量
+## 整张表替换，不做增量 —— 2026-09-25 起只用来重建，日常用 append_ecas.py
+
+**2026-09-25 起 ECAS 表改成追加维护**（``scripts/append_ecas.py``）：以前的记录保留，新申请
+一笔加一行，介绍人和比例在 Base 里补。这个脚本整表替换会把那些都冲掉，所以表里有追加进来的
+行（带「审批单号」）时拒绝 ``--refresh``，除非再加 ``--wipe-appended``。
+
 
 来源表是单一事实来源，每次导入就是拿它的现状盖掉 Base 里的现状。一笔申请没有行主键
 （同一个客户可以申请多次，金额时间都可能一样），拼一个出来只会在两边不一致时骗自己。
@@ -346,6 +351,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="表里已经有记录时，先清掉再整张重写（只清记录，不动表结构）",
     )
+    parser.add_argument(
+        "--wipe-appended",
+        action="store_true",
+        help="连 append_ecas.py 追加进来的行、在 Base 里补的介绍人一起冲掉（一般不要用）",
+    )
     parser.add_argument("--apply", action="store_true", help="真写；不加则只预演")
     parser.add_argument(
         "--env",
@@ -412,6 +422,19 @@ def main(argv: list[str] | None = None) -> int:
         stale_count = sum(
             1 for _ in bitable.iter_records(table_id, field_names=[ecas.ECAS_CLIENT_NAME])
         )
+        appended = sum(
+            1
+            for record in bitable.iter_records(table_id)
+            if extract_text(record.fields.get(ecas.ECAS_REF_ID)).strip()
+        )
+        if appended and not args.wipe_appended:
+            print(
+                f"\n「{args.table_name}」里有 {appended} 条是追加进来的（带引用ID）。"
+                "\n这个表 2026-09-25 起是追加维护的，整张替换会把它们和在 Base 里补的介绍人"
+                "一起冲掉。\n新申请请用 scripts/append_ecas.py。真要重建，再加 --wipe-appended。",
+                file=sys.stderr,
+            )
+            return 1
         if stale_count and not args.refresh:
             print(
                 f"\n「{args.table_name}」里已经有 {stale_count} 条记录。"

@@ -7,7 +7,7 @@ Base 里已经有同事在用的表，所以安全边界很明确：
   - 已存在的字段类型不对 → **只报告，不动手**（改类型可能毁数据，人来决定）
   - 多出来的表和字段 → 完全不碰
 
-看板表除了 xlsx 里那 18 列，还会建「渠道反查列」：一个单向关联 + 五个公式，定义在
+看板表除了 xlsx 里那 18 列，还会建「渠道反查列」：一个单向关联 + 四个公式，定义在
 ``schema.DAILY_BOARD_DERIVED_FIELDS`` / ``DAILY_BOARD_DERIVED_FORMULAS``。
 **平台不校验公式表达式** —— 写错的公式照样建得出来，只是永远返回空值，所以调用方
 （``scripts/sync_base.py``）建完要拿真实记录做一次公式自检。
@@ -32,6 +32,7 @@ from lark_oapi.api.bitable.v1 import (
     AppFieldPropertyAutoSerialOptions,
     AppTableField,
     AppTableFieldProperty,
+    AppTableFieldPropertyOption,
     AppTableFieldPropertyType,
     CreateAppTableFieldRequest,
     CreateAppTableRequest,
@@ -44,6 +45,7 @@ from .lark.bitable import (
     FIELD_TYPE_AUTO_NUMBER,
     FIELD_TYPE_FORMULA,
     FIELD_TYPE_SINGLE_LINK,
+    FIELD_TYPE_SINGLE_SELECT,
     BitableClient,
 )
 from .lark.field_types import type_name
@@ -161,6 +163,20 @@ def build_field(
             # multiple=False：一个客户只属于一个渠道。默认是 true，
             # 留着 true 的话有人在界面上多挂一个渠道，佣金归属就说不清了。
             AppTableFieldProperty.builder().table_id(link_table_id).multiple(False).build()
+        )
+
+    elif type_code == FIELD_TYPE_SINGLE_SELECT and name in schema.SINGLE_SELECT_OPTIONS:
+        # 选项在建列时就定好，界面上直接点选；不预先建的话只能靠第一次写入时自动长出来，
+        # 在那之前手工改的人面对的是一个空下拉。
+        builder = builder.property(
+            AppTableFieldProperty.builder()
+            .options(
+                [
+                    AppTableFieldPropertyOption.builder().name(option).build()
+                    for option in schema.SINGLE_SELECT_OPTIONS[name]
+                ]
+            )
+            .build()
         )
 
     elif type_code == FIELD_TYPE_FORMULA:

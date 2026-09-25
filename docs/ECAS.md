@@ -111,6 +111,7 @@ Base 里别处的「分佣比例」一律是百分数（`50` = 50%），来源�
 | 分佣比例 | 数字 | 百分数。**这一行自己的**，不是渠道的 |
 | ECAS佣金 | 公式 | `金额 × 比例 / 100`，没填比例的行留空（不是 0） |
 | 月份 | 公式 | `TEXT([申请时间], "yyyy-MM")` |
+| 引用ID | 文本 | ECAS 系统导出里每笔申请一个，追加导入靠它去重（2026-09-25 加的） |
 
 ### `ECAS Commission Summary`
 
@@ -140,13 +141,24 @@ uv run python scripts/import_ecas.py --file "$HOME/Downloads/Wallet and Trades_E
 建表被 `1254302 RolePermNotAllow` 拒掉的话，脚本会把两条解法打出来
 （把应用权限临时改成「可管理」，或者人手建一张空表再重跑）。
 
-### 换了新的一份文件
+### 每月的新申请：追加，不再整表替换（2026-09-25 起）
 
-整张表替换，不做增量 —— 来源表是单一事实来源：
+来源换成超哥每月发的 **ECAS 系统导出**（有 UID、引用ID，没有介绍人和比例）。以前的记录保留，
+新申请一笔加一行，介绍人和比例在 Base 里补 —— 补上去的不会再被冲掉：
 
 ```bash
-uv run python scripts/import_ecas.py --file "新的一份.xlsx" --apply --refresh
+uv run python scripts/append_ecas.py --file ecas_export.xlsx --assign "Prance Wang=R095:50"
+uv run python scripts/append_ecas.py --file ecas_export.xlsx --assign "Prance Wang=R095:50" --apply
 ```
+
+- 靠「引用ID」认出已经在表里的申请，同一份导两次不会重复。**不用「审批单号」**：一张审批单
+  能批好几笔（HONG KONG XIAOJIA 9/11 三笔共用一个）。老记录没有引用ID，按「客户名 + 同一天 +
+  同金额」认。
+- `--assign "销售名=渠道编号:比例"`：这个销售的新申请记到哪个渠道。JIANG JUN（R095）的客户
+  都是 Prance 负责、50%。没认领的先空着，返佣 0，在 Base 里填「所属渠道」「分佣比例」就行。
+- 只收状态 APPROVED 的。
+- `import_ecas.py --refresh`（整表替换）遇到追加进来的行会拒绝，免得把它们冲掉；真要重建再加
+  `--wipe-appended`。
 
 ### 结算
 

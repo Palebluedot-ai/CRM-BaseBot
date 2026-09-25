@@ -123,7 +123,7 @@ def test_公式列和人员列不进payload(fake_bitable):
     fake_bitable.table(TBL_BOARD).fields = [
         FieldInfo(
             field_id="f1",
-            name=schema.BOARD_ROW_COMMISSION,
+            name=schema.BOARD_CLIENT_RATE,
             type=20,
             ui_type="Formula",
             is_primary=False,
@@ -137,7 +137,7 @@ def test_公式列和人员列不进payload(fake_bitable):
         ),
     ]
     skip = unwritable_fields(fake_bitable, TBL_BOARD)
-    assert schema.BOARD_ROW_COMMISSION in skip
+    assert schema.BOARD_CLIENT_RATE in skip
     assert schema.BOARD_CLIENT_UID not in skip
 
 

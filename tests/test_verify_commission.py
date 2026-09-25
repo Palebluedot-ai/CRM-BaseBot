@@ -70,7 +70,6 @@ def _board_row(
     uid: str,
     revenue: float,
     rate: float | None,
-    amount: float | None,
     link: str | None,
     month: str = "2026-03",
 ) -> str:
@@ -82,15 +81,13 @@ def _board_row(
     }
     if rate is not None:
         fields[schema.BOARD_CLIENT_RATE] = rate
-    if amount is not None:
-        fields[schema.BOARD_ROW_COMMISSION] = amount
     return fake_bitable.table(TBL_BOARD).add_existing(fields)
 
 
 def test_一致的链路报零差异(fake_bitable, capsys):
     channel = _channel(fake_bitable, "R001", "ABC Capital", 20.0)
     client = _client(fake_bitable, UID_A, "PLUTO STUDIO", channel)
-    _board_row(fake_bitable, uid=UID_A, revenue=1000.0, rate=20.0, amount=200.0, link=client)
+    _board_row(fake_bitable, uid=UID_A, revenue=1000.0, rate=20.0, link=client)
 
     assert verifier.run(_args(), _settings(), fake_bitable) == 0
     assert "逐行一致" in capsys.readouterr().out
@@ -100,7 +97,7 @@ def test_挂错客户会被发现(fake_bitable, capsys):
     channel = _channel(fake_bitable, "R001", "ABC Capital", 20.0)
     _client(fake_bitable, UID_A, "PLUTO STUDIO", channel)  # 这个 UID 的正确客户记录
     other = _client(fake_bitable, UID_B, "SOMEONE ELSE", channel)
-    _board_row(fake_bitable, uid=UID_A, revenue=1000.0, rate=20.0, amount=200.0, link=other)
+    _board_row(fake_bitable, uid=UID_A, revenue=1000.0, rate=20.0, link=other)
 
     assert verifier.run(_args(), _settings(), fake_bitable) == 1
     assert "挂错客户" in capsys.readouterr().out
@@ -109,7 +106,7 @@ def test_挂错客户会被发现(fake_bitable, capsys):
 def test_客户表里有却没挂关联会被发现(fake_bitable, capsys):
     channel = _channel(fake_bitable, "R001", "ABC Capital", 20.0)
     _client(fake_bitable, UID_A, "PLUTO STUDIO", channel)
-    _board_row(fake_bitable, uid=UID_A, revenue=1000.0, rate=None, amount=None, link=None)
+    _board_row(fake_bitable, uid=UID_A, revenue=1000.0, rate=None, link=None)
 
     assert verifier.run(_args(), _settings(), fake_bitable) == 1
     assert "漏挂" in capsys.readouterr().out
@@ -119,7 +116,7 @@ def test_客户表UID重复会被发现(fake_bitable, capsys):
     channel = _channel(fake_bitable, "R001", "ABC Capital", 20.0)
     client = _client(fake_bitable, UID_A, "PLUTO STUDIO", channel)
     _client(fake_bitable, UID_A, "PLUTO STUDIO 重复行", channel)
-    _board_row(fake_bitable, uid=UID_A, revenue=1000.0, rate=20.0, amount=200.0, link=client)
+    _board_row(fake_bitable, uid=UID_A, revenue=1000.0, rate=20.0, link=client)
 
     assert verifier.run(_args(), _settings(), fake_bitable) == 1
     assert "UID 重复" in capsys.readouterr().out
@@ -129,27 +126,17 @@ def test_比例不符会被发现(fake_bitable, capsys):
     channel = _channel(fake_bitable, "R001", "ABC Capital", 20.0)
     client = _client(fake_bitable, UID_A, "PLUTO STUDIO", channel)
     # 看板公式说 30%，但渠道表写的是 20%
-    _board_row(fake_bitable, uid=UID_A, revenue=1000.0, rate=30.0, amount=300.0, link=client)
+    _board_row(fake_bitable, uid=UID_A, revenue=1000.0, rate=30.0, link=client)
 
     assert verifier.run(_args(), _settings(), fake_bitable) == 1
     assert "比例不符" in capsys.readouterr().out
-
-
-def test_金额不符会被发现(fake_bitable, capsys):
-    channel = _channel(fake_bitable, "R001", "ABC Capital", 20.0)
-    client = _client(fake_bitable, UID_A, "PLUTO STUDIO", channel)
-    # 1000 × 20% 应该是 200，看板给的是 250
-    _board_row(fake_bitable, uid=UID_A, revenue=1000.0, rate=20.0, amount=250.0, link=client)
-
-    assert verifier.run(_args(), _settings(), fake_bitable) == 1
-    assert "金额不符" in capsys.readouterr().out
 
 
 def test_渠道没有比例时不算差异(fake_bitable):
     """渠道还没填比例 → 佣金列本来就该是空的，这不是「算错」。"""
     channel = _channel(fake_bitable, "R001", "ABC Capital", 0.0)
     client = _client(fake_bitable, UID_A, "PLUTO STUDIO", channel)
-    _board_row(fake_bitable, uid=UID_A, revenue=1000.0, rate=0.0, amount=0.0, link=client)
+    _board_row(fake_bitable, uid=UID_A, revenue=1000.0, rate=0.0, link=client)
 
     assert verifier.run(_args(), _settings(), fake_bitable) == 0
 
@@ -157,14 +144,13 @@ def test_渠道没有比例时不算差异(fake_bitable):
 def test_month只核对指定月份(fake_bitable, capsys):
     channel = _channel(fake_bitable, "R001", "ABC Capital", 20.0)
     client = _client(fake_bitable, UID_A, "PLUTO STUDIO", channel)
-    _board_row(fake_bitable, uid=UID_A, revenue=1000.0, rate=20.0, amount=200.0, link=client)
-    # 这笔挂在 4 月，且金额是错的；只核对 3 月时不该被点出来
+    _board_row(fake_bitable, uid=UID_A, revenue=1000.0, rate=20.0, link=client)
+    # 这笔挂在 4 月，且比例是错的；只核对 3 月时不该被点出来
     _board_row(
         fake_bitable,
         uid=UID_A,
         revenue=1000.0,
-        rate=20.0,
-        amount=999.0,
+        rate=35.0,
         link=client,
         month="2026-04",
     )

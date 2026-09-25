@@ -33,6 +33,9 @@ ACTION_OPEN_COMMISSION_QUERY = "open_commission_query"
 ACTION_QUERY_COMMISSION = "query_commission"
 ACTION_OPEN_ECAS_QUERY = "open_ecas_query"
 ACTION_QUERY_ECAS = "query_ecas"
+# 补 / 改一个已登记客户的 AI 状态（2026-09-25：客户后来升级了 AI，要能补上日期）。
+ACTION_OPEN_AI_FORM = "open_ai_form"
+ACTION_SUBMIT_AI = "submit_ai"
 
 # 管理员名下能有上百条渠道。
 #
@@ -55,6 +58,11 @@ F_REFERRAL_PAYOUT = "referral_payout"
 F_CLIENT_UID = "client_uid"
 F_CLIENT_NAME = "client_name"
 F_CLIENT_REFERRAL = "client_referral"
+F_CLIENT_AI_STATUS = "client_ai_status"
+F_CLIENT_AI_DATE = "client_ai_date"
+F_AI_UID = "ai_uid"
+F_AI_STATUS = "ai_status"
+F_AI_DATE = "ai_date"
 F_QUERY_PERIOD = "query_period"
 F_ECAS_PERIOD = "ecas_period"
 
@@ -135,6 +143,26 @@ def _select(
     }
 
 
+# AI 状态下拉：标签说人话，值是写进 Base 的原文（单选列的三个选项，见 schema）。
+AI_CHOICES: list[tuple[str, str]] = [
+    (f"{schema.AI_STATUS_ALREADY}（登记时已经是 AI）", schema.AI_STATUS_ALREADY),
+    (f"{schema.AI_STATUS_UPGRADED}（先是普通客户，后来升级）", schema.AI_STATUS_UPGRADED),
+    (f"{schema.AI_STATUS_NOT}（暂不算交易佣金）", schema.AI_STATUS_NOT),
+]
+
+AI_RULE_NOTE = "交易佣金从客户成为 AI 的那个月起算（整月都算）；非 AI 不算。ECAS 返佣不看 AI。"
+
+
+def _ai_fields(status_name: str, date_name: str) -> list[dict[str, Any]]:
+    """AI 状态 + 升级日期。两张表单（登记客户、更新 AI）共用，写法一致。"""
+    return [
+        _text("**AI 状态**"),
+        _select(status_name, "选择 AI 状态", AI_CHOICES),
+        _text("**升级AI日期**（选「升级为AI」时必填，其它不用填）"),
+        _date_picker(date_name, "选择升级日期", required=False),
+    ]
+
+
 # 结算频率下拉的选项：标签带中文提示，值保持模板原文。
 PAYOUT_CHOICES: list[tuple[str, str]] = [
     (f"{schema.PAYOUT_MONTHLY}（按月）", schema.PAYOUT_MONTHLY),
@@ -188,6 +216,7 @@ def _menu_buttons() -> list[dict[str, Any]]:
         # ECAS 单独一个入口，不并进「佣金查询」。两笔钱、两套比例、两张汇总表，
         # 混在一个按钮后面只会让人分不清自己看的是哪一笔（见 docs/ECAS.md）。
         _menu_button("ECAS 返佣", ACTION_OPEN_ECAS_QUERY),
+        _menu_button("更新客户AI状态", ACTION_OPEN_AI_FORM),
     ]
 
 
@@ -306,14 +335,44 @@ def client_form_card(referral_options: list[tuple[str, str]]) -> dict[str, Any]:
                         _select(F_CLIENT_REFERRAL, "选择一个你名下的渠道", options),
                         _input(F_CLIENT_UID, "客户UID", "例如 577809207768677761"),
                         _input(F_CLIENT_NAME, "客户名称", "例如 PLUTO STUDIO LIMITED"),
+                        *_ai_fields(F_CLIENT_AI_STATUS, F_CLIENT_AI_DATE),
                         _submit("client_submit", ACTION_SUBMIT_CLIENT, "提交登记"),
                     ],
                 },
                 _text(
                     "<font color='grey'>客户UID 要和交易明细表里的完全一致，"
-                    "否则佣金对不上。</font>",
+                    f"否则佣金对不上。{AI_RULE_NOTE}</font>",
                     size="notation",
                 ),
+                back_to_menu_button(),
+            ]
+        },
+    }
+
+
+def ai_form_card() -> dict[str, Any]:
+    """补 / 改一个已登记客户的 AI 状态。只能改自己名下渠道的客户（管理员全部）。
+
+    用 UID 找客户而不是下拉：管理员名下几百个客户，下拉放不下，也翻不动。
+    """
+    return {
+        "schema": "2.0",
+        "header": {
+            "title": {"tag": "plain_text", "content": "更新客户AI状态"},
+            "template": "blue",
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "form",
+                    "name": "ai_form",
+                    "elements": [
+                        _input(F_AI_UID, "客户UID", "例如 577809207768677761"),
+                        *_ai_fields(F_AI_STATUS, F_AI_DATE),
+                        _submit("ai_submit", ACTION_SUBMIT_AI, "提交"),
+                    ],
+                },
+                footnote(AI_RULE_NOTE),
                 back_to_menu_button(),
             ]
         },

@@ -24,6 +24,7 @@ ACTION_CREATE_CLIENT = "登记客户"
 ACTION_COMPUTE_COMMISSION = "计算佣金"
 # ECAS 返佣是和交易佣金分开的第二套账，审计里也分开记，别让人把两次结算看成同一件事。
 ACTION_COMPUTE_ECAS = "计算ECAS返佣"
+ACTION_UPDATE_CLIENT_AI = "更新客户AI状态"
 
 
 class AuditLog:

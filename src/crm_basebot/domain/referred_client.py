@@ -10,16 +10,32 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import date, tzinfo
 
 from ..bot.auth import Sales, owned_records
 from ..lark.bitable import BitableClient
 from ..lark.values import extract_text, to_uid
 from . import schema
-from .audit import ACTION_CREATE_CLIENT, AuditLog
+from .audit import ACTION_CREATE_CLIENT, ACTION_UPDATE_CLIENT_AI, AuditLog
 from .commission import _link_ids
+from .dates import DEFAULT_BUSINESS_TIMEZONE, date_to_ms
 from .referral import ValidationError
 
 logger = logging.getLogger(__name__)
+
+
+def validated_ai(status: str, ai_date: date | None) -> tuple[str, date | None]:
+    """AI 状态三选一，外加日期什么时候必填、什么时候不能填（规则见 domain/ai_status.py）。"""
+    status = (status or "").strip()
+    if status not in schema.AI_STATUS_OPTIONS:
+        raise ValidationError("AI 状态要选一个：" + " / ".join(schema.AI_STATUS_OPTIONS))
+    if status == schema.AI_STATUS_UPGRADED and ai_date is None:
+        raise ValidationError(f"选了「{schema.AI_STATUS_UPGRADED}」要填升级日期")
+    if status == schema.AI_STATUS_NOT and ai_date is not None:
+        raise ValidationError(
+            f"「{schema.AI_STATUS_NOT}」不用填升级日期；已经升级了请选「{schema.AI_STATUS_UPGRADED}」"
+        )
+    return status, ai_date
 
 
 @dataclass(frozen=True)
@@ -27,6 +43,9 @@ class ClientInput:
     uid: str
     name: str
     referral_no: str
+    # 2026-09-25 起新登记的客户必须选：开户即AI / 升级为AI / 非AI。
+    ai_status: str = ""
+    ai_date: date | None = None
 
     def validated(self) -> ClientInput:
         uid = to_uid(self.uid)
@@ -38,11 +57,14 @@ class ClientInput:
             raise ValidationError("客户名称不能为空")
         if not self.referral_no.strip():
             raise ValidationError("必须选择所属渠道")
+        ai_status, ai_date = validated_ai(self.ai_status, self.ai_date)
 
         return ClientInput(
             uid=uid,
             name=self.name.strip(),
             referral_no=self.referral_no.strip().upper(),
+            ai_status=ai_status,
+            ai_date=ai_date,
         )
 
 
@@ -53,11 +75,15 @@ class ReferredClientService:
         table_id: str,
         referral_table_id: str,
         audit: AuditLog,
+        *,
+        tz: tzinfo = DEFAULT_BUSINESS_TIMEZONE,
     ) -> None:
         self._bitable = bitable
         self._table_id = table_id
         self._referral_table_id = referral_table_id
         self._audit = audit
+        # 升级AI日期按业务时区那天的零点存，和其它日期列一个口径（domain/dates.py）。
+        self._tz = tz
 
     def _resolve_owned_referral(self, sales: Sales, referral_no: str) -> str:
         """把渠道编号换成 record_id，顺带确认它归这名销售所有。
@@ -118,7 +144,10 @@ class ReferredClientService:
             schema.CLIENT_REFERRAL_LINK: [referral_record_id],
             schema.CLIENT_OWNER: [{"id": sales.open_id}],
             schema.CLIENT_OWNER_OPEN_ID: sales.open_id,
+            schema.CLIENT_AI_STATUS: clean.ai_status,
         }
+        if clean.ai_date is not None:
+            fields[schema.CLIENT_AI_DATE] = date_to_ms(clean.ai_date, tz=self._tz)
 
         self._audit.record(
             actor_open_id=sales.open_id,
@@ -129,6 +158,8 @@ class ReferredClientService:
                 "客户UID": clean.uid,
                 "客户名称": clean.name,
                 "所属渠道": clean.referral_no,
+                "AI状态": clean.ai_status,
+                "升级AI日期": clean.ai_date.isoformat() if clean.ai_date else "",
             },
         )
 
@@ -143,3 +174,65 @@ class ReferredClientService:
             sales.open_id,
         )
         return created.record_id
+
+    def update_ai(
+        self, sales: Sales, uid: str, status: str, ai_date: date | None
+    ) -> tuple[str, str]:
+        """补 / 改一个已登记客户的 AI 状态。返回 (客户名称, 所属渠道编号)。
+
+        只能改**自己名下渠道**的客户（管理员全部）。找不到和不是你的，回同一句话 ——
+        和登记客户一样，不让人靠试探知道别人的客户在不在。
+        """
+        target = to_uid(uid)
+        if not target or not target.isdigit():
+            raise ValidationError(f"客户UID 应该是纯数字，你填的是「{uid}」")
+        status, ai_date = validated_ai(status, ai_date)
+
+        owned: dict[str, str] = {}
+        records = self._bitable.iter_records(self._referral_table_id)
+        for record in owned_records(sales, records, schema.REFERRAL_OWNER_OPEN_ID):
+            owned[record.record_id] = extract_text(record.fields.get(schema.REFERRAL_NO))
+
+        found = None
+        for record in self._bitable.iter_records(self._table_id):
+            if to_uid(record.fields.get(schema.CLIENT_UID)) != target:
+                continue
+            linked = _link_ids(record.fields.get(schema.CLIENT_REFERRAL_LINK) or [])
+            referral_no = next((owned[rid] for rid in linked if rid in owned), None)
+            if referral_no is not None:
+                found = (record, referral_no)
+                break
+        if found is None:
+            raise ValidationError(f"没找到你名下 UID 是 {target} 的客户")
+        record, referral_no = found
+        name = extract_text(record.fields.get(schema.CLIENT_NAME))
+
+        fields = {
+            schema.CLIENT_AI_STATUS: status,
+            # 改成「开户即AI」「非AI」时把旧日期清掉，否则判定时日期优先，会和状态打架。
+            schema.CLIENT_AI_DATE: date_to_ms(ai_date, tz=self._tz) if ai_date else None,
+        }
+        self._audit.record(
+            actor_open_id=sales.open_id,
+            actor_name=sales.name,
+            action=ACTION_UPDATE_CLIENT_AI,
+            target_table=schema.TABLE_CLIENT_NAME,
+            target_record=record.record_id,
+            detail={
+                "客户UID": target,
+                "客户名称": name,
+                "AI状态": status,
+                "升级AI日期": ai_date.isoformat() if ai_date else "",
+            },
+        )
+        self._bitable.update_record(self._table_id, record.record_id, fields)
+        logger.info(
+            "更新客户 %s「%s」AI状态=%s 日期=%s 操作人=%s(%s)",
+            target,
+            name,
+            status,
+            ai_date,
+            sales.name,
+            sales.open_id,
+        )
+        return name, referral_no

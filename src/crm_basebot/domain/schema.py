@@ -95,6 +95,16 @@ CLIENT_REFERRAL_LINK = "所属渠道"  # Referral Code，存成指向渠道表�
 CLIENT_SALES_NAME = "负责销售"  # Sales In Charge，姓名
 CLIENT_OWNER = "归属销售"
 CLIENT_OWNER_OPEN_ID = "登记人OpenID"
+# 客户是不是 AI（Accredited / Professional Investor，这里两者通用）。交易佣金只付给
+# AI 客户带来的交易，规则见 domain/ai_status.py。2026-09-25 加的，之前登记的客户这两列
+# 是空的 —— 空的照旧算，不受新规则影响。
+CLIENT_AI_STATUS = "AI状态"
+CLIENT_AI_DATE = "升级AI日期"
+
+AI_STATUS_ALREADY = "开户即AI"
+AI_STATUS_UPGRADED = "升级为AI"
+AI_STATUS_NOT = "非AI"
+AI_STATUS_OPTIONS = (AI_STATUS_ALREADY, AI_STATUS_UPGRADED, AI_STATUS_NOT)
 
 CLIENT_FIELDS: dict[str, int] = {
     # 必须是文本。18-19 位 UID 存成数字会在服务端就被 float64 抹平精度。
@@ -104,6 +114,13 @@ CLIENT_FIELDS: dict[str, int] = {
     CLIENT_SALES_NAME: FIELD_TYPE_TEXT,
     CLIENT_OWNER: FIELD_TYPE_USER,
     CLIENT_OWNER_OPEN_ID: FIELD_TYPE_TEXT,
+    CLIENT_AI_STATUS: FIELD_TYPE_SINGLE_SELECT,
+    CLIENT_AI_DATE: FIELD_TYPE_DATETIME,
+}
+
+# 单选列建的时候带上哪些选项。只管新建的列 —— 已经存在的列 sync 不去动它。
+SINGLE_SELECT_OPTIONS: dict[str, tuple[str, ...]] = {
+    CLIENT_AI_STATUS: AI_STATUS_OPTIONS,
 }
 
 # ---------- 表 3：日读看板（每日交易明细，脚本从 xlsx 导入） ----------
@@ -194,7 +211,8 @@ BOARD_CLIENT_LINK = "客户"  # 单向关联 -> Referred Client
 BOARD_REFERRAL_NO = "渠道编号"  # 公式：渠道的 Referral Code
 BOARD_REFERRAL_NAME = "渠道名称"  # 公式：渠道的 Name
 BOARD_CLIENT_RATE = "分佣比例"  # 公式：渠道的 Commission Rate，百分数
-BOARD_ROW_COMMISSION = "本笔佣金"  # 公式：这一笔该分出去的钱
+# 以前还有一列「本笔佣金」（收入 × 比例）。2026-09-25 删了：AI 规则上线后（升级为 AI 之前
+# 的月份不算），这一列不知道那条规则，Base 里看到的会和机器人、月结对不上。结算从来不读它。
 BOARD_MONTH = "月份"  # 公式：交易日期所属月份，形如 2026-07
 
 # 公式返回值的类型码。formula_type=2 的多维表格建公式字段时必须带上它，不带接口报错。
@@ -208,7 +226,6 @@ DAILY_BOARD_DERIVED_FIELDS: dict[str, int] = {
     BOARD_REFERRAL_NO: FIELD_TYPE_FORMULA,
     BOARD_REFERRAL_NAME: FIELD_TYPE_FORMULA,
     BOARD_CLIENT_RATE: FIELD_TYPE_FORMULA,
-    BOARD_ROW_COMMISSION: FIELD_TYPE_FORMULA,
     BOARD_MONTH: FIELD_TYPE_FORMULA,
 }
 
@@ -227,18 +244,6 @@ DAILY_BOARD_DERIVED_FORMULAS: dict[str, tuple[str, int]] = {
     ),
     BOARD_CLIENT_RATE: (
         f"[{BOARD_CLIENT_LINK}].[{CLIENT_REFERRAL_LINK}].[{REFERRAL_RATE}]",
-        FORMULA_DATA_TYPE_NUMBER,
-    ),
-    # 逐行如实，可以为负 —— 退款/冲销那一行就是负的。**不做**逐行 MAX(0, ...) 保底：
-    # 那样逐行相加会大于月度应付，和 Python 对账对不上。月度保底属于 reconcile
-    # 的业务规则（见 domain/commission.py），不在这里复制一份。
-    #
-    # ISBLANK 那层保护是为了没挂上关联的行（用户没登记渠道，或者挂的渠道没填比例）：
-    # 空值参与乘法会算出 0，而 0 在这一列是个错误陈述 —— 它等于宣称「这笔没有佣金」，
-    # 实际是「不知道有没有」。留空才是对的。实测：不加保护时 1,287 行显示 0.00。
-    BOARD_ROW_COMMISSION: (
-        f'IF(ISBLANK([{BOARD_CLIENT_RATE}]), "", '
-        f"[{BOARD_TOTAL_REVENUE}] * [{BOARD_CLIENT_RATE}] / 100)",
         FORMULA_DATA_TYPE_NUMBER,
     ),
     # 交易日期所属月份，形如 2026-07。视图和仪表盘都没法「按派生维度分组」，得先有一个

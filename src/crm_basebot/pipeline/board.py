@@ -55,7 +55,7 @@ def to_payload(row: BoardRow, *, tz: tzinfo, client_links: dict[str, str]) -> di
     """一行写进 Base 的字段：日期列换成业务时区那天零点的毫秒时间戳，其余原样。
 
     ``client_links`` 是「客户UID -> 客户记录 id」。命中的行顺手把「客户」关联挂上 ——
-    Base 里那几列公式（渠道编号 / 渠道名称 / 分佣比例 / 本笔佣金）全靠这个关联反查。
+    Base 里那几列公式（渠道编号 / 渠道名称 / 分佣比例）全靠这个关联反查。
     挂不上的行（用户ID 不在客户表里）留空，公式自然也是空的。
     """
     payload: dict[str, Any] = {

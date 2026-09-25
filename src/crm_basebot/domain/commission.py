@@ -47,6 +47,7 @@ from ..lark.values import (
     to_uid,
 )
 from . import schema
+from .ai_status import AiEligibility, eligibility_of
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +177,10 @@ class CommissionCalculator:
         # 「有数据的最新月份」是 reconcile 不传 --period 时的默认结算范围，
         # 单独再扫一遍表去求它，等于让每次对账的 API 调用量翻倍。
         self._latest_period = ""
+        # 客户UID -> AI 资格（domain/ai_status.py）。load_client_map 顺手读出来。
+        self._eligibility: dict[str, AiEligibility] = {}
+        # 因为「还不是 AI」没算进去的客户：(月份, UID)。只用来在报告里说一句，不影响金额。
+        self.excluded_not_ai: set[tuple[str, str]] = set()
 
     # ---------- 载入维表 ----------
 
@@ -216,6 +221,7 @@ class CommissionCalculator:
                 continue
 
             mapping[uid] = referral
+            self._eligibility[uid] = eligibility_of(record.fields, tz=self._tz)
         return mapping
 
     # ---------- 计算 ----------
@@ -259,6 +265,10 @@ class CommissionCalculator:
             referral = client_map.get(uid)
             if referral is None:
                 unmapped.add(uid)
+                continue
+
+            if not self._eligibility.get(uid, AiEligibility()).counts(row_period):
+                self.excluded_not_ai.add((row_period, uid))
                 continue
 
             revenue = to_number(record.fields.get(schema.BOARD_TOTAL_REVENUE))

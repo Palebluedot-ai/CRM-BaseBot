@@ -31,6 +31,7 @@ from ..bot.auth import Sales
 from ..lark.bitable import BitableClient, Record
 from ..lark.values import extract_text, to_number, to_uid
 from . import schema
+from .ai_status import AiEligibility, eligibility_of
 from .commission import CENTS, Referral, _link_ids, period_of
 
 logger = logging.getLogger(__name__)
@@ -154,12 +155,17 @@ def accumulate(
     periods: Collection[str],
     *,
     tz,
+    eligibility: dict[str, AiEligibility] | None = None,
 ) -> dict[str, dict[str, ReferralBreakdown]]:
     """看板行 -> ``{月份: {渠道编号: ReferralBreakdown}}``。
 
     只收 ``periods`` 里的月份、``client_map`` 里的客户（UID -> 所属渠道）；其余的行
     跳过。佣金查询和渠道详情卡共用这一个函数，见模块开头第 4 条。
+
+    ``eligibility`` 是客户UID -> AI 资格：那个月还不是 AI 的客户，交易不算（见
+    domain/ai_status.py，和月结同一条规则）。不在里面的客户照旧算。
     """
+    eligibility = eligibility or {}
     wanted = set(periods)
     out: dict[str, dict[str, ReferralBreakdown]] = {}
     for record in records:
@@ -171,6 +177,8 @@ def accumulate(
             continue
         period = period_of(record.fields.get(schema.BOARD_ORDER_DATE), tz=tz)
         if period not in wanted:
+            continue
+        if not eligibility.get(uid, AiEligibility()).counts(period):
             continue
         revenue = to_number(record.fields.get(schema.BOARD_TOTAL_REVENUE))
         if revenue is None:
@@ -322,7 +330,7 @@ class CommissionQueryService:
         }
 
         # UID -> Referral，只包含 allowed 里的渠道所对应的客户
-        client_map, client_names = self._load_allowed_clients(allowed_referrals)
+        client_map, client_names, eligibility = self._load_allowed_clients(allowed_referrals)
 
         months: dict[str, dict[str, ReferralBreakdown]] = {}
         # 名下一个客户都没有就不去扫那张上万行的看板了：扫完也是空的。
@@ -335,6 +343,7 @@ class CommissionQueryService:
                 client_names,
                 periods,
                 tz=self._tz,
+                eligibility=eligibility,
             )
         return QueryResult(
             periods=list(periods),
@@ -370,10 +379,11 @@ class CommissionQueryService:
 
     def _load_allowed_clients(
         self, allowed_referrals: dict[str, Referral]
-    ) -> tuple[dict[str, Referral], dict[str, str]]:
-        """UID -> Referral（只保留归属在 allowed 里的），以及 UID -> 客户名称。"""
+    ) -> tuple[dict[str, Referral], dict[str, str], dict[str, AiEligibility]]:
+        """UID -> Referral（只保留归属在 allowed 里的）、UID -> 客户名称、UID -> AI 资格。"""
         by_uid: dict[str, Referral] = {}
         names: dict[str, str] = {}
+        eligibility: dict[str, AiEligibility] = {}
         for record in self._bitable.iter_records(self._settings.table_client):
             uid = to_uid(record.fields.get(schema.CLIENT_UID))
             if not uid:
@@ -385,5 +395,6 @@ class CommissionQueryService:
                 referral = allowed_referrals.get(referral_record_id)
                 if referral is not None:
                     by_uid[uid] = referral
+                    eligibility[uid] = eligibility_of(record.fields, tz=self._tz)
                     break
-        return by_uid, names
+        return by_uid, names, eligibility
