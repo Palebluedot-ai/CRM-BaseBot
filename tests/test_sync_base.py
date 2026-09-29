@@ -495,3 +495,170 @@ def test_AI自检_升级当天Base还算了钱就报出来(fake_bitable, capsys)
     out = capsys.readouterr().out
     assert "1 行对不上" in out
     assert "2026-09-10 本笔佣金 200.0（应为 0.00）" in out
+
+
+# ---------- 数字显示格式 ----------
+
+
+class _FormatEndpoint:
+    def __init__(self, fail: bool = False) -> None:
+        self.updated: list = []
+        self.fail = fail
+
+    def update(self, request):
+        self.updated.append(request.request_body)
+        response = _Response()
+        if self.fail:
+            response.success = lambda: False
+            response.code, response.msg = 1254000, "bad formatter"
+        return response
+
+
+class _FormatSdk:
+    def __init__(self, endpoint) -> None:
+        self.bitable = self
+        self.v1 = self
+        self.app_table_field = endpoint
+
+
+class _FormatBase:
+    def __init__(self, fields: dict[str, list]) -> None:
+        self._fields = fields
+
+    def list_tables(self):
+        from crm_basebot.lark.bitable import TableInfo
+
+        return [TableInfo(table_id=f"tbl_{name}", name=name) for name in self._fields]
+
+    def list_fields(self, table_id: str):
+        return self._fields[table_id.removeprefix("tbl_")]
+
+
+def _field(name, type_code, props=None, index=1):
+    from crm_basebot.lark.bitable import FieldInfo
+
+    return FieldInfo(
+        field_id=f"fld_{name}",
+        name=name,
+        type=type_code,
+        ui_type="",
+        is_primary=False,
+        props=props or {},
+    )
+
+
+def _formats(fields, *, apply=True, fail=False):
+    from types import SimpleNamespace
+
+    from crm_basebot.structure import ensure_number_formats
+
+    endpoint = _FormatEndpoint(fail=fail)
+    result = ensure_number_formats(
+        settings=SimpleNamespace(base_app_token="bascn"),
+        bitable=_FormatBase(fields),
+        client=_FormatSdk(endpoint),
+        apply=apply,
+    )
+    return result, endpoint.updated
+
+
+def test_金额列加千分位_笔数不带小数_比例和门槛不动():
+    from crm_basebot.lark.bitable import FIELD_TYPE_FORMULA, FIELD_TYPE_NUMBER
+
+    fields = {
+        schema.TABLE_COMMISSION_NAME: [
+            _field(schema.COMM_PAYABLE, FIELD_TYPE_NUMBER, {"formatter": "0.0"}),
+            _field(schema.COMM_TXN_COUNT, FIELD_TYPE_NUMBER),
+            _field(schema.COMM_RATE, FIELD_TYPE_NUMBER),
+        ],
+        schema.TABLE_DAILY_BOARD_NAME: [
+            _field(
+                schema.BOARD_AI_GATE,
+                FIELD_TYPE_FORMULA,
+                {"formula_expression": "1", "type": {"data_type": 2}},
+            ),
+        ],
+    }
+    result, updated = _formats(fields)
+    got = {body.field_name: body.property.formatter for body in updated}
+    assert got == {schema.COMM_PAYABLE: "1,000.00", schema.COMM_TXN_COUNT: "1,000"}
+    assert result.warnings == []
+
+
+def test_公式列改格式时公式原样写回():
+    from crm_basebot.lark.bitable import FIELD_TYPE_FORMULA
+
+    expression = "IF(1, 2, 3)"
+    fields = {
+        schema.TABLE_DAILY_BOARD_NAME: [
+            _field(
+                schema.BOARD_ROW_COMMISSION,
+                FIELD_TYPE_FORMULA,
+                {"formula_expression": expression, "type": {"data_type": 2}},
+            )
+        ]
+    }
+    _, (body,) = _formats(fields)
+    assert body.property.formula_expression == expression
+    assert body.property.type.data_type == 2
+    assert body.property.formatter == "1,000.00"
+
+
+def test_格式已经对了就不动_预演只说不改():
+    from crm_basebot.lark.bitable import FIELD_TYPE_NUMBER
+
+    done = {
+        schema.TABLE_COMMISSION_NAME: [
+            _field(schema.COMM_PAYABLE, FIELD_TYPE_NUMBER, {"formatter": "1,000.00"})
+        ]
+    }
+    result, updated = _formats(done)
+    assert result.plan == [] and updated == []
+
+    todo = {schema.TABLE_COMMISSION_NAME: [_field(schema.COMM_PAYABLE, FIELD_TYPE_NUMBER)]}
+    result, updated = _formats(todo, apply=False)
+    assert result.plan and updated == []
+
+
+def test_ECAS两张表也设_没有的表跳过():
+    from crm_basebot.domain import ecas
+    from crm_basebot.lark.bitable import FIELD_TYPE_NUMBER
+
+    fields = {
+        ecas.TABLE_ECAS_COMMISSION_NAME: [_field(ecas.ECOMM_PAYABLE, FIELD_TYPE_NUMBER)],
+    }
+    _, updated = _formats(fields)
+    assert [body.field_name for body in updated] == [ecas.ECOMM_PAYABLE]
+
+
+def test_改格式失败只警告_不停下():
+    from crm_basebot.lark.bitable import FIELD_TYPE_NUMBER
+
+    fields = {
+        schema.TABLE_COMMISSION_NAME: [
+            _field(schema.COMM_PAYABLE, FIELD_TYPE_NUMBER),
+            _field(schema.COMM_REVENUE_TOTAL, FIELD_TYPE_NUMBER),
+        ]
+    }
+    result, updated = _formats(fields, fail=True)
+    assert len(updated) == 2 and len(result.warnings) == 2
+    assert "手动设" in result.warnings[0]
+
+
+def test_换公式时带上格式_不会把千分位洗掉():
+    old = 'IF(ISBLANK([分佣比例]), "", [总收入(opt+现货+合约)] * [分佣比例] / 100)'
+    key = (schema.TABLE_DAILY_BOARD_NAME, schema.BOARD_ROW_COMMISSION)
+    fields = _complete_fields({key: old})
+    from types import SimpleNamespace
+
+    from crm_basebot.structure import ensure_structure
+
+    endpoint = _FormatEndpoint()
+    ensure_structure(
+        settings=SimpleNamespace(base_app_token="bascn"),
+        bitable=_Base(fields),
+        client=_FormatSdk(endpoint),
+        apply=True,
+    )
+    (body,) = endpoint.updated
+    assert body.property.formatter == "1,000.00"

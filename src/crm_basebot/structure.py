@@ -43,10 +43,11 @@ from lark_oapi.api.bitable.v1 import (
     UpdateAppTableFieldRequest,
 )
 
-from .domain import schema
+from .domain import ecas, schema
 from .lark.bitable import (
     FIELD_TYPE_AUTO_NUMBER,
     FIELD_TYPE_FORMULA,
+    FIELD_TYPE_NUMBER,
     FIELD_TYPE_SINGLE_LINK,
     FIELD_TYPE_SINGLE_SELECT,
     BitableClient,
@@ -129,12 +130,51 @@ class StructureResult:
         return bool(self.plan)
 
 
+# ---------- 数字的显示格式 ----------
+
+# 平台「数字」「公式」列的显示格式（property.formatter）。仪表盘上的图沿用列的格式，
+# 图表设置里没有地方改 —— 要 20,000 而不是 20000.0，只能把列设好（2026-09-29 反馈）。
+FORMAT_MONEY = "1,000.00"
+FORMAT_COUNT = "1,000"
+
+_BOARD_MONEY = (
+    schema.BOARD_SPOT_FEE_EX_MM,
+    schema.BOARD_SPOT_VOLUME_EX_MM,
+    schema.BOARD_CONTRACT_FEE_EX_MM,
+    schema.BOARD_CONTRACT_VOLUME_EX_MM,
+    schema.BOARD_OPT_FEE,
+    schema.BOARD_OPT_PNL,
+    schema.BOARD_OPT_REVENUE,
+    schema.BOARD_OPT_VOLUME,
+    schema.BOARD_TOTAL_REVENUE,
+    schema.BOARD_TOTAL_VOLUME,
+    schema.BOARD_ROW_COMMISSION,
+)
+
+# (表名, 字段名) -> 格式。比例列（20 表示 20%）和 AI 门槛（20260901 这种日期数）**不在这里**：
+# 加千分位会变成 20,260,901，看着像钱。
+NUMBER_FORMATS: dict[tuple[str, str], str] = {
+    **{(schema.TABLE_DAILY_BOARD_NAME, name): FORMAT_MONEY for name in _BOARD_MONEY},
+    (schema.TABLE_COMMISSION_NAME, schema.COMM_CLIENT_COUNT): FORMAT_COUNT,
+    (schema.TABLE_COMMISSION_NAME, schema.COMM_TXN_COUNT): FORMAT_COUNT,
+    (schema.TABLE_COMMISSION_NAME, schema.COMM_REVENUE_TOTAL): FORMAT_MONEY,
+    (schema.TABLE_COMMISSION_NAME, schema.COMM_PAYABLE): FORMAT_MONEY,
+    (ecas.TABLE_ECAS_NAME, ecas.ECAS_AMOUNT): FORMAT_MONEY,
+    (ecas.TABLE_ECAS_NAME, ecas.ECAS_FEE): FORMAT_MONEY,
+    (ecas.TABLE_ECAS_COMMISSION_NAME, ecas.ECOMM_CLIENT_COUNT): FORMAT_COUNT,
+    (ecas.TABLE_ECAS_COMMISSION_NAME, ecas.ECOMM_TXN_COUNT): FORMAT_COUNT,
+    (ecas.TABLE_ECAS_COMMISSION_NAME, ecas.ECOMM_AMOUNT_TOTAL): FORMAT_MONEY,
+    (ecas.TABLE_ECAS_COMMISSION_NAME, ecas.ECOMM_PAYABLE): FORMAT_MONEY,
+}
+
+
 def build_field(
     name: str,
     type_code: int,
     *,
     link_table_id: str | None = None,
     formula: tuple[str, int] | None = None,
+    formatter: str | None = None,
 ) -> AppTableField:
     """按 schema 里的类型码造一个字段定义（关联要 table_id，公式要表达式+返回类型）。"""
     builder = AppTableField.builder().field_name(name).type(type_code)
@@ -187,13 +227,19 @@ def build_field(
         if formula is None:
             raise ValueError(f"公式字段「{name}」缺少表达式，无法建字段")
         expression, data_type = formula
-        builder = builder.property(
+        prop = (
             AppTableFieldProperty.builder()
             .formula_expression(expression)
             # formula_type=2 的多维表格必须带返回类型，不带接口直接报错（实测）。
             .type(AppTableFieldPropertyType.builder().data_type(data_type).build())
-            .build()
         )
+        # 改公式时整个 property 被替换：不带上格式，手动或 sync 设好的千分位会被洗掉。
+        if formatter:
+            prop = prop.formatter(formatter)
+        builder = builder.property(prop.build())
+
+    elif type_code == FIELD_TYPE_NUMBER and formatter:
+        builder = builder.property(AppTableFieldProperty.builder().formatter(formatter).build())
 
     return builder.build()
 
@@ -234,12 +280,21 @@ def create_field(
     *,
     link_table_id: str | None = None,
     formula: tuple[str, int] | None = None,
+    formatter: str | None = None,
 ) -> None:
     request = (
         CreateAppTableFieldRequest.builder()
         .app_token(app_token)
         .table_id(table_id)
-        .request_body(build_field(name, type_code, link_table_id=link_table_id, formula=formula))
+        .request_body(
+            build_field(
+                name,
+                type_code,
+                link_table_id=link_table_id,
+                formula=formula,
+                formatter=formatter,
+            )
+        )
         .build()
     )
     response = client.bitable.v1.app_table_field.create(request)
@@ -277,6 +332,7 @@ def update_formula(
     field_id: str,
     name: str,
     formula: tuple[str, int],
+    formatter: str | None = None,
 ) -> None:
     """把一列已有的公式换成新的。公式列的值是算出来的，换公式不丢任何数据。"""
     request = (
@@ -284,7 +340,7 @@ def update_formula(
         .app_token(app_token)
         .table_id(table_id)
         .field_id(field_id)
-        .request_body(build_field(name, FIELD_TYPE_FORMULA, formula=formula))
+        .request_body(build_field(name, FIELD_TYPE_FORMULA, formula=formula, formatter=formatter))
         .build()
     )
     response = client.bitable.v1.app_table_field.update(request)
@@ -331,6 +387,7 @@ def ensure_structure(
                         type_code,
                         link_table_id=link_target_id(table_name, field_name),
                         formula=_formula_for(table_name, field_name),
+                        formatter=NUMBER_FORMATS.get((table_name, field_name)),
                     )
             continue
 
@@ -349,6 +406,7 @@ def ensure_structure(
                         type_code,
                         link_table_id=link_target_id(table_name, field_name),
                         formula=_formula_for(table_name, field_name),
+                        formatter=NUMBER_FORMATS.get((table_name, field_name)),
                     )
             elif found.type == type_code == FIELD_TYPE_FORMULA and (
                 wanted := _formula_for(table_name, field_name)
@@ -366,6 +424,7 @@ def ensure_structure(
                             found.field_id,
                             field_name,
                             wanted,
+                            formatter=NUMBER_FORMATS.get((table_name, field_name)),
                         )
             elif found.type != type_code:
                 result.warnings.append(
@@ -374,4 +433,64 @@ def ensure_structure(
                     "改类型可能毁数据，请你确认后手工调整。"
                 )
 
+    return result
+
+
+def ensure_number_formats(
+    *,
+    settings: Any,
+    bitable: BitableClient,
+    client: lark.Client,
+    apply: bool,
+) -> StructureResult:
+    """把 ``NUMBER_FORMATS`` 里的列设成对应的显示格式。只改格式，不碰数据、不改公式。
+
+    ECAS 两张表不归 ``ensure_structure`` 建（``scripts/import_ecas.py`` 建的），所以这里
+    按表名自己找；没有的表、没有的列、类型不是数字或公式的列都跳过。某一列改不成
+    只记一条警告，不让整个 sync 停下 —— 格式是好看，不是对不对。
+    """
+    result = StructureResult()
+    tables = {table.name: table.table_id for table in bitable.list_tables()}
+    wanted_tables = sorted({table for table, _ in NUMBER_FORMATS})
+    for table_name in wanted_tables:
+        table_id = tables.get(table_name)
+        if not table_id:
+            continue
+        for found in bitable.list_fields(table_id):
+            wanted = NUMBER_FORMATS.get((table_name, found.name))
+            if not wanted or found.type not in (FIELD_TYPE_NUMBER, FIELD_TYPE_FORMULA):
+                continue
+            props = found.props or {}
+            if props.get("formatter") == wanted:
+                continue
+            formula: tuple[str, int] | None = None
+            if found.type == FIELD_TYPE_FORMULA:
+                expression = str(props.get("formula_expression") or "")
+                data_type = (props.get("type") or {}).get("data_type")
+                if not expression or data_type is None:
+                    result.warnings.append(
+                        f"「{table_name}」的 {found.name} 读不到公式，没改格式，可在界面上手动设。"
+                    )
+                    continue
+                # 用 Base 里现在的公式原样写回：这里只改格式，公式由 ensure_structure 管。
+                formula = (expression, int(data_type))
+            result.plan.append(f"「{table_name}」{found.name} 显示成 {wanted}")
+            if not apply:
+                continue
+            request = (
+                UpdateAppTableFieldRequest.builder()
+                .app_token(settings.base_app_token)
+                .table_id(table_id)
+                .field_id(found.field_id)
+                .request_body(
+                    build_field(found.name, found.type, formula=formula, formatter=wanted)
+                )
+                .build()
+            )
+            response = client.bitable.v1.app_table_field.update(request)
+            if not response.success():
+                result.warnings.append(
+                    f"「{table_name}」{found.name} 改格式失败：{response.code} {response.msg}"
+                    "（数据没受影响，可以在界面上手动设）"
+                )
     return result

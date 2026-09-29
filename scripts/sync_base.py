@@ -41,6 +41,7 @@ from crm_basebot.startup import load_settings, require_settings  # noqa: E402
 from crm_basebot.structure import (  # noqa: E402
     LINK_TARGETS,
     TARGET_TABLES,
+    ensure_number_formats,
     ensure_structure,
     write_table_ids,
 )
@@ -75,6 +76,16 @@ def main(argv: list[str] | None = None) -> int:
         client=get_client(),
         apply=args.apply,
     )
+    # 金额列显示成 20,000.00、笔数显示成 1,000（仪表盘的图沿用列的格式）。放在结构之后：
+    # 刚建出来的列、刚换过公式的列这一步也照顾到。
+    formats = ensure_number_formats(
+        settings=settings,
+        bitable=BitableClient(settings.base_app_token),
+        client=get_client(),
+        apply=args.apply,
+    )
+    result.plan.extend(formats.plan)
+    result.warnings.extend(formats.warnings)
 
     if not result.changed and not result.warnings:
         print("结构已经对齐，没什么要做的。")
