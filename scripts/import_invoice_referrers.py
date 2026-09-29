@@ -3,6 +3,7 @@
 
     uv run python scripts/import_invoice_referrers.py            # 预演：列出会补哪些渠道的哪几项
     uv run python scripts/import_invoice_referrers.py --apply    # 真写
+    uv run python scripts/import_invoice_referrers.py --xlsx ~/Downloads/Data.xlsx  # 老表
 
 2026-09-29 定的：收款资料（地址、银行账户、钱包地址）以后只在 Base 维护一份，机器人的
 「登记收款资料」改它、「生成 Invoice」读它。以前这些存在 invoice 小工具
@@ -66,8 +67,44 @@ class Source:
     fields: dict[str, str]
 
 
+def _fields(
+    *,
+    method_raw: str,
+    crypto_type: str,
+    wallet: str,
+    bank_account_name: str,
+    bank_name: str,
+    bank_account_no: str,
+    address_lines: list[str],
+) -> dict[str, str]:
+    """一个 referrer 的收款资料 -> 要写进 Base 的字段（只放有值的）。
+
+    invoice 小工具把「没写收款方式」也记成 CRYPTO（它的默认值），这里不跟：没有币种也没有
+    钱包地址的，收款方式留空，免得 Base 里出现一个「加密货币」却没有钱包的渠道。
+    """
+    raw = method_raw.strip().upper()
+    if raw == "USD":
+        method = schema.PAY_METHOD_BANK
+    elif raw.startswith("USDT") or crypto_type or wallet:
+        method = schema.PAY_METHOD_CRYPTO
+    else:
+        method = ""
+    fields = {
+        schema.REFERRAL_ADDRESS: "\n".join(line.strip() for line in address_lines if line.strip()),
+        schema.REFERRAL_PAY_METHOD: method,
+    }
+    if method == schema.PAY_METHOD_BANK:
+        fields[schema.REFERRAL_BANK_ACCOUNT_NAME] = bank_account_name
+        fields[schema.REFERRAL_BANK_NAME] = bank_name
+        fields[schema.REFERRAL_BANK_ACCOUNT_NO] = bank_account_no
+    elif method == schema.PAY_METHOD_CRYPTO:
+        fields[schema.REFERRAL_CRYPTO_TYPE] = crypto_type or (raw if raw.startswith("USDT") else "")
+        fields[schema.REFERRAL_WALLET] = wallet
+    return {k: v.strip() for k, v in fields.items() if v and v.strip()}
+
+
 def read_invoice_db(path: Path) -> list[Source]:
-    """invoice 小工具的 referrers 表 -> 要写进 Base 的字段（只放有值的）。"""
+    """invoice 小工具的 referrers 表。"""
     connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     try:
@@ -82,28 +119,79 @@ def read_invoice_db(path: Path) -> list[Source]:
         def value(column: str, row=row, keys=keys) -> str:
             return str(row[column] or "").strip() if column in keys else ""
 
-        method = METHODS.get(value("payment_method").upper(), "")
-        fields = {
-            schema.REFERRAL_ADDRESS: "\n".join(
-                line.strip() for line in value("address").splitlines() if line.strip()
-            ),
-            schema.REFERRAL_PAY_METHOD: method,
-        }
-        if method == schema.PAY_METHOD_BANK:
-            fields[schema.REFERRAL_BANK_ACCOUNT_NAME] = value("bank_account_name")
-            fields[schema.REFERRAL_BANK_NAME] = value("bank_name")
-            fields[schema.REFERRAL_BANK_ACCOUNT_NO] = value("bank_account_no")
-        elif method == schema.PAY_METHOD_CRYPTO:
-            fields[schema.REFERRAL_CRYPTO_TYPE] = value("crypto_type")
-            fields[schema.REFERRAL_WALLET] = value("wallet_address")
         out.append(
             Source(
                 code=value("referrer_code"),
                 name=value("name"),
-                fields={k: v for k, v in fields.items() if v},
+                fields=_fields(
+                    method_raw=value("payment_method"),
+                    crypto_type=value("crypto_type"),
+                    wallet=value("wallet_address"),
+                    bank_account_name=value("bank_account_name"),
+                    bank_name=value("bank_name"),
+                    bank_account_no=value("bank_account_no"),
+                    address_lines=value("address").splitlines(),
+                ),
             )
         )
     return out
+
+
+def _cell(row: tuple, index: int) -> str:
+    value = row[index] if len(row) > index else None
+    return "" if value is None else str(value).strip()
+
+
+def read_data_xlsx(path: Path) -> list[Source]:
+    """老的 Data.xlsx（invoice 小工具的导入源）的 Sheet2。
+
+    列的位置照 invoice 小工具 import_referrers.py（从 0 数）：1 编号、2 名称、9 收款方式
+    （USD / USDT-TRC / USDT-ERC）、10 ERC 钱包、11 TRC 钱包、12 户名、13 银行名、14 账号、
+    18 地址。名称那一格空着的行是上一个 referrer 的地址续行。没有表头行。
+    """
+    import openpyxl
+
+    book = openpyxl.load_workbook(path, data_only=True, read_only=True)
+    if "Sheet2" not in book.sheetnames:
+        raise SystemExit(f"{path} 里没有 Sheet2（有的是：{'、'.join(book.sheetnames)}）")
+
+    parsed: list[dict] = []
+    for row in book["Sheet2"].iter_rows(values_only=True):
+        name, address = _cell(row, 2), _cell(row, 18)
+        if name:
+            if not _cell(row, 1):
+                continue
+            parsed.append(
+                {
+                    "code": _cell(row, 1),
+                    "name": name,
+                    "method": _cell(row, 9),
+                    "wallet": _cell(row, 10) or _cell(row, 11),
+                    "bank_account_name": _cell(row, 12),
+                    "bank_name": _cell(row, 13),
+                    "bank_account_no": _cell(row, 14),
+                    "address": [address] if address else [],
+                }
+            )
+        elif parsed and address:
+            parsed[-1]["address"].append(address)
+
+    return [
+        Source(
+            code=item["code"],
+            name=item["name"],
+            fields=_fields(
+                method_raw=item["method"],
+                crypto_type=item["method"] if item["method"].upper().startswith("USDT") else "",
+                wallet=item["wallet"],
+                bank_account_name=item["bank_account_name"],
+                bank_name=item["bank_name"],
+                bank_account_no=item["bank_account_no"],
+                address_lines=item["address"],
+            ),
+        )
+        for item in parsed
+    ]
 
 
 @dataclass(frozen=True)
@@ -139,14 +227,22 @@ def plan_fill(source: Source, target: Target) -> tuple[dict[str, str], list[str]
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="把 invoice 小工具的收款资料搬进 Base")
     parser.add_argument("--db", default=str(DEFAULT_DB), help="invoice 小工具的 app.db")
+    parser.add_argument("--xlsx", help="改读老的 Data.xlsx（Sheet2），不读 app.db")
     parser.add_argument("--apply", action="store_true", help="真写；不加则只预演")
     args = parser.parse_args(argv)
 
-    db = Path(args.db).expanduser()
-    if not db.is_file():
-        print(f"找不到 invoice 小工具的数据库：{db}")
-        print("  在装着 invoice 小工具的那台 Mac 上跑；数据库放在别处就加 --db 指过去。")
-        return 1
+    if args.xlsx:
+        source_path = Path(args.xlsx).expanduser()
+        if not source_path.is_file():
+            print(f"找不到 {source_path}")
+            return 1
+    else:
+        source_path = Path(args.db).expanduser()
+        if not source_path.is_file():
+            print(f"找不到 invoice 小工具的数据库：{source_path}")
+            print("  在装着 invoice 小工具的那台 Mac 上跑；数据库放在别处就加 --db 指过去，")
+            print("  或者用 --xlsx 读老的 Data.xlsx。")
+            return 1
 
     settings = load_settings()
     require_settings(settings, "LARK_BASE_APP_TOKEN", "TABLE_REFERRAL")
@@ -175,7 +271,7 @@ def main(argv: list[str] | None = None) -> int:
     ]
     targets = [t for t in targets if t.name]
 
-    sources = read_invoice_db(db)
+    sources = read_data_xlsx(source_path) if args.xlsx else read_invoice_db(source_path)
     print(f"invoice 小工具里有 {len(sources)} 个 referrer，Base 里有 {len(targets)} 个渠道。\n")
 
     todo: list[tuple[Target, dict[str, str]]] = []

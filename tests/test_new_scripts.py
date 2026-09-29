@@ -500,3 +500,41 @@ def test_收款资料搬家_渠道表还没列就先叫人跑sync(monkeypatch, f
     db = _invoice_db(tmp_path, [{"name": "A", "wallet": "0x1"}])
     assert migrator.main(["--db", str(db)]) == 1
     assert "sync_base.py --apply" in capsys.readouterr().out
+
+
+def test_收款资料搬家_也能读老的DataXlsx(monkeypatch, fake_bitable, tmp_path, capsys):
+    """Data.xlsx 的 Sheet2：没有表头，名称空着的行是上一个人的地址续行。编号不可信，按名字对。"""
+    _wire(monkeypatch, migrator, fake_bitable)
+    _payment_columns(fake_bitable)
+    referrals = fake_bitable.tables[TBL_REFERRAL]
+    crypto = referrals.add_existing({schema.REFERRAL_NO: "R093", schema.REFERRAL_NAME: "HK Things"})
+    bank = referrals.add_existing({schema.REFERRAL_NO: "R004", schema.REFERRAL_NAME: "Credito"})
+    blank = referrals.add_existing({schema.REFERRAL_NO: "R010", schema.REFERRAL_NAME: "No Pay"})
+
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Sheet2"
+
+    def row(code, name, method="", erc="", trc="", acct_name="", bank_name="", acct="", addr=""):
+        cells = [None] * 19
+        cells[1], cells[2], cells[9], cells[10], cells[11] = code, name, method, erc, trc
+        cells[12], cells[13], cells[14], cells[18] = acct_name, bank_name, acct, addr
+        sheet.append([c or None for c in cells])
+
+    row("R095", "HK THINGS", method="USDT-TRC", trc="TWALLET", addr="Line 1")
+    row("", "", addr="Line 2")  # 续行
+    row("R004", "CREDITO", method="USD", bank_name="HSBC", acct="0012", addr="Bank St")
+    row("R010", "NO PAY")  # 没写收款方式：不写成「加密货币」
+    path = tmp_path / "Data.xlsx"
+    book.save(path)
+
+    assert migrator.main(["--xlsx", str(path), "--apply"]) == 0
+    got = referrals.records
+    assert got[crypto][schema.REFERRAL_PAY_METHOD] == schema.PAY_METHOD_CRYPTO
+    assert got[crypto][schema.REFERRAL_CRYPTO_TYPE] == "USDT-TRC"
+    assert got[crypto][schema.REFERRAL_WALLET] == "TWALLET"
+    assert got[crypto][schema.REFERRAL_ADDRESS] == "Line 1\nLine 2"
+    assert got[bank][schema.REFERRAL_PAY_METHOD] == schema.PAY_METHOD_BANK
+    assert got[bank][schema.REFERRAL_BANK_ACCOUNT_NO] == "0012"
+    assert schema.REFERRAL_PAY_METHOD not in got[blank]
+    assert "TWALLET" not in capsys.readouterr().out
