@@ -278,7 +278,7 @@ class ReferralService:
             logger.exception("回填渠道主字段失败 record_id=%s primary=%s", record_id, primary)
 
     def list_for(self, sales: Sales) -> list[tuple[str, str]]:
-        """该销售名下的渠道，返回 [(编号, 名称)]。管理员看全部。"""
+        """该销售名下的渠道，返回 [(编号, 名称)]。「看全部」的人看全部。"""
         from ..bot.auth import owned_records
 
         result: list[tuple[str, str]] = []

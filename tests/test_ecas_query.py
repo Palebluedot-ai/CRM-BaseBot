@@ -44,6 +44,7 @@ def sales(open_id: str, *, admin: bool = False) -> Sales:
         name="Alice" if open_id == ALICE else "Bob",
         role=schema.ROLE_ADMIN if admin else schema.ROLE_SALES,
         is_active=True,
+        sees_all=admin,
     )
 
 

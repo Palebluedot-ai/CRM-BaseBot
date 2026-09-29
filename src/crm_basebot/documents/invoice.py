@@ -406,7 +406,7 @@ def _single_row(invoice_kind: str, period: str, amount: Decimal) -> tuple[Invoic
 
 
 class InvoiceService:
-    """出 invoice。谁能出哪些渠道和别处一样：销售自己名下的，管理员全部。"""
+    """出 invoice。谁能出哪些渠道和别处一样：销售自己名下的，「看全部」的人全部。"""
 
     def __init__(
         self,

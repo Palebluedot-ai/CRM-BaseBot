@@ -22,7 +22,7 @@ ADMIN = "ou_admin00000000000000000000000"
 
 alice = Sales(open_id=ALICE, name="Alice", role=schema.ROLE_SALES, is_active=True)
 bob = Sales(open_id=BOB, name="Bob", role=schema.ROLE_SALES, is_active=True)
-admin = Sales(open_id=ADMIN, name="Admin", role=schema.ROLE_ADMIN, is_active=True)
+admin = Sales(open_id=ADMIN, name="Admin", role=schema.ROLE_ADMIN, is_active=True, sees_all=True)
 
 UID_18 = "577809207768677761"
 UID_19 = "2141293991366272768"

@@ -20,13 +20,18 @@
 |---|---|---|---|
 | 登记新渠道 | `open_referral_form` | Referral Information 一行 | 名称、邮箱、开始日期、分佣比例、结算频率 |
 | 登记新客户 | `open_client_form` | Referred Client 一行 | 先选自己名下的渠道，再填客户UID + 名称 + AI 状态（开户即AI / 升级为AI + 日期 / 非AI） |
-| 我的渠道 | `list_referrals` | 只读 | 列出本人名下渠道（管理员看全部），一页 20 条、按钮紧贴；可点进详情 |
+| 我的渠道 | `list_referrals` | 只读 | 列出本人名下渠道（名册「机器人可见范围」是看全部的人看全部），一页 20 条、按钮紧贴；可点进详情 |
 | 佣金查询 | `open_commission_query` | 只读 | 选月份，列出这个月和前两个月、本人名下每个渠道每个客户的应付**交易**佣金 |
 | ECAS 返佣 | `open_ecas_query` | 只读 | 选月份，读 ECAS 申请表算本人名下各渠道应付返佣 |
 | 更新客户AI状态 | `open_ai_form` | Referred Client 改两列 | 按 UID 找自己名下渠道的客户，补 / 改 AI 状态和升级日期 |
 | 生成转介协议 | `open_agreement` | **不写 Base** | 选个人 / 企业 → 填表 → 发回 HTS Referral Agreement 的 Word。2026-09-29 从 onboard-bot-lark 的「填单」搬来，范本和填法不变（`documents/agreement.py`） |
 | 登记收款资料 | `open_payment` | Referral Information 改收款几列 | 选自己名下的渠道 → 表单预填已有资料 → 保存地址、收款方式、银行账户或钱包。审计只记改了哪几项，不记账号（`domain/payment.py`） |
 | 生成 Invoice | `open_invoice` | 只读 | 选月份、类型（交易 / ECAS / 都要）、付款日期 → 每个渠道一份 Referral Fee Statement（Word + PDF），多份打成 zip。2026-09-29 从 invoice 小工具搬来（`documents/invoice.py`） |
+
+**谁看得到什么（2026-09-29 起）**：机器人里看得到哪些渠道，看名册「Sales Directory」的
+「机器人可见范围」一列：空着或「只看自己」= 只看「登记人OpenID」是自己的渠道；「看全部」= 全部。
+**「角色」只决定谁收每月 3 号的月结卡片**，不再决定能看什么 —— 超哥是管理员，也是带客户的销售，
+机器人里只看自己的，全部人的数据去 Base 仪表盘看。
 
 **协议、invoice 都是发文件**：先上传（`im.v1.file.create`）再发 file 消息，要应用开
 `im:resource`（见 [LARK_APP_SETUP.md](LARK_APP_SETUP.md)），没开时机器人回一句「上传不上飞书」。
@@ -346,7 +351,7 @@ uv run python scripts/bot_connectivity_report.py --log logs/bot.log
 就通了。管理员那一侧 2026-09-22 实测过：「我的渠道」列出全部 101 个，「佣金查询」算出
 2026-09 的 7,165.77。
 
-⚠️ **普通销售那一侧还没有真人验过** —— 管理员看得到全部是对的，但「销售之间互相看不到」
+⚠️ **普通销售那一侧还没有真人验过** —— 「看全部」的人看得到全部是对的，但「销售之间互相看不到」
 才是这套权限的重点，那一条要由一个非管理员点一次 `我的渠道` 才算数。
 
 第 5 步是防「UID 打错」的锦上添花。

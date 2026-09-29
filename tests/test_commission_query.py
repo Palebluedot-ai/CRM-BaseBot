@@ -37,7 +37,9 @@ UID_ORPHAN = "999999999999999999"  # 没登记归属的孤儿
 
 alice = Sales(open_id=ALICE, name="Alice", role=schema.ROLE_SALES, is_active=True)
 bob = Sales(open_id=BOB, name="Bob", role=schema.ROLE_SALES, is_active=True)
-admin = Sales(open_id="ou_admin0", name="Admin", role=schema.ROLE_ADMIN, is_active=True)
+admin = Sales(
+    open_id="ou_admin0", name="Admin", role=schema.ROLE_ADMIN, is_active=True, sees_all=True
+)
 
 
 class Settings:

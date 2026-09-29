@@ -16,7 +16,9 @@ from .conftest import TBL_AUDIT, TBL_REFERRAL
 
 ALICE = Sales(open_id="ou_alice", name="Alice", role=schema.ROLE_SALES, is_active=True)
 BOB = Sales(open_id="ou_bob", name="Bob", role=schema.ROLE_SALES, is_active=True)
-ADMIN = Sales(open_id="ou_admin", name="Admin", role=schema.ROLE_ADMIN, is_active=True)
+ADMIN = Sales(
+    open_id="ou_admin", name="Admin", role=schema.ROLE_ADMIN, is_active=True, sees_all=True
+)
 
 CRYPTO = PaymentInfo(
     method=schema.PAY_METHOD_CRYPTO,

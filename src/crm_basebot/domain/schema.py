@@ -401,9 +401,20 @@ ROLE_ADMIN = "管理员"
 SALES_STATUS_ACTIVE = "在职"
 SALES_STATUS_DISABLED = "停用"
 
+# 机器人里看得到谁的数据（2026-09-29 从「角色」里拆出来的）。
+# 「管理员」只管收每月 3 号的月结卡片；看得到哪些渠道由这一列决定。空着 = 只看自己。
+# 起因：超哥是管理员，也是带客户的销售 —— 机器人里只该看到他自己名下的渠道，
+# 看全部人的数据去 Base 的仪表盘。
+SALES_SCOPE = "机器人可见范围"
+SCOPE_OWN = "只看自己"
+SCOPE_ALL = "看全部"
+SCOPE_OPTIONS: tuple[str, ...] = (SCOPE_OWN, SCOPE_ALL)
+
 SALES_FIELDS: dict[str, int] = {
     SALES_OPEN_ID: FIELD_TYPE_TEXT,
     SALES_NAME: FIELD_TYPE_TEXT,
     SALES_ROLE: FIELD_TYPE_SINGLE_SELECT,
     SALES_STATUS: FIELD_TYPE_SINGLE_SELECT,
+    SALES_SCOPE: FIELD_TYPE_SINGLE_SELECT,
 }
+SINGLE_SELECT_OPTIONS[SALES_SCOPE] = SCOPE_OPTIONS

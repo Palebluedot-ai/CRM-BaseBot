@@ -180,7 +180,8 @@ def test_默认有效期是一分钟():
 # ---------- 列表过滤 ----------
 
 alice = Sales(open_id=ALICE, name="Alice", role=schema.ROLE_SALES, is_active=True)
-admin = Sales(open_id=ADMIN, name="Admin", role=schema.ROLE_ADMIN, is_active=True)
+# 「看全部」的人（名册「机器人可见范围」= 看全部）。和角色无关，见 auth.py 开头。
+admin = Sales(open_id=ADMIN, name="Admin", role=schema.ROLE_ADMIN, is_active=True, sees_all=True)
 
 
 def _referral(record_id, owner):
@@ -211,3 +212,35 @@ def test_无主记录不会漏给普通销售():
 def test_管理员看到全部():
     got = list(owned_records(admin, ALL_REFERRALS, schema.REFERRAL_OWNER_OPEN_ID))
     assert len(got) == 4
+
+
+# ---------- 管理员 ≠ 看全部（2026-09-29） ----------
+
+
+def test_管理员不等于看全部_默认只看自己():
+    """超哥是管理员（收月结卡片），也是带客户的销售：机器人里只看他自己名下的。"""
+    lead = Sales(open_id=ADMIN, name="超哥", role=schema.ROLE_ADMIN, is_active=True)
+    assert lead.is_admin and not lead.sees_all
+    assert [
+        r.record_id for r in owned_records(lead, ALL_REFERRALS, schema.REFERRAL_OWNER_OPEN_ID)
+    ] == []
+
+
+def test_名册里可见范围写看全部才看全部():
+    bitable = FakeBitable(
+        [
+            Record(
+                record_id="rec1",
+                fields={
+                    schema.SALES_OPEN_ID: ALICE,
+                    schema.SALES_NAME: "Alice",
+                    schema.SALES_ROLE: schema.ROLE_SALES,
+                    schema.SALES_SCOPE: schema.SCOPE_ALL,
+                },
+            ),
+            _sales_record(ADMIN, "Admin", role=schema.ROLE_ADMIN),
+        ]
+    )
+    directory = SalesDirectory(bitable, "tbl_sales")
+    assert directory.require(ALICE).sees_all is True
+    assert directory.require(ADMIN).sees_all is False

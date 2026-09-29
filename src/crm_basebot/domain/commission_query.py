@@ -8,7 +8,7 @@
 
 设计约束：
 
-1. **权限**：普通销售只看归属自己的渠道；管理员看全部。沿用现有 owned_records
+1. **权限**：普通销售只看归属自己的渠道；「看全部」的人看全部。沿用现有 owned_records
    的口径，不新写一份鉴权。
 2. **只读**：这个模块不写任何东西，也不触碰 Commission Summary 表 —— 那是对账
    任务的写入面，跟自查是两个用途。
@@ -324,7 +324,7 @@ class CommissionQueryService:
         """这名销售在 ``periods``（YYYY-MM，从早到晚）里能看到的佣金明细。看板只扫一遍。"""
         referrals_by_record = self._load_referrals()
 
-        # 管理员看全部；销售只看归属自己的渠道 record_id。
+        # 「看全部」的人看全部；销售只看归属自己的渠道 record_id。
         owned_record_ids = self._owned_referral_ids(sales, referrals_by_record)
         allowed_referrals: dict[str, Referral] = {
             rid: ref for rid, ref in referrals_by_record.items() if rid in owned_record_ids
@@ -368,7 +368,7 @@ class CommissionQueryService:
         self, sales: Sales, referrals_by_record: dict[str, Referral]
     ) -> set[str]:
         """哪些渠道 record_id 是这名销售能看的。"""
-        if sales.is_admin:
+        if sales.sees_all:
             return set(referrals_by_record)
 
         owned: set[str] = set()

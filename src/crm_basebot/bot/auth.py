@@ -8,8 +8,12 @@
 1. open_id **只能**取自回调事件本体，绝不能从卡片的 value、表单字段或消息文本里
    取 —— 那些是用户可控的，等于让人自报家门。
 2. 凡是按归属取数据的地方都走 ``owned_records`` 过滤，先筛掉不是他的记录再动手：
-   列「我的渠道」、点进渠道详情、把客户挂到渠道，走的都是这一个函数。管理员放行
-   也只在它里面定义，别在别处另写一份判断。
+   列「我的渠道」、点进渠道详情、把客户挂到渠道，走的都是这一个函数。「看全部」的
+   放行也只在它里面定义，别在别处另写一份判断。
+
+**「管理员」不等于「看全部」**（2026-09-29 拆开的）。管理员只决定谁收每月的月结卡片；
+机器人里看得到谁的数据，看名册的「机器人可见范围」—— 超哥是管理员，也是带客户的销售，
+机器人里只看自己的，全部人的数据去 Base 仪表盘看。
 """
 
 from __future__ import annotations
@@ -36,9 +40,12 @@ class Sales:
     name: str
     role: str
     is_active: bool
+    sees_all: bool = False
+    """机器人里看得到所有人的渠道（名册「机器人可见范围」= 看全部）。和角色无关。"""
 
     @property
     def is_admin(self) -> bool:
+        """收月结卡片的人。**不决定**机器人里能看什么，那是 ``sees_all``。"""
         return self.role == schema.ROLE_ADMIN
 
 
@@ -88,6 +95,7 @@ class SalesDirectory:
                 role=extract_text(record.fields.get(schema.SALES_ROLE)) or schema.ROLE_SALES,
                 is_active=extract_text(record.fields.get(schema.SALES_STATUS))
                 != schema.SALES_STATUS_DISABLED,
+                sees_all=extract_text(record.fields.get(schema.SALES_SCOPE)) == schema.SCOPE_ALL,
             )
 
         self._cache = directory
@@ -122,13 +130,13 @@ class SalesDirectory:
 
 
 def owned_records(sales: Sales, records, owner_field: str):
-    """过滤出该销售名下的记录。管理员看全部。
+    """过滤出该销售名下的记录。「机器人可见范围」是「看全部」的人放行全部。
 
-    归属为空的记录普通销售看不到：历史数据补录归属之前只有管理员能碰，
-    不能因为「无主」就人人可见。用生成器而不是列表，避免把整表读进内存。
+    归属为空的记录只看自己的人看不到：不能因为「无主」就人人可见。
+    用生成器而不是列表，避免把整表读进内存。
     """
     for record in records:
-        if sales.is_admin:
+        if sales.sees_all:
             yield record
             continue
         owner = extract_text(record.fields.get(owner_field))
