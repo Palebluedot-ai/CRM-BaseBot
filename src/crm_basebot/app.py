@@ -18,6 +18,7 @@ import lark_oapi as lark
 from .bot.auth import SalesDirectory
 from .bot.handlers import BotHandlers
 from .documents.invoice import InvoiceService
+from .documents.pdf import to_pdf
 from .domain.audit import AuditLog
 from .domain.commission_query import CommissionQueryService
 from .domain.ecas_query import EcasQueryService
@@ -29,6 +30,7 @@ from .lark.bitable import BitableClient
 from .lark.client import get_client
 from .lark.files import FileSender
 from .lark.ws_patch import apply_card_frame_patch
+from .pipeline.board import relink_uid
 from .startup import load_settings, require_settings
 
 logger = logging.getLogger(__name__)
@@ -81,13 +83,16 @@ def build_handlers() -> BotHandlers:
     # 收款资料在渠道表上；invoice 读两张结算表 + 收款资料。生成的文件（含收款账号）只在
     # 这台机器的 output/ 下过一下手，不进仓库（.gitignore）。
     payments = PaymentService(bitable, settings.table_referral, audit)
+    # invoice 和协议转 PDF 共用这一个目录。**别改名**：mac mini 上的 Word 只记住点过
+    # 「授权访问」的那个文件夹，换一个就又要有人去 mac mini 前点一次。
+    pdf_dir = Path(__file__).resolve().parents[2] / "output" / "invoices"
     invoices = InvoiceService(
         bitable,
         settings=settings,
         payments=payments,
         commission_query=commission_query,
         tz=tz,
-        work_dir=Path(__file__).resolve().parents[2] / "output" / "invoices",
+        work_dir=pdf_dir,
     )
 
     client = get_client()
@@ -111,6 +116,12 @@ def build_handlers() -> BotHandlers:
         files=FileSender(client),
         payments=payments,
         invoices=invoices,
+        board_linker=(
+            (lambda uid, record_id: relink_uid(bitable, settings.table_daily_board, uid, record_id))
+            if settings.table_daily_board
+            else None
+        ),
+        pdf_converter=lambda docx: to_pdf(docx, pdf_dir),
         background=_in_background,
         tz=tz,
     )

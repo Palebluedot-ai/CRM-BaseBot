@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import re
 import zipfile
 from datetime import date
@@ -11,8 +12,10 @@ from pathlib import Path
 
 import pytest
 
+from crm_basebot.bot import cards
 from crm_basebot.bot.auth import Sales
 from crm_basebot.documents import invoice as inv
+from crm_basebot.documents import pdf
 from crm_basebot.domain import ecas, schema
 from crm_basebot.domain.audit import AuditLog
 from crm_basebot.domain.commission_query import CommissionQueryService
@@ -195,7 +198,7 @@ def test_渠道下一个客户都找不到才只印总额(base, tmp_path):
     assert [r.description for r in only.rows] == ["Referral fee for August 2026"]
 
 
-def test_地址空着照样出_结果里点名(base, tmp_path):
+def test_地址空着照样出_不提醒(base, tmp_path):
     record = next(
         rid
         for rid, f in base.tables[TBL_REFERRAL].records.items()
@@ -204,7 +207,8 @@ def test_地址空着照样出_结果里点名(base, tmp_path):
     base.tables[TBL_REFERRAL].records[record][schema.REFERRAL_ADDRESS] = ""
     batch = service(base, tmp_path).build(ALICE, "2026-08", kinds=["trade"])
     assert [i.referral_no for i in batch.invoices] == ["R001"]
-    assert [i.referral_no for i in batch.no_address] == ["R001"]
+    card = json.dumps(cards.invoice_result_card(batch), ensure_ascii=False)
+    assert "地址" not in card
     text = re.sub(r"<[^>]+>", "", _xml(inv.render(batch.invoices[0], PAID)))
     assert "{{" not in text and "0xWALLET" in text
 
@@ -234,6 +238,37 @@ def test_加密货币版填满_日期写法照原工具(base, tmp_path):
     assert "31-August-2026" in text
     assert "10 October 2026" in text
     assert "300.00" in text
+
+
+def test_销售代表印的是生成的人(base, tmp_path):
+    kevin = Sales(
+        open_id="ou_alice",
+        name="Kevin YU",
+        role=schema.ROLE_SALES,
+        is_active=True,
+        email="kevin.yu@hashkey.com",
+    )
+    batch = service(base, tmp_path).build(kevin, "2026-08", kinds=["trade"])
+    text = re.sub(r"<[^>]+>", "", _xml(inv.render(batch.invoices[0], PAID)))
+    assert text.count("Kevin Yu") == 2 and text.count("kevin.yu@hashkey.com") == 2
+    assert "James" not in text and "james" not in text
+    card = json.dumps(cards.invoice_result_card(batch), ensure_ascii=False)
+    assert "邮箱" not in card
+
+
+def test_名册没填邮箱_照出_结果卡提醒(base, tmp_path):
+    batch = service(base, tmp_path).build(ALICE, "2026-08", kinds=["trade"])
+    text = re.sub(r"<[^>]+>", "", _xml(inv.render(batch.invoices[0], PAID)))
+    assert "Alice" in text and "{{" not in text
+    card = json.dumps(cards.invoice_result_card(batch), ensure_ascii=False)
+    assert "没有你的邮箱" in card
+
+
+def test_名字只把全大写的英文词改成首字母大写():
+    assert inv.display_name("James YANG") == "James Yang"
+    assert inv.display_name("Prance Wang") == "Prance Wang"
+    assert inv.display_name("杨超") == "杨超"
+    assert inv.display_name("  Mo   XUELEI ") == "Mo Xuelei"
 
 
 def test_银行版填满(base, tmp_path):
@@ -279,8 +314,8 @@ def test_一份发Word_多份打成zip(base, tmp_path, monkeypatch):
 
 
 def test_不是Mac就不转PDF(tmp_path, monkeypatch):
-    monkeypatch.setattr(inv.sys, "platform", "linux")
-    pdfs, note = inv.to_pdf({"a.docx": b"PK"}, tmp_path)
+    monkeypatch.setattr(pdf.sys, "platform", "linux")
+    pdfs, note = pdf.to_pdf({"a.docx": b"PK"}, tmp_path)
     assert pdfs == {} and "Mac" in note
 
 
@@ -294,10 +329,10 @@ def test_转PDF用固定目录_转完清空(tmp_path, monkeypatch):
         for docx in source.iterdir():
             (target / (docx.stem + ".pdf")).write_bytes(b"%PDF")
 
-    monkeypatch.setattr(inv.sys, "platform", "darwin")
-    monkeypatch.setattr(inv.subprocess, "run", fake_run)
+    monkeypatch.setattr(pdf.sys, "platform", "darwin")
+    monkeypatch.setattr(pdf.subprocess, "run", fake_run)
     for _ in range(2):
-        pdfs, note = inv.to_pdf({"A.docx": b"PK"}, tmp_path)
+        pdfs, note = pdf.to_pdf({"A.docx": b"PK"}, tmp_path)
         assert pdfs == {"A.pdf": b"%PDF"} and note == ""
     assert seen[0] == seen[1] == [str(tmp_path / "docx"), str(tmp_path / "pdf")]
     assert list((tmp_path / "docx").iterdir()) == [] and list((tmp_path / "pdf").iterdir()) == []

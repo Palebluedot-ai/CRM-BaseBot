@@ -327,3 +327,21 @@ def test_模块的公开面就是那几个名字():
         "stale_board_dates",
     }
     assert sys.modules["crm_basebot.pipeline"].__doc__ is not None
+
+
+def test_登记后按UID补挂_只补这一个人空着的行(fake_bitable):
+    from crm_basebot.pipeline import board
+
+    empty = _seed_board(fake_bitable, date(2026, 9, 17), uid="333")
+    taken = _seed_board(fake_bitable, date(2026, 9, 18), uid="333")
+    fake_bitable.table(TBL_BOARD).records[taken][schema.BOARD_CLIENT_LINK] = ["recOther"]
+    other = _seed_board(fake_bitable, date(2026, 9, 17), uid="444")
+
+    assert board.relink_uid(fake_bitable, TBL_BOARD, "333", "recNew") == 1
+
+    rows = fake_bitable.table(TBL_BOARD).records
+    assert rows[empty][schema.BOARD_CLIENT_LINK] == ["recNew"]
+    assert rows[taken][schema.BOARD_CLIENT_LINK] == ["recOther"]
+    assert schema.BOARD_CLIENT_LINK not in rows[other]
+    # 按 UID 在服务端筛，不扫整张看板
+    assert fake_bitable.filtered_reads == [(TBL_BOARD, schema.BOARD_CLIENT_UID, ("333",))]

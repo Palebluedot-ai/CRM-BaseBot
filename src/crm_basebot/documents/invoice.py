@@ -26,9 +26,6 @@ import calendar
 import io
 import logging
 import re
-import subprocess
-import sys
-import threading
 import zipfile
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -43,6 +40,7 @@ from ..domain.payment import PaymentInfo, PaymentService
 from ..lark.bitable import BitableClient
 from ..lark.values import extract_text, to_number
 from .docx import safe_filename, template_path
+from .pdf import to_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +52,6 @@ KIND_LABEL = {KIND_TRADE: "交易佣金", KIND_ECAS: "ECAS 返佣"}
 PERIOD_OPTIONS = 12
 
 # Word 转 PDF 的超时。第一次要等 Word 启动，还可能弹出「允许访问文件夹」要人点。
-PDF_TIMEOUT_SECONDS = 300
 
 CENTS = Decimal("0.01")
 
@@ -87,6 +84,14 @@ def money(amount: Decimal) -> str:
     return f"{amount:,.2f}"
 
 
+def display_name(name: str) -> str:
+    """「James YANG」→「James Yang」。全大写的英文词才改，中文和本来就是首字母大写的不动。"""
+    return " ".join(
+        word.capitalize() if word.isascii() and word.isupper() and len(word) > 1 else word
+        for word in name.split()
+    )
+
+
 def rate_text(rate_percent: Decimal) -> str:
     return f"{rate_percent:.2f}%"
 
@@ -114,6 +119,9 @@ class Invoice:
     """明细是不是逐客户列的。False = 这个渠道现在一个客户都找不到，只能印一行总额。"""
     reallocated: bool = False
     """明细是按结算金额重新分摊的（结算之后比例或客户变过，现算的数和结算表不一样）。"""
+    sales_name: str = ""
+    sales_email: str = ""
+    """Sales Representative 那一行：点「生成 Invoice」的人（名册的姓名、邮箱）。"""
 
     @property
     def filename(self) -> str:
@@ -144,6 +152,8 @@ class Invoice:
                 for row in self.rows
             ],
             "total_amount": money(self.total),
+            "sales_name": display_name(self.sales_name),
+            "sales_email": self.sales_email,
         }
         if self.payment.is_bank:
             account_name = self.payment.bank_account_name or self.referral_name
@@ -191,79 +201,6 @@ def render(invoice: Invoice, paid_on: date) -> bytes:
     return out.getvalue()
 
 
-# ---------- 转 PDF ----------
-
-
-# 同一时间只转一批：几个人同时点「生成 Invoice」时共用同一对固定目录，不能互相踩。
-_PDF_LOCK = threading.Lock()
-
-
-def _empty(folder: Path) -> None:
-    folder.mkdir(parents=True, exist_ok=True)
-    for item in folder.iterdir():
-        if item.is_file():
-            item.unlink()
-
-
-def to_pdf(docx_files: dict[str, bytes], work_dir: Path) -> tuple[dict[str, bytes], str]:
-    """用 Word 把一批 docx 转成 PDF。返回 ({pdf 文件名: 字节}, 出错说明)。
-
-    只在装了 Microsoft Word 的 Mac 上能转（docx2pdf 通过 AppleScript 让 Word 另存）。
-    在子进程里跑、带超时：Word 卡住不能把机器人一起卡死。
-
-    **永远用同一对目录** ``work_dir/docx`` 和 ``work_dir/pdf``，不用随机的临时目录。
-    Word 有沙盒：第一次读写某个文件夹要人在 mac mini 上点「授权访问」，它只记住点过的
-    那个文件夹。换成每次一个随机目录的话，每次都要有人去 mac mini 前点一次（2026-09-29
-    真机上撞到的）。转完两个目录都清空：里面有收款账号，不留在磁盘上。
-    """
-    if not docx_files:
-        return {}, ""
-    if sys.platform != "darwin":
-        return {}, "这台机器不是 Mac，转不了 PDF（只有装了 Word 的 Mac 能转），先发 Word 版。"
-
-    source, target = work_dir / "docx", work_dir / "pdf"
-    with _PDF_LOCK:
-        _empty(source)
-        _empty(target)
-        try:
-            for name, data in docx_files.items():
-                (source / name).write_bytes(data)
-            try:
-                subprocess.run(
-                    [
-                        sys.executable,
-                        "-c",
-                        "import sys; from docx2pdf import convert; "
-                        "convert(sys.argv[1], sys.argv[2])",
-                        str(source),
-                        str(target),
-                    ],
-                    check=True,
-                    capture_output=True,
-                    timeout=PDF_TIMEOUT_SECONDS,
-                )
-            except subprocess.TimeoutExpired:
-                return {}, (
-                    "Word 转 PDF 超时了（mac mini 上 Word 可能弹了窗口在等人点），先发 Word 版。"
-                )
-            except subprocess.CalledProcessError as exc:
-                logger.error("docx2pdf 失败: %s", exc.stderr.decode(errors="replace")[-2000:])
-                return {}, (
-                    "Word 转 PDF 失败了，先发 Word 版。管理员可以在 mac mini 的日志里看原因。"
-                )
-
-            pdfs: dict[str, bytes] = {}
-            for name in docx_files:
-                pdf = target / (Path(name).stem + ".pdf")
-                if pdf.is_file():
-                    pdfs[pdf.name] = pdf.read_bytes()
-            missing = len(docx_files) - len(pdfs)
-            return pdfs, (f"有 {missing} 份没转出 PDF，那几份只有 Word 版。" if missing else "")
-        finally:
-            _empty(source)
-            _empty(target)
-
-
 # ---------- 一批 ----------
 
 
@@ -291,15 +228,6 @@ class InvoiceBatch:
     @property
     def reallocated(self) -> list[Invoice]:
         return [invoice for invoice in self.invoices if invoice.itemized and invoice.reallocated]
-
-    @property
-    def no_address(self) -> list[Invoice]:
-        """出了，但地址是空的 —— 结果卡上提醒一句。"""
-        seen: dict[str, Invoice] = {}
-        for invoice in self.invoices:
-            if not invoice.payment.address_lines:
-                seen.setdefault(invoice.referral_no, invoice)
-        return list(seen.values())
 
     def files(self) -> list[tuple[str, bytes]]:
         """要发出去的文件。一份就发 Word + PDF 两个；多份就打成一个 zip，免得刷屏。"""
@@ -474,7 +402,7 @@ class InvoiceService:
         settled.sort(key=lambda item: (item[1].referral_no, item[0] != KIND_TRADE))
         for kind, row in settled:
             channel = channels[row.referral_no]
-            # 地址不算缺（2026-09-29 定的）：照出，结果卡上提醒。缺的只有收款方式和账户。
+            # 地址不算缺（2026-09-29 定的）：照出，也不提醒。缺的只有收款方式和账户。
             lacking = channel.info.missing_for_payment()
             if lacking:
                 skipped[channel.no] = Skipped(channel.no, channel.name, tuple(lacking))
@@ -493,6 +421,8 @@ class InvoiceService:
                     payment=channel.info,
                     itemized=itemized,
                     reallocated=reallocated,
+                    sales_name=sales.name,
+                    sales_email=sales.email,
                 )
             )
         batch.skipped = list(skipped.values())

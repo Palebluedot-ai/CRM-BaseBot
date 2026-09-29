@@ -14,17 +14,18 @@
 
 ## 一、机器人现在能做什么
 
-入口：给机器人发任意一条消息，回一张主菜单卡片。四个按钮对应四条路。
+入口：给机器人发任意一条消息，回一张主菜单卡片。每一项是一整条可点的框，emoji 在左、文字跟在后面，
+一列对齐（2026-09-29 起用「交互容器」而不是按钮：按钮的字只能居中，对不齐）。
 
 | 按钮 | 动作 | 写入 | 备注 |
 |---|---|---|---|
 | 登记新渠道 | `open_referral_form` | Referral Information 一行 | 名称、邮箱、开始日期、分佣比例、结算频率 |
-| 登记新客户 | `open_client_form` | Referred Client 一行 | 先选自己名下的渠道，再填客户UID + 名称 + AI 状态（开户即AI / 升级为AI + 日期 / 非AI） |
+| 登记新客户 | `open_client_form` | Referred Client 一行；看板上他以前的交易马上补挂 | 先选自己名下的渠道，再填客户UID + 名称 + AI 状态（开户即AI / 升级为AI + 日期 / 非AI）。登记成功后按这个 UID 把看板上空着的行挂上（`pipeline/board.relink_uid`），不用等第二天导入 |
 | 我的渠道 | `list_referrals` | 只读 | 列出本人名下渠道（名册「机器人可见范围」是看全部的人看全部），一页 20 条、按钮紧贴；可点进详情 |
 | 佣金查询 | `open_commission_query` | 只读 | 选月份，列出这个月和前两个月、本人名下每个渠道每个客户的应付**交易**佣金 |
 | ECAS 返佣 | `open_ecas_query` | 只读 | 选月份，读 ECAS 申请表算本人名下各渠道应付返佣 |
 | 更新客户AI状态 | `open_ai_form` | Referred Client 改两列 | 按 UID 找自己名下渠道的客户，补 / 改 AI 状态和升级日期 |
-| 生成转介协议 | `open_agreement` | **不写 Base** | 选个人 / 企业 → 填表 → 发回 HTS Referral Agreement 的 Word。2026-09-29 从 onboard-bot-lark 的「填单」搬来，范本和填法不变（`documents/agreement.py`） |
+| 生成转介协议 | `open_agreement` | **不写 Base** | 选个人 / 企业 → 填表 → 发回 HTS Referral Agreement 的 Word 和 PDF（转不了 PDF 就只发 Word，并说原因）。2026-09-29 从 onboard-bot-lark 的「填单」搬来，范本和填法不变（`documents/agreement.py`） |
 | 登记收款资料 | `open_payment` | Referral Information 改收款几列 | 选自己名下的渠道 → 表单预填已有资料 → 保存地址、收款方式、银行账户或钱包。审计只记改了哪几项，不记账号（`domain/payment.py`） |
 | 生成 Invoice | `open_invoice` | 只读 | 选月份、类型（交易 / ECAS / 都要）、付款日期 → 每个渠道一份 Referral Fee Statement（Word + PDF），多份打成 zip。2026-09-29 从 invoice 小工具搬来（`documents/invoice.py`） |
 
@@ -40,7 +41,14 @@
 「应付佣金」）。每个客户一行的明细是现算分摊的，**只有现算合计和结算表一分不差时才列**；
 结算之后客户、比例变过的渠道只印一行总额，结果卡上点名。收款资料不全的渠道不出，结果卡
 说缺哪几项。转 PDF 用 mac mini 上的 Microsoft Word（docx2pdf，子进程 + 5 分钟超时），
-转不了就只发 Word 版。生成的文件在 mac mini 的 `output/invoices/` 下过一下手，不进仓库。
+转不了就只发 Word 版。生成的文件在 mac mini 的 `output/invoices/` 下过一下手，不进仓库；
+协议转 PDF 也用这个目录（**别改名**：Word 只记住点过「授权访问」的文件夹）。点了「生成」
+先回一条「⏳ 正在生成」，文件好了再发。
+
+**收款资料只缺地址照出、不提醒**；缺收款方式或账户（钱包地址 / 银行账号）才不出、在结果卡上
+点名。invoice 上的 **Sales Representative 是点「生成」的人**：名册的「姓名」和「邮箱」
+（全大写的英文词改成首字母大写，James YANG → James Yang）。名册没填邮箱就只印名字，结果卡
+提醒去补。
 
 ECAS 单独一个入口，**不并进「佣金查询」**：两笔钱、两套比例、两张汇总表
 （见 [ECAS.md](ECAS.md)）。混在一个按钮后面，人分不清自己看的是哪一笔。

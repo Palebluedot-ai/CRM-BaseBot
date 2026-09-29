@@ -272,6 +272,11 @@ def components(card: dict[str, Any], tag: str) -> list[dict[str, Any]]:
     return [n for n in walk(card) if n.get("tag") == tag]
 
 
+def clickables(card: dict[str, Any]) -> list[dict[str, Any]]:
+    """点了会回调的东西：按钮，和主菜单用的交互容器。"""
+    return components(card, "button") + components(card, "interactive_container")
+
+
 # ---------- 卡片骨架 ----------
 
 
@@ -594,7 +599,7 @@ def test_主菜单按钮都带回调且不在表单里():
     assert components(card, "form") == []
 
     actions = set()
-    for button in components(card, "button"):
+    for button in clickables(card):
         # 表单外的按钮不需要 name，但必须能回传出一个动作
         (callback,) = [b for b in button["behaviors"] if b["type"] == "callback"]
         actions.add(callback["value"]["action"])
@@ -656,7 +661,7 @@ def test_自检卡片同样符合_2_0_规范():
 
 def _menu_actions(card: dict[str, Any]) -> set[str]:
     actions = set()
-    for button in components(card, "button"):
+    for button in clickables(card):
         for behavior in button.get("behaviors", []):
             if behavior["type"] == "callback":
                 actions.add(behavior["value"]["action"])
@@ -1031,5 +1036,15 @@ def test_更新AI表单用UID找客户():
 
 
 def test_主菜单有更新客户AI状态():
-    labels = [b["text"]["content"] for b in components(cards.menu_card("张三"), "button")]
-    assert "更新客户AI状态" in labels
+    labels = [m["content"] for m in components(cards.menu_card("张三"), "markdown")]
+    assert "🤖　更新客户AI状态" in labels
+
+
+def test_主菜单每项emoji在前_左对齐_整条可点():
+    items = components(cards.menu_card("张三"), "interactive_container")
+    assert len(items) == len(cards.MENU_ITEMS)
+    for item, (emoji, text, action) in zip(items, cards.MENU_ITEMS, strict=True):
+        (label,) = item["elements"]
+        assert label["content"] == f"{emoji}　{text}" and label["text_align"] == "left"
+        assert item["width"] == "fill"
+        assert item["behaviors"] == [{"type": "callback", "value": {"action": action}}]

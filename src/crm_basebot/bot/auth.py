@@ -42,6 +42,8 @@ class Sales:
     is_active: bool
     sees_all: bool = False
     """机器人里看得到所有人的渠道（名册「机器人可见范围」= 看全部）。和角色无关。"""
+    email: str = ""
+    """名册「邮箱」。印在这个人生成的 invoice 的 Sales Representative 那一行。"""
 
     @property
     def is_admin(self) -> bool:
@@ -96,6 +98,7 @@ class SalesDirectory:
                 is_active=extract_text(record.fields.get(schema.SALES_STATUS))
                 != schema.SALES_STATUS_DISABLED,
                 sees_all=extract_text(record.fields.get(schema.SALES_SCOPE)) == schema.SCOPE_ALL,
+                email=extract_text(record.fields.get(schema.SALES_EMAIL)).strip(),
             )
 
         self._cache = directory

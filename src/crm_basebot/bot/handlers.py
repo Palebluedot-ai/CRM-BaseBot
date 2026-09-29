@@ -123,6 +123,8 @@ class BotHandlers:
         files=None,
         payments=None,
         invoices=None,
+        board_linker: Callable[[str, str], int] | None = None,
+        pdf_converter: Callable[[dict[str, bytes]], tuple[dict[str, bytes], str]] | None = None,
         background: Callable[[Callable[[], None]], None] = _run_in_thread,
         tz: tzinfo = DEFAULT_BUSINESS_TIMEZONE,
         greet_cooldown_seconds: float = GREET_COOLDOWN_SECONDS,
@@ -145,6 +147,12 @@ class BotHandlers:
         # 收款资料（domain.payment.PaymentService）和 invoice（documents.invoice）。
         self._payments = payments
         self._invoices = invoices
+        # (客户UID, 客户记录 id) -> 看板上补挂了几行。登记完马上把他以前的交易挂上，
+        # 不用等下一次导入。没注入（没配看板）就跳过。
+        self._board_linker = board_linker
+        # {docx 文件名: 字节} -> ({pdf 文件名: 字节}, 转不了时的说明)。协议用它出 PDF；
+        # 没注入就只发 Word。invoice 自己带着转（InvoiceService），不走这里。
+        self._pdf_converter = pdf_converter
         self._background = background
         self._tz = tz
         self._greet_cooldown = greet_cooldown_seconds
@@ -496,7 +504,7 @@ class BotHandlers:
 
         def worker() -> None:
             try:
-                self._clients.create(sales, client_input)
+                record_id = self._clients.create(sales, client_input)
             except (ValidationError, AuthError) as exc:
                 self._send_to_user(target, cards.with_menu(cards.error_card(str(exc))))
                 return
@@ -505,16 +513,21 @@ class BotHandlers:
                 self._send_to_user(target, cards.with_menu(cards.error_card(SYSTEM_ERROR)))
                 return
 
-            self._send_to_user(
-                target,
-                cards.with_menu(
-                    cards.success_card(
-                        "客户已登记",
-                        f"**{client_input.name}** 已挂到渠道 **{client_input.referral_no}**。\n\n"
-                        f"AI 状态：{_ai_text(client_input.ai_status, client_input.ai_date)}",
-                    )
-                ),
+            # 补挂失败不影响「登记成功」：每天的导入还会再补一次，记日志就好。
+            linked = 0
+            if self._board_linker is not None and record_id:
+                try:
+                    linked = self._board_linker(client_input.uid, record_id)
+                except Exception:
+                    logger.exception("登记后补挂看板失败 uid=%s（下次导入再补）", client_input.uid)
+
+            body = (
+                f"**{client_input.name}** 已挂到渠道 **{client_input.referral_no}**。\n\n"
+                f"AI 状态：{_ai_text(client_input.ai_status, client_input.ai_date)}"
             )
+            if linked:
+                body += f"\n\n他以前的 {linked} 笔交易已经挂到这个渠道下。"
+            self._send_to_user(target, cards.with_menu(cards.success_card("客户已登记", body)))
 
         self._background(worker)
 
@@ -679,10 +692,15 @@ class BotHandlers:
 
         target = sales.open_id
         files = self._files
+        convert = self._pdf_converter
 
         def worker() -> None:
             try:
-                files.send(target, plan.filename, agreement.render(plan))
+                docx = agreement.render(plan)
+                pdfs, note = convert({plan.filename: docx}) if convert else ({}, "")
+                files.send(target, plan.filename, docx)
+                for name, data in pdfs.items():
+                    files.send(target, name, data)
             except (AgreementError, FileSendError) as exc:
                 self._send_to_user(target, cards.with_menu(cards.error_card(str(exc))))
                 return
@@ -690,14 +708,11 @@ class BotHandlers:
                 logger.exception("生成转介协议失败 open_id=%s", target)
                 self._send_to_user(target, cards.with_menu(cards.error_card(SYSTEM_ERROR)))
                 return
-            self._send_to_user(
-                target,
-                cards.with_menu(
-                    cards.success_card(
-                        "协议已生成", f"**{plan.filename}** 在上一条消息里，下载后发给对方签署。"
-                    )
-                ),
-            )
+            where = "Word 和 PDF 在上面两条消息里" if pdfs else "Word 在上一条消息里"
+            body = f"**{plan.filename}**：{where}，下载后发给对方签署。"
+            if note:
+                body += f"\n\n<font color='grey'>{note}</font>"
+            self._send_to_user(target, cards.with_menu(cards.success_card("协议已生成", body)))
 
         self._background(worker)
         return _card_response(
@@ -710,7 +725,7 @@ class BotHandlers:
                     ("结算周期", plan.tokens["FEE_PERIOD"]),
                     ("生效日期", plan.tokens["EFFECTIVE_DATE"]),
                 ],
-                note="协议文件见下一条消息。",
+                note="⏳ 正在生成协议（Word 转 PDF 要半分钟左右），好了会发在下面。",
             ),
             toast="已提交",
         )
@@ -838,6 +853,16 @@ class BotHandlers:
         wanted = cards.INVOICE_KINDS[kind]
 
         def build() -> dict[str, Any]:
+            # 读表、生成 Word、转 PDF 加起来要几十秒。先说一声，不然点完像没反应
+            # （2026-09-29 反馈）。
+            self._send_to_user(
+                target,
+                cards.notice_card(
+                    f"⏳ 正在生成 {period} 的 invoice",
+                    "要读结算表、生成 Word、转 PDF，大约需要半分钟到一分钟。好了会发在下面。",
+                    template="blue",
+                ),
+            )
             batch = invoices.generate(sales, period, kinds=wanted, paid_on=pay_date)
             try:
                 for filename, data in batch.files():

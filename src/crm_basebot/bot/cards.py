@@ -234,8 +234,42 @@ def _callback_button(
     }
 
 
-def _menu_button(text: str, action: str, *, primary: bool = False) -> dict[str, Any]:
-    return _callback_button(text, {"action": action}, primary=primary)
+# 主菜单：(emoji, 文字, action)。emoji 靠左、文字跟在后面，一列对齐（2026-09-29 反馈）。
+MENU_ITEMS: tuple[tuple[str, str, str], ...] = (
+    ("🏢", "登记新渠道", ACTION_OPEN_REFERRAL_FORM),
+    ("👤", "登记新客户", ACTION_OPEN_CLIENT_FORM),
+    ("📋", "我的渠道", ACTION_LIST_REFERRALS),
+    ("💰", "佣金查询", ACTION_OPEN_COMMISSION_QUERY),
+    # ECAS 单独一个入口，不并进「佣金查询」。两笔钱、两套比例、两张汇总表，
+    # 混在一个按钮后面只会让人分不清自己看的是哪一笔（见 docs/ECAS.md）。
+    ("💎", "ECAS 返佣", ACTION_OPEN_ECAS_QUERY),
+    ("🤖", "更新客户AI状态", ACTION_OPEN_AI_FORM),
+    ("📝", "生成转介协议", ACTION_OPEN_AGREEMENT),
+    ("🏦", "登记收款资料", ACTION_OPEN_PAYMENT),
+    ("🧾", "生成 Invoice", ACTION_OPEN_INVOICE),
+)
+
+
+def _menu_item(emoji: str, text: str, action: str) -> dict[str, Any]:
+    """主菜单的一项：整条可点的「交互容器」，里面一行左对齐的字。
+
+    按钮（``button``）的文字只能居中，emoji 长短不一的标签排起来左边参差不齐。交互容器
+    里放一段左对齐的 markdown，emoji 就在同一列上，文字也从同一个位置起头。点它和点按钮
+    一样回调 ``card.action.trigger``，``action.value`` 同一个形状，处理逻辑不用改。
+    """
+    return {
+        "tag": "interactive_container",
+        "width": "fill",
+        "height": "auto",
+        "background_style": "default",
+        "has_border": True,
+        "border_color": "grey",
+        "corner_radius": "8px",
+        "padding": "6px 12px 6px 12px",
+        "margin": "0px 0px 6px 0px",
+        "behaviors": [{"type": "callback", "value": {"action": action}}],
+        "elements": [{"tag": "markdown", "content": f"{emoji}　{text}", "text_align": "left"}],
+    }
 
 
 def _filled(value: str) -> str:
@@ -244,25 +278,13 @@ def _filled(value: str) -> str:
 
 
 def _menu_buttons() -> list[dict[str, Any]]:
-    """主菜单那几个按钮。
+    """主菜单那几项。
 
-    垂直堆叠、每个撑满宽度。之前用 column_set 三等分横排，手机屏窄的时候每列只放得下
+    垂直堆叠、每项撑满宽度。之前用 column_set 三等分横排，手机屏窄的时候每列只放得下
     3-4 个字，「登记新渠道」被截成「登记..」。垂直排列纵向多占一点空间，但任何设备
     都能把标签完整显示出来。
     """
-    return [
-        _menu_button("登记新渠道", ACTION_OPEN_REFERRAL_FORM, primary=True),
-        _menu_button("登记新客户", ACTION_OPEN_CLIENT_FORM),
-        _menu_button("我的渠道", ACTION_LIST_REFERRALS),
-        _menu_button("佣金查询", ACTION_OPEN_COMMISSION_QUERY),
-        # ECAS 单独一个入口，不并进「佣金查询」。两笔钱、两套比例、两张汇总表，
-        # 混在一个按钮后面只会让人分不清自己看的是哪一笔（见 docs/ECAS.md）。
-        _menu_button("ECAS 返佣", ACTION_OPEN_ECAS_QUERY),
-        _menu_button("更新客户AI状态", ACTION_OPEN_AI_FORM),
-        _menu_button("生成转介协议", ACTION_OPEN_AGREEMENT),
-        _menu_button("登记收款资料", ACTION_OPEN_PAYMENT),
-        _menu_button("生成 Invoice", ACTION_OPEN_INVOICE),
-    ]
+    return [_menu_item(emoji, text, action) for emoji, text, action in MENU_ITEMS]
 
 
 def back_to_menu_button() -> dict[str, Any]:
@@ -302,7 +324,7 @@ def menu_card(sales_name: str) -> dict[str, Any]:
     return {
         "schema": "2.0",
         "header": {
-            "title": {"tag": "plain_text", "content": "渠道佣金助手"},
+            "title": {"tag": "plain_text", "content": "🤝 渠道佣金助手"},
             "template": "blue",
         },
         "body": {
@@ -1231,11 +1253,11 @@ def invoice_result_card(batch: Any) -> dict[str, Any]:
             "**这几个渠道没出**：收款资料还不全，先用「登记收款资料」补上再来出。\n"
             + "\n".join(lines)
         )
-    if batch.no_address:
-        lines = [f"· {inv.referral_no} {inv.referral_name}" for inv in batch.no_address]
+    # 地址空着不提（2026-09-29 定的）：照出，不另外说。只有收款账户缺了才不出、才提醒。
+    if batch.invoices and not batch.invoices[0].sales_email:
         parts.append(
-            "⚠️ **这几份 invoice 上没有地址**（收款资料里地址是空的，其它照常出了）。"
-            "要补的话用「登记收款资料」填上地址，再出一次。\n" + "\n".join(lines)
+            "⚠️ 名册（Sales Directory）里没有你的邮箱，invoice 上 Sales Representative "
+            "只印了名字。请管理员在「邮箱」那一列填上，再出一次。"
         )
     if batch.reallocated:
         names = "、".join(
@@ -1256,6 +1278,6 @@ def invoice_result_card(batch: Any) -> dict[str, Any]:
     if batch.pdf_note:
         parts.append(f"<font color='grey'>{batch.pdf_note}</font>")
 
-    clean = batch.invoices and not (batch.skipped or batch.no_address)
+    clean = batch.invoices and not batch.skipped
     template = "green" if clean else "orange"
     return notice_card(title, "\n\n".join(parts), template=template)

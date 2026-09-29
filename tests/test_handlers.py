@@ -207,10 +207,14 @@ def cards_walk(node: Any):
 def _buttons(card: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     found = []
     for node in cards_walk(card):
-        if node.get("tag") != "button":
+        if node.get("tag") == "button":
+            label = node["text"]["content"]
+        elif node.get("tag") == "interactive_container":  # 主菜单的一项
+            label = node["elements"][0]["content"]
+        else:
             continue
         (callback,) = [b for b in node["behaviors"] if b["type"] == "callback"]
-        found.append((node["text"]["content"], callback["value"]))
+        found.append((label, callback["value"]))
     return found
 
 
@@ -265,7 +269,7 @@ def test_返回目录发一张新的主菜单(handlers):
     click(handlers, cards.ACTION_OPEN_MENU)
 
     menu = last_pushed(handlers)
-    assert menu["header"]["title"]["content"] == "渠道佣金助手"
+    assert menu["header"]["title"]["content"] == "🤝 渠道佣金助手"
     assert _actions(menu) == MENU_ACTIONS
 
 
@@ -879,7 +883,7 @@ def test_打开会话就推一张主菜单(fake_bitable):
     bots.on_p2p_chat_entered(entered())
 
     (card,) = _pushed(bots)
-    assert card["header"]["title"]["content"] == "渠道佣金助手"
+    assert card["header"]["title"]["content"] == "🤝 渠道佣金助手"
     assert MENU_ACTIONS <= _actions(card)
 
 
@@ -1390,3 +1394,77 @@ def test_没配文件发送时invoice和协议按钮说未启用(fake_bitable):
     bots = make_handlers(fake_bitable)
     click(bots, cards.ACTION_OPEN_INVOICE)
     assert "未启用" in json.dumps(last_pushed(bots), ensure_ascii=False)
+
+
+def test_登记客户后马上补挂看板_回执里说挂了几笔(fake_bitable):
+    calls = []
+
+    def linker(uid, record_id):
+        calls.append((uid, record_id))
+        return 3
+
+    bots = make_handlers(fake_bitable, board_linker=linker)
+    submit_referral(bots)
+    click(bots, cards.ACTION_SUBMIT_CLIENT, form=client_form())
+
+    ((uid, record_id),) = calls
+    assert uid == UID and record_id in fake_bitable.table(TBL_CLIENT).records
+    assert "以前的 3 笔交易已经挂到这个渠道下" in _text(last_pushed(bots))
+
+
+def test_补挂失败不影响登记成功(fake_bitable, caplog):
+    def boom(uid, record_id):
+        raise RuntimeError("网络断了")
+
+    bots = make_handlers(fake_bitable, board_linker=boom)
+    submit_referral(bots)
+    click(bots, cards.ACTION_SUBMIT_CLIENT, form=client_form())
+
+    text = _text(last_pushed(bots))
+    assert "已挂到渠道 **R001**" in text and "笔交易" not in text
+    assert "登记后补挂看板失败" in caplog.text
+
+
+def test_协议_有PDF就Word和PDF一起发_回执说正在生成(fake_bitable):
+    files = FakeFiles()
+    converted = []
+
+    def convert(docx):
+        converted.append(list(docx))
+        return {name.replace(".docx", ".pdf"): b"%PDF" for name in docx}, ""
+
+    bots = make_handlers(fake_bitable, files=files, pdf_converter=convert)
+    payload = _submit_agreement(bots, AGREEMENT_FORM)
+
+    assert "正在生成" in json.dumps(payload["card"]["data"], ensure_ascii=False)
+    assert converted == [["HTS Referral Agreement - Zhang San.docx"]]
+    assert [name for _, name, _ in files.sent] == [
+        "HTS Referral Agreement - Zhang San.docx",
+        "HTS Referral Agreement - Zhang San.pdf",
+    ]
+    assert "Word 和 PDF" in _text(last_pushed(bots))
+
+
+def test_协议_转不了PDF就只发Word_说原因(fake_bitable):
+    files = FakeFiles()
+    bots = make_handlers(
+        fake_bitable, files=files, pdf_converter=lambda docx: ({}, "Word 转 PDF 超时了")
+    )
+    _submit_agreement(bots, AGREEMENT_FORM)
+    assert [name for _, name, _ in files.sent] == ["HTS Referral Agreement - Zhang San.docx"]
+    assert "Word 转 PDF 超时了" in _text(last_pushed(bots))
+
+
+def test_invoice_先说正在生成_再发结果(fake_bitable):
+    bots = make_handlers(fake_bitable, files=FakeFiles(), invoices=FakeInvoices())
+    click(
+        bots,
+        cards.ACTION_SUBMIT_INVOICE,
+        form={
+            cards.F_INVOICE_PERIOD: "2026-08",
+            cards.F_INVOICE_KIND: "trade",
+            cards.F_INVOICE_PAY_DATE: "2026-10-10 +0800",
+        },
+    )
+    titles = [card["header"]["title"]["content"] for card in pushed(bots)]
+    assert titles[-2:] == ["⏳ 正在生成 2026-08 的 invoice", "Invoice · August 2026"]

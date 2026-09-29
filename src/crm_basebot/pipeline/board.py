@@ -118,6 +118,28 @@ def relink_missing(bitable: BitableClient, table_id: str, links: dict[str, str])
     return bitable.batch_update_records(table_id, updates)
 
 
+def relink_uid(bitable: BitableClient, table_id: str, uid: str, client_record_id: str) -> int:
+    """刚登记的一个客户：看板上他以前的、还空着关联的行，现在就挂上。返回挂了几行。
+
+    机器人登记客户后马上调（2026-09-29 反馈：登记完要等第二天导入才在看板上看到）。
+    只按这一个 UID 在服务端筛，一两页就回来，不扫全表。和 ``relink_missing`` 一样
+    只补空的，已经挂上的不动。
+    """
+    updates: dict[str, dict[str, Any]] = {}
+    for record in bitable.iter_records_where_in(
+        table_id,
+        schema.BOARD_CLIENT_UID,
+        [uid],
+        field_names=[schema.BOARD_CLIENT_UID, schema.BOARD_CLIENT_LINK],
+    ):
+        if link_ids(record.fields.get(schema.BOARD_CLIENT_LINK)):
+            continue
+        updates[record.record_id] = {schema.BOARD_CLIENT_LINK: [client_record_id]}
+    if not updates:
+        return 0
+    return bitable.batch_update_records(table_id, updates)
+
+
 def apply_import(
     bitable: BitableClient,
     table_id: str,
