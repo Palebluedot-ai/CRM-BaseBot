@@ -251,3 +251,22 @@ def test_不是Mac就不转PDF(tmp_path, monkeypatch):
     monkeypatch.setattr(inv.sys, "platform", "linux")
     pdfs, note = inv.to_pdf({"a.docx": b"PK"}, tmp_path)
     assert pdfs == {} and "Mac" in note
+
+
+def test_转PDF用固定目录_转完清空(tmp_path, monkeypatch):
+    """Word 只记住授权过的那个文件夹：目录名每次都一样，才不会每次都要人去点「授权访问」。"""
+    seen: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        source, target = Path(args[-2]), Path(args[-1])
+        seen.append([str(source), str(target)])
+        for docx in source.iterdir():
+            (target / (docx.stem + ".pdf")).write_bytes(b"%PDF")
+
+    monkeypatch.setattr(inv.sys, "platform", "darwin")
+    monkeypatch.setattr(inv.subprocess, "run", fake_run)
+    for _ in range(2):
+        pdfs, note = inv.to_pdf({"A.docx": b"PK"}, tmp_path)
+        assert pdfs == {"A.pdf": b"%PDF"} and note == ""
+    assert seen[0] == seen[1] == [str(tmp_path / "docx"), str(tmp_path / "pdf")]
+    assert list((tmp_path / "docx").iterdir()) == [] and list((tmp_path / "pdf").iterdir()) == []
