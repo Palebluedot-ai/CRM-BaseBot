@@ -673,7 +673,7 @@ class BotHandlers:
     # ---------- 转介协议 ----------
 
     def _submit_agreement(self, sales, form, action_value) -> P2CardActionTriggerResponse:
-        """填好的协议表单 -> Word 文件发给这个人。不写 Base。
+        """填好的协议表单 -> Word + PDF 发给这个人。不写 Base。
 
         校验（缺项、邮箱、费率）在回调里做，填错回 toast、表单留着；生成和上传在后台，
         文件作为新消息发出来，表单换成回执（不然能再点一次，生成两份）。

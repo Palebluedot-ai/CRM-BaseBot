@@ -981,7 +981,7 @@ def agreement_kind_card() -> dict[str, Any]:
                     KIND_LABEL[KIND_CORPORATE],
                     {"action": ACTION_AGREEMENT_FORM, "kind": KIND_CORPORATE},
                 ),
-                footnote("生成的是 HTS Referral Agreement 的 Word 文件，填的资料不存进 Base。"),
+                footnote("生成的是 HTS Referral Agreement 的 Word 和 PDF，填的资料不存进 Base。"),
                 back_to_menu_button(),
             ]
         },
