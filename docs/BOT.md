@@ -24,6 +24,18 @@
 | 佣金查询 | `open_commission_query` | 只读 | 选月份，列出这个月和前两个月、本人名下每个渠道每个客户的应付**交易**佣金 |
 | ECAS 返佣 | `open_ecas_query` | 只读 | 选月份，读 ECAS 申请表算本人名下各渠道应付返佣 |
 | 更新客户AI状态 | `open_ai_form` | Referred Client 改两列 | 按 UID 找自己名下渠道的客户，补 / 改 AI 状态和升级日期 |
+| 生成转介协议 | `open_agreement` | **不写 Base** | 选个人 / 企业 → 填表 → 发回 HTS Referral Agreement 的 Word。2026-09-29 从 onboard-bot-lark 的「填单」搬来，范本和填法不变（`documents/agreement.py`） |
+| 登记收款资料 | `open_payment` | Referral Information 改收款几列 | 选自己名下的渠道 → 表单预填已有资料 → 保存地址、收款方式、银行账户或钱包。审计只记改了哪几项，不记账号（`domain/payment.py`） |
+| 生成 Invoice | `open_invoice` | 只读 | 选月份、类型（交易 / ECAS / 都要）、付款日期 → 每个渠道一份 Referral Fee Statement（Word + PDF），多份打成 zip。2026-09-29 从 invoice 小工具搬来（`documents/invoice.py`） |
+
+**协议、invoice 都是发文件**：先上传（`im.v1.file.create`）再发 file 消息，要应用开
+`im:resource`（见 [LARK_APP_SETUP.md](LARK_APP_SETUP.md)），没开时机器人回一句「上传不上飞书」。
+
+**Invoice 金额只认两张结算表**（Commission Summary / ECAS Commission Summary 里那一行的
+「应付佣金」）。每个客户一行的明细是现算分摊的，**只有现算合计和结算表一分不差时才列**；
+结算之后客户、比例变过的渠道只印一行总额，结果卡上点名。收款资料不全的渠道不出，结果卡
+说缺哪几项。转 PDF 用 mac mini 上的 Microsoft Word（docx2pdf，子进程 + 5 分钟超时），
+转不了就只发 Word 版。生成的文件在 mac mini 的 `output/invoices/` 下过一下手，不进仓库。
 
 ECAS 单独一个入口，**不并进「佣金查询」**：两笔钱、两套比例、两张汇总表
 （见 [ECAS.md](ECAS.md)）。混在一个按钮后面，人分不清自己看的是哪一笔。

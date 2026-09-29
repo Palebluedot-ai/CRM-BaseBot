@@ -10,20 +10,24 @@ from __future__ import annotations
 
 import logging
 import threading
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import lark_oapi as lark
 
 from .bot.auth import SalesDirectory
 from .bot.handlers import BotHandlers
+from .documents.invoice import InvoiceService
 from .domain.audit import AuditLog
 from .domain.commission_query import CommissionQueryService
 from .domain.ecas_query import EcasQueryService
+from .domain.payment import PaymentService
 from .domain.referral import ReferralService
 from .domain.referral_history import ReferralHistoryService
 from .domain.referred_client import ReferredClientService
 from .lark.bitable import BitableClient
 from .lark.client import get_client
+from .lark.files import FileSender
 from .lark.ws_patch import apply_card_frame_patch
 from .startup import load_settings, require_settings
 
@@ -74,8 +78,21 @@ def build_handlers() -> BotHandlers:
         else None
     )
 
+    # 收款资料在渠道表上；invoice 读两张结算表 + 收款资料。生成的文件（含收款账号）只在
+    # 这台机器的 output/ 下过一下手，不进仓库（.gitignore）。
+    payments = PaymentService(bitable, settings.table_referral, audit)
+    invoices = InvoiceService(
+        bitable,
+        settings=settings,
+        payments=payments,
+        commission_query=commission_query,
+        tz=tz,
+        work_dir=Path(__file__).resolve().parents[2] / "output" / "invoices",
+    )
+
+    client = get_client()
     return BotHandlers(
-        client=get_client(),
+        client=client,
         directory=SalesDirectory(bitable, settings.table_sales),
         referrals=ReferralService(
             bitable,
@@ -91,6 +108,9 @@ def build_handlers() -> BotHandlers:
         commission_query=commission_query,
         ecas_query=ecas_query,
         referral_history=referral_history,
+        files=FileSender(client),
+        payments=payments,
+        invoices=invoices,
         background=_in_background,
         tz=tz,
     )

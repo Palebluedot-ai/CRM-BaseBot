@@ -229,6 +229,9 @@ MENU_ACTIONS = {
     cards.ACTION_OPEN_COMMISSION_QUERY,
     cards.ACTION_OPEN_ECAS_QUERY,
     cards.ACTION_OPEN_AI_FORM,
+    cards.ACTION_OPEN_AGREEMENT,
+    cards.ACTION_OPEN_PAYMENT,
+    cards.ACTION_OPEN_INVOICE,
 }
 
 
@@ -1154,3 +1157,236 @@ def test_更新别人的客户推一张找不到(fake_bitable, handlers):
 )
 def test_更新AI状态填错了回红字(handlers, overrides, words):
     _assert_rejected(click(handlers, cards.ACTION_SUBMIT_AI, form=_ai_form(**overrides)), words)
+
+
+# ---------- 生成转介协议 ----------
+
+
+class FakeFiles:
+    """代替 lark.files.FileSender：记下发了什么，不出网。"""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.sent: list[tuple[str, str, bytes]] = []
+        self.error = error
+
+    def send(self, open_id: str, filename: str, data: bytes) -> None:
+        if self.error:
+            raise self.error
+        self.sent.append((open_id, filename, data))
+
+
+AGREEMENT_FORM = {
+    "client_name": "Zhang San",
+    "id_number": "A1234567",
+    "full_address": "Flat 1, Central, Hong Kong",
+    "email": "zhang@example.com",
+    "fee_pct": "40",
+    cards.F_AGREEMENT_PERIOD: "monthly",
+    cards.F_AGREEMENT_DATE: "2026-10-01 +0800",
+}
+
+
+def _submit_agreement(bots, form, kind="individual"):
+    return click(
+        bots,
+        cards.ACTION_SUBMIT_AGREEMENT,
+        form=form,
+        value={"action": cards.ACTION_SUBMIT_AGREEMENT, "kind": kind},
+    )
+
+
+def test_协议_选类型推出对应的表单(fake_bitable):
+    bots = make_handlers(fake_bitable, files=FakeFiles())
+    click(bots, cards.ACTION_OPEN_AGREEMENT)
+    click(
+        bots,
+        cards.ACTION_AGREEMENT_FORM,
+        value={"action": cards.ACTION_AGREEMENT_FORM, "kind": "corporate"},
+    )
+    form = last_pushed(bots)
+    assert "企业" in form["header"]["title"]["content"]
+    names = {node.get("name") for node in cards_walk(form)}
+    assert {"company_name", "signatory_title", "fee_pct"} <= names
+
+
+def test_协议_提交后发出Word文件_表单换成回执(fake_bitable):
+    files = FakeFiles()
+    bots = make_handlers(fake_bitable, files=files)
+
+    payload = _submit_agreement(bots, AGREEMENT_FORM)
+
+    assert payload["card"]["data"]["header"]["title"]["content"] == "生成转介协议 · 已提交"
+    ((open_id, filename, data),) = files.sent
+    assert open_id == ALICE
+    assert filename == "HTS Referral Agreement - Zhang San.docx"
+    assert data[:2] == b"PK"
+    assert "协议已生成" in last_pushed(bots)["header"]["title"]["content"]
+    # 协议不写 Base：证件号这些不能落进任何表（审计表也不行）
+    assert fake_bitable.writes == []
+
+
+def test_协议_缺必填项回红字_表单留着(fake_bitable):
+    files = FakeFiles()
+    bots = make_handlers(fake_bitable, files=files)
+    payload = _submit_agreement(bots, {**AGREEMENT_FORM, "id_number": ""})
+    assert payload["toast"]["type"] == "error"
+    assert "证件号" in payload["toast"]["content"]
+    assert "card" not in payload
+    assert files.sent == []
+
+
+def test_协议_上传失败说人话(fake_bitable):
+    from crm_basebot.lark.files import FileSendError
+
+    bots = make_handlers(fake_bitable, files=FakeFiles(FileSendError("没开权限")))
+    _submit_agreement(bots, AGREEMENT_FORM)
+    card = last_pushed(bots)
+    assert card["header"]["title"]["content"] == "没能完成"
+    assert "没开权限" in json.dumps(card, ensure_ascii=False)
+
+
+def test_协议_类型不对就拒(fake_bitable):
+    bots = make_handlers(fake_bitable, files=FakeFiles())
+    payload = _submit_agreement(bots, AGREEMENT_FORM, kind="alien")
+    assert payload["toast"]["type"] == "error"
+
+
+# ---------- 登记收款资料 ----------
+
+
+def _payment_bots(fake_bitable, **extra):
+    from crm_basebot.domain.payment import PaymentService
+
+    payments = PaymentService(fake_bitable, TBL_REFERRAL, AuditLog(fake_bitable, TBL_AUDIT))
+    bots = make_handlers(fake_bitable, payments=payments, **extra)
+    submit_referral(bots)  # R001，归属 Alice
+    return bots
+
+
+PAYMENT_FORM = {
+    cards.F_PAY_ADDRESS[0]: "Flat 1",
+    cards.F_PAY_ADDRESS[1]: "Central",
+    cards.F_PAY_METHOD: schema.PAY_METHOD_CRYPTO,
+    cards.F_PAY_WALLET: "0xabcdef123456",
+}
+
+
+def test_收款资料_选渠道后推出预填的表单(fake_bitable):
+    bots = _payment_bots(fake_bitable)
+    click(bots, cards.ACTION_OPEN_PAYMENT)
+    assert last_pushed(bots)["header"]["title"]["content"] == "登记收款资料"
+
+    click(bots, cards.ACTION_PAYMENT_FORM, form={cards.F_PAY_REFERRAL: "R001"})
+    form = last_pushed(bots)
+    assert form["header"]["title"]["content"].startswith("收款资料 · R001")
+
+
+def test_收款资料_保存后写进渠道表_回执只露后四位(fake_bitable):
+    bots = _payment_bots(fake_bitable)
+    payload = click(
+        bots,
+        cards.ACTION_SUBMIT_PAYMENT,
+        form=PAYMENT_FORM,
+        value={"action": cards.ACTION_SUBMIT_PAYMENT, "referral_no": "R001"},
+    )
+    receipt = json.dumps(payload["card"]["data"], ensure_ascii=False)
+    assert "****3456" in receipt and "0xabcdef123456" not in receipt
+    row = next(
+        f
+        for f in fake_bitable.tables[TBL_REFERRAL].records.values()
+        if f.get(schema.REFERRAL_NO) == "R001"
+    )
+    assert row[schema.REFERRAL_WALLET] == "0xabcdef123456"
+    assert row[schema.REFERRAL_ADDRESS] == "Flat 1\nCentral"
+    assert last_pushed(bots)["header"]["title"]["content"] == "收款资料已保存"
+
+
+def test_收款资料_缺钱包地址回红字(fake_bitable):
+    bots = _payment_bots(fake_bitable)
+    payload = click(
+        bots,
+        cards.ACTION_SUBMIT_PAYMENT,
+        form={**PAYMENT_FORM, cards.F_PAY_WALLET: ""},
+        value={"action": cards.ACTION_SUBMIT_PAYMENT, "referral_no": "R001"},
+    )
+    assert payload["toast"]["type"] == "error" and "钱包地址" in payload["toast"]["content"]
+
+
+def test_收款资料_别人的渠道改不了(fake_bitable):
+    bots = _payment_bots(fake_bitable)
+    click(
+        bots,
+        cards.ACTION_SUBMIT_PAYMENT,
+        form=PAYMENT_FORM,
+        value={"action": cards.ACTION_SUBMIT_PAYMENT, "referral_no": "R999"},
+    )
+    assert "没找到你名下的渠道 R999" in json.dumps(last_pushed(bots), ensure_ascii=False)
+
+
+# ---------- 生成 Invoice ----------
+
+
+class FakeInvoices:
+    def __init__(self, periods=("2026-08",)):
+        self._periods = list(periods)
+        self.calls: list[tuple] = []
+
+    def periods_for(self, sales):
+        return self._periods
+
+    def generate(self, sales, period, *, kinds, paid_on):
+        from crm_basebot.documents.invoice import InvoiceBatch
+
+        self.calls.append((sales.open_id, period, tuple(kinds), paid_on))
+        batch = InvoiceBatch(period=period, paid_on=paid_on)
+        batch.docx["A - Referral Fee Statement (August 2026).docx"] = b"PK"
+        return batch
+
+
+def test_invoice_打开表单列出结算过的月份(fake_bitable):
+    bots = make_handlers(fake_bitable, files=FakeFiles(), invoices=FakeInvoices())
+    click(bots, cards.ACTION_OPEN_INVOICE)
+    card = last_pushed(bots)
+    assert card["header"]["title"]["content"] == "生成 Invoice"
+    assert "2026-08" in json.dumps(card)
+
+
+def test_invoice_没有结算月份就说清楚(fake_bitable):
+    bots = make_handlers(fake_bitable, files=FakeFiles(), invoices=FakeInvoices(periods=()))
+    click(bots, cards.ACTION_OPEN_INVOICE)
+    assert "还没有能出 invoice 的月份" in json.dumps(last_pushed(bots), ensure_ascii=False)
+
+
+def test_invoice_生成后把文件发给点的人(fake_bitable):
+    files, invoices = FakeFiles(), FakeInvoices()
+    bots = make_handlers(fake_bitable, files=files, invoices=invoices)
+    click(
+        bots,
+        cards.ACTION_SUBMIT_INVOICE,
+        form={
+            cards.F_INVOICE_PERIOD: "2026-08",
+            cards.F_INVOICE_KIND: "trade",
+            cards.F_INVOICE_PAY_DATE: "2026-10-10 +0800",
+        },
+    )
+    assert invoices.calls == [(ALICE, "2026-08", ("trade",), date(2026, 10, 10))]
+    assert [(o, n) for o, n, _ in files.sent] == [
+        (ALICE, "A - Referral Fee Statement (August 2026).docx")
+    ]
+    assert last_pushed(bots)["header"]["title"]["content"] == "Invoice · August 2026"
+
+
+def test_invoice_没选付款日期回红字(fake_bitable):
+    bots = make_handlers(fake_bitable, files=FakeFiles(), invoices=FakeInvoices())
+    payload = click(
+        bots,
+        cards.ACTION_SUBMIT_INVOICE,
+        form={cards.F_INVOICE_PERIOD: "2026-08", cards.F_INVOICE_KIND: "both"},
+    )
+    assert payload["toast"]["type"] == "error" and "付款日期" in payload["toast"]["content"]
+
+
+def test_没配文件发送时invoice和协议按钮说未启用(fake_bitable):
+    bots = make_handlers(fake_bitable)
+    click(bots, cards.ACTION_OPEN_INVOICE)
+    assert "未启用" in json.dumps(last_pushed(bots), ensure_ascii=False)

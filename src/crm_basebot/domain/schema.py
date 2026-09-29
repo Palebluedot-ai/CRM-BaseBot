@@ -40,6 +40,19 @@ REFERRAL_SALES_NAME = "负责销售"  # Sales In Charge，姓名。OpenID 补上
 REFERRAL_OWNER = "归属销售"
 REFERRAL_OWNER_OPEN_ID = "登记人OpenID"
 REFERRAL_STATUS = "状态"
+# 出 invoice 要的收款资料（2026-09-29 加的，机器人「登记收款资料」写，「生成 Invoice」读）。
+# 地址用上面那列「地址」，一行一行存（换行分隔，invoice 上最多印三行）。
+# 账号、钱包地址一律文本：账号可能以 0 开头，钱包地址是十六进制串，存成数字就毁了。
+REFERRAL_PAY_METHOD = "收款方式"
+REFERRAL_BANK_ACCOUNT_NAME = "银行户名"
+REFERRAL_BANK_NAME = "银行名称"
+REFERRAL_BANK_ACCOUNT_NO = "银行账号"
+REFERRAL_CRYPTO_TYPE = "币种"
+REFERRAL_WALLET = "钱包地址"
+
+PAY_METHOD_BANK = "银行转账"
+PAY_METHOD_CRYPTO = "加密货币"
+PAY_METHOD_OPTIONS: tuple[str, ...] = (PAY_METHOD_BANK, PAY_METHOD_CRYPTO)
 
 # 只有这两种。没有「待审核」：销售登记完渠道直接生效，不设管理员过目这一步
 # （2026-09-04 定的）。佣金计算也不看状态，停掉的渠道按业务约定根本不在数据里。
@@ -70,6 +83,12 @@ REFERRAL_FIELDS: dict[str, int] = {
     REFERRAL_OWNER: FIELD_TYPE_USER,
     REFERRAL_OWNER_OPEN_ID: FIELD_TYPE_TEXT,
     REFERRAL_STATUS: FIELD_TYPE_SINGLE_SELECT,
+    REFERRAL_PAY_METHOD: FIELD_TYPE_SINGLE_SELECT,
+    REFERRAL_BANK_ACCOUNT_NAME: FIELD_TYPE_TEXT,
+    REFERRAL_BANK_NAME: FIELD_TYPE_TEXT,
+    REFERRAL_BANK_ACCOUNT_NO: FIELD_TYPE_TEXT,
+    REFERRAL_CRYPTO_TYPE: FIELD_TYPE_TEXT,
+    REFERRAL_WALLET: FIELD_TYPE_TEXT,
 }
 
 # R + 3 位自增的自动编号规则。渠道编号已经改成文本列，这条规则不再用于建表，
@@ -129,6 +148,7 @@ CLIENT_FIELDS: dict[str, int] = {
 # 单选列建的时候带上哪些选项。只管新建的列 —— 已经存在的列 sync 不去动它。
 SINGLE_SELECT_OPTIONS: dict[str, tuple[str, ...]] = {
     CLIENT_AI_STATUS: AI_STATUS_OPTIONS,
+    REFERRAL_PAY_METHOD: PAY_METHOD_OPTIONS,
 }
 
 # ---------- 表 3：日读看板（每日交易明细，脚本从 xlsx 导入） ----------

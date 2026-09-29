@@ -407,3 +407,96 @@ def test_补挂脚本预演不写_加apply才补(monkeypatch, fake_bitable, caps
     assert relinker.main(["--apply"]) == 0
     assert "补好了 1 行" in capsys.readouterr().out
     assert fake_bitable.tables[TBL_BOARD].records[row][schema.BOARD_CLIENT_LINK] == [client]
+
+
+# ---------- import_invoice_referrers：invoice 小工具的收款资料搬进 Base ----------
+
+migrator = _load("import_invoice_referrers")
+
+
+def _invoice_db(tmp_path: Path, rows: list[dict]) -> Path:
+    import sqlite3
+
+    path = tmp_path / "app.db"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TABLE referrers (referrer_code TEXT, name TEXT, payment_method TEXT,"
+        " crypto_type TEXT, wallet_address TEXT, bank_account_name TEXT, bank_name TEXT,"
+        " bank_account_no TEXT, address TEXT)"
+    )
+    for row in rows:
+        connection.execute(
+            "INSERT INTO referrers VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                row.get("code", ""),
+                row["name"],
+                row.get("method", "CRYPTO"),
+                row.get("crypto", "USDT-TRC20"),
+                row.get("wallet", ""),
+                "",
+                row.get("bank", ""),
+                row.get("account", ""),
+                row.get("address", ""),
+            ),
+        )
+    connection.commit()
+    connection.close()
+    return path
+
+
+def _payment_columns(fake_bitable):
+    fake_bitable.tables[TBL_REFERRAL].fields = [
+        FieldInfo(field_id=f"f{i}", name=name, type=1, ui_type="Text", is_primary=False)
+        for i, name in enumerate(migrator.PAYMENT_COLUMNS)
+    ]
+
+
+def test_收款资料搬家_按名字对上_只补空的_不打印账号(monkeypatch, fake_bitable, tmp_path, capsys):
+    _wire(monkeypatch, migrator, fake_bitable)
+    _payment_columns(fake_bitable)
+    referrals = fake_bitable.tables[TBL_REFERRAL]
+    polaris = referrals.add_existing(
+        {schema.REFERRAL_NO: "R001", schema.REFERRAL_NAME: "Polaris Capital Ltd"}
+    )
+    keep = referrals.add_existing(
+        {
+            schema.REFERRAL_NO: "R002",
+            schema.REFERRAL_NAME: "KE JIAHUI",
+            schema.REFERRAL_WALLET: "0xALREADY",
+        }
+    )
+    db = _invoice_db(
+        tmp_path,
+        [
+            # 编号写错了也没关系：按名字对
+            {
+                "code": "R099",
+                "name": "POLARIS  CAPITAL LTD",
+                "wallet": "0xSECRET1",
+                "address": "L1\nL2",
+            },
+            {"name": "JIAHUI KE", "wallet": "0xDIFFERENT"},
+            {"name": "Nobody Ltd", "wallet": "0xNOBODY"},
+        ],
+    )
+
+    assert migrator.main(["--db", str(db)]) == 0
+    out = capsys.readouterr().out
+    assert "R001 Polaris Capital Ltd：补 地址、收款方式、币种、钱包地址" in out
+    assert "R002 KE JIAHUI（名字词序不同，核对一下）" in out and "没改：钱包地址" in out
+    assert "Nobody Ltd" in out
+    assert "0xSECRET1" not in out
+    assert fake_bitable.updates == []
+
+    assert migrator.main(["--db", str(db), "--apply"]) == 0
+    assert referrals.records[polaris][schema.REFERRAL_WALLET] == "0xSECRET1"
+    assert referrals.records[polaris][schema.REFERRAL_ADDRESS] == "L1\nL2"
+    assert referrals.records[polaris][schema.REFERRAL_PAY_METHOD] == schema.PAY_METHOD_CRYPTO
+    assert referrals.records[keep][schema.REFERRAL_WALLET] == "0xALREADY"  # 已有的不改
+
+
+def test_收款资料搬家_渠道表还没列就先叫人跑sync(monkeypatch, fake_bitable, tmp_path, capsys):
+    _wire(monkeypatch, migrator, fake_bitable)
+    db = _invoice_db(tmp_path, [{"name": "A", "wallet": "0x1"}])
+    assert migrator.main(["--db", str(db)]) == 1
+    assert "sync_base.py --apply" in capsys.readouterr().out

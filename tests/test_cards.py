@@ -157,6 +157,46 @@ def _detail(**kwargs):
     return cards.referral_detail_card(**base)
 
 
+def _payment_info(empty: bool = False):
+    from crm_basebot.domain.payment import PaymentInfo
+
+    if empty:
+        return PaymentInfo()
+    return PaymentInfo(
+        method=schema.PAY_METHOD_BANK,
+        address_lines=("Flat 1", "Central"),
+        bank_name="DBS",
+        bank_account_no="0123456789",
+    )
+
+
+def _invoice_batch(empty: bool = False):
+    from datetime import date as _date
+    from decimal import Decimal as _Decimal
+
+    from crm_basebot.documents.invoice import Invoice, InvoiceBatch, InvoiceRow, Skipped
+
+    batch = InvoiceBatch(period="2026-08", paid_on=_date(2026, 10, 10))
+    if empty:
+        return batch
+    batch.invoices.append(
+        Invoice(
+            kind="trade",
+            period="2026-08",
+            referral_no="R001",
+            referral_name="甲",
+            fee_rate="20.00%",
+            rows=(InvoiceRow("客户", _Decimal("10")),),
+            total=_Decimal("10"),
+            payment=_payment_info(),
+            itemized=False,
+        )
+    )
+    batch.skipped.append(Skipped("R002", "乙", ("收款方式",)))
+    batch.pdf_note = "不是 Mac"
+    return batch
+
+
 def all_cards() -> list[tuple[str, dict[str, Any]]]:
     """机器人会发出去的每一张卡片。新增卡片时记得挂到这里。"""
     detail_full = _detail(months=_channel_months(), client_names=["甲", "乙"])
@@ -196,6 +236,19 @@ def all_cards() -> list[tuple[str, dict[str, Any]]]:
         ("commission_query_card", cards.commission_query_card("2026-09", ["2026-08", "2026-09"])),
         ("commission_query_card_无月份", cards.commission_query_card("", [])),
         ("with_menu_ECAS结果", cards.with_menu(cards.ecas_result_card("ECAS 返佣", "正文"))),
+        ("agreement_kind_card", cards.agreement_kind_card()),
+        ("agreement_form_card_个人", cards.agreement_form_card("individual")),
+        ("agreement_form_card_企业", cards.agreement_form_card("corporate")),
+        ("payment_pick_card", cards.payment_pick_card(REFERRAL_OPTIONS)),
+        ("payment_pick_card_空", cards.payment_pick_card([])),
+        ("payment_form_card", cards.payment_form_card("R001", "甲", _payment_info())),
+        ("payment_form_card_空", cards.payment_form_card("R001", "甲", _payment_info(empty=True))),
+        ("invoice_form_card", cards.invoice_form_card(["2026-08", "2026-07"])),
+        ("invoice_result_card", cards.with_menu(cards.invoice_result_card(_invoice_batch()))),
+        (
+            "invoice_result_card_空",
+            cards.invoice_result_card(_invoice_batch(empty=True)),
+        ),
     ]
 
 
@@ -618,6 +671,9 @@ MENU_ACTIONS = {
     # ECAS 单独一个入口，不并进「佣金查询」：两笔钱、两套比例、两张汇总表。
     cards.ACTION_OPEN_ECAS_QUERY,
     cards.ACTION_OPEN_AI_FORM,
+    cards.ACTION_OPEN_AGREEMENT,
+    cards.ACTION_OPEN_PAYMENT,
+    cards.ACTION_OPEN_INVOICE,
 }
 
 
@@ -976,4 +1032,4 @@ def test_更新AI表单用UID找客户():
 
 def test_主菜单有更新客户AI状态():
     labels = [b["text"]["content"] for b in components(cards.menu_card("张三"), "button")]
-    assert labels[-1] == "更新客户AI状态"
+    assert "更新客户AI状态" in labels

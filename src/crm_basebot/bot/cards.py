@@ -17,6 +17,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
+from ..documents.agreement import FIELDS, KIND_CORPORATE, KIND_INDIVIDUAL, KIND_LABEL
 from ..domain import schema
 
 ACTION_OPEN_REFERRAL_FORM = "open_referral_form"
@@ -36,6 +37,16 @@ ACTION_QUERY_ECAS = "query_ecas"
 # 补 / 改一个已登记客户的 AI 状态（2026-09-25：客户后来升级了 AI，要能补上日期）。
 ACTION_OPEN_AI_FORM = "open_ai_form"
 ACTION_SUBMIT_AI = "submit_ai"
+# 转介协议（2026-09-29 从 onboard-bot-lark 的「填单」搬过来）：先选个人 / 企业，再填表。
+ACTION_OPEN_AGREEMENT = "open_agreement"
+ACTION_AGREEMENT_FORM = "agreement_form"
+ACTION_SUBMIT_AGREEMENT = "submit_agreement"
+# 收款资料 / invoice（2026-09-29 把 invoice 小工具并进来）。
+ACTION_OPEN_PAYMENT = "open_payment"
+ACTION_PAYMENT_FORM = "payment_form"
+ACTION_SUBMIT_PAYMENT = "submit_payment"
+ACTION_OPEN_INVOICE = "open_invoice"
+ACTION_SUBMIT_INVOICE = "submit_invoice"
 
 # 管理员名下能有上百条渠道。
 #
@@ -65,14 +76,35 @@ F_AI_STATUS = "ai_status"
 F_AI_DATE = "ai_date"
 F_QUERY_PERIOD = "query_period"
 F_ECAS_PERIOD = "ecas_period"
+# 协议表单：各项的 name 就是 documents.agreement.FIELDS 里的 key，另加这两个。
+F_AGREEMENT_PERIOD = "agreement_fee_period"
+F_AGREEMENT_DATE = "agreement_effective_date"
+F_PAY_REFERRAL = "pay_referral"
+F_PAY_METHOD = "pay_method"
+F_PAY_ADDRESS = ("pay_address_1", "pay_address_2", "pay_address_3")
+F_PAY_BANK_ACCOUNT_NAME = "pay_bank_account_name"
+F_PAY_BANK_NAME = "pay_bank_name"
+F_PAY_BANK_ACCOUNT_NO = "pay_bank_account_no"
+F_PAY_CRYPTO_TYPE = "pay_crypto_type"
+F_PAY_WALLET = "pay_wallet"
+F_INVOICE_PERIOD = "invoice_period"
+F_INVOICE_KIND = "invoice_kind"
+F_INVOICE_PAY_DATE = "invoice_payment_date"
 
 
 def _text(content: str, size: str = "normal") -> dict[str, Any]:
     return {"tag": "markdown", "content": content, "text_size": size}
 
 
-def _input(name: str, label: str, placeholder: str, *, required: bool = True) -> dict[str, Any]:
-    return {
+def _input(
+    name: str,
+    label: str,
+    placeholder: str,
+    *,
+    required: bool = True,
+    default: str = "",
+) -> dict[str, Any]:
+    element: dict[str, Any] = {
         "tag": "input",
         "name": name,
         "label": {"tag": "plain_text", "content": label},
@@ -80,9 +112,15 @@ def _input(name: str, label: str, placeholder: str, *, required: bool = True) ->
         "required": required,
         "margin": "0px 0px 8px 0px",
     }
+    # 预填已有的值（例如改收款资料时）。空串不写，免得输入框里出现一个看不见的默认值。
+    if default:
+        element["default_value"] = default
+    return element
 
 
-def _submit(name: str, action: str, text: str = "提交") -> dict[str, Any]:
+def _submit(
+    name: str, action: str, text: str = "提交", *, extra: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """表单容器里的提交按钮。
 
     ``form_action_type`` 不能写成 1.0 时代的 ``action_type: "form_submit"`` ——
@@ -95,7 +133,7 @@ def _submit(name: str, action: str, text: str = "提交") -> dict[str, Any]:
         "text": {"tag": "plain_text", "content": text},
         "type": "primary",
         "form_action_type": "submit",
-        "behaviors": [{"type": "callback", "value": {"action": action}}],
+        "behaviors": [{"type": "callback", "value": {"action": action, **(extra or {})}}],
     }
 
 
@@ -123,13 +161,14 @@ def _select(
     options: list[tuple[str, str]],
     *,
     required: bool = True,
+    initial: str = "",
 ) -> dict[str, Any]:
     """单选下拉。``options`` 是 [(给人看的文字, 回传给我们的值)]。
 
     两者分开传是有意的：标签想写「Monthly（按月）」，但写进 Base 的必须是模板原文
     ``Monthly``，否则单选列里会多出一堆同义选项。
     """
-    return {
+    element: dict[str, Any] = {
         "tag": "select_static",
         "name": name,
         "placeholder": {"tag": "plain_text", "content": placeholder},
@@ -141,6 +180,9 @@ def _select(
         ],
         "margin": "0px 0px 8px 0px",
     }
+    if initial and any(value == initial for _, value in options):
+        element["initial_option"] = initial
+    return element
 
 
 # AI 状态下拉：标签说人话，值是写进 Base 的原文（单选列的三个选项，见 schema）。
@@ -217,6 +259,9 @@ def _menu_buttons() -> list[dict[str, Any]]:
         # 混在一个按钮后面只会让人分不清自己看的是哪一笔（见 docs/ECAS.md）。
         _menu_button("ECAS 返佣", ACTION_OPEN_ECAS_QUERY),
         _menu_button("更新客户AI状态", ACTION_OPEN_AI_FORM),
+        _menu_button("生成转介协议", ACTION_OPEN_AGREEMENT),
+        _menu_button("登记收款资料", ACTION_OPEN_PAYMENT),
+        _menu_button("生成 Invoice", ACTION_OPEN_INVOICE),
     ]
 
 
@@ -862,7 +907,9 @@ def commission_result_card(
     return {"schema": "2.0", "header": header, "body": {"elements": elements}}
 
 
-def submitted_card(title: str, fields: list[tuple[str, str]]) -> dict[str, Any]:
+def submitted_card(
+    title: str, fields: list[tuple[str, str]], *, note: str = "登记结果见下一条消息。"
+) -> dict[str, Any]:
     """登记表单提交之后原地换上的回执：填了什么，一项一项列出来。只读，没有按钮。
 
     表单不能原样留着 —— 留着就能再点一次「提交」，登记出两条一样的渠道。换成这张，
@@ -878,7 +925,318 @@ def submitted_card(title: str, fields: list[tuple[str, str]]) -> dict[str, Any]:
         "body": {
             "elements": [
                 _text("\n".join(lines)),
-                footnote("登记结果见下一条消息。"),
+                footnote(note),
             ]
         },
     }
+
+
+# ---------- 转介协议 ----------
+
+AGREEMENT_PERIOD_CHOICES: list[tuple[str, str]] = [
+    ("Quarterly（按季，默认）", "quarterly"),
+    ("Monthly（按月）", "monthly"),
+]
+
+
+def agreement_kind_card() -> dict[str, Any]:
+    """先选个人还是企业 —— 两种协议要填的东西不一样。"""
+    return {
+        "schema": "2.0",
+        "header": {
+            "title": {"tag": "plain_text", "content": "生成转介协议"},
+            "template": "blue",
+        },
+        "body": {
+            "elements": [
+                _text("转介方是个人还是公司？"),
+                _callback_button(
+                    KIND_LABEL[KIND_INDIVIDUAL],
+                    {"action": ACTION_AGREEMENT_FORM, "kind": KIND_INDIVIDUAL},
+                    primary=True,
+                ),
+                _callback_button(
+                    KIND_LABEL[KIND_CORPORATE],
+                    {"action": ACTION_AGREEMENT_FORM, "kind": KIND_CORPORATE},
+                ),
+                footnote("生成的是 HTS Referral Agreement 的 Word 文件，填的资料不存进 Base。"),
+                back_to_menu_button(),
+            ]
+        },
+    }
+
+
+def agreement_form_card(kind: str) -> dict[str, Any]:
+    """一种协议的表单。提交按钮带着 kind，回调就知道用哪个范本。"""
+    inputs = [
+        _input(f.key, f.label, f.placeholder or "选填", required=f.required) for f in FIELDS[kind]
+    ]
+    return {
+        "schema": "2.0",
+        "header": {
+            "title": {"tag": "plain_text", "content": f"转介协议 · {KIND_LABEL[kind]}"},
+            "template": "blue",
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "form",
+                    "name": "agreement_form",
+                    "elements": [
+                        *inputs,
+                        _text("**结算周期**（不选就是按季）"),
+                        _select(
+                            F_AGREEMENT_PERIOD,
+                            "选择结算周期",
+                            AGREEMENT_PERIOD_CHOICES,
+                            required=False,
+                        ),
+                        _text("**生效日期**（不选就是今天）"),
+                        _date_picker(F_AGREEMENT_DATE, "选择生效日期", required=False),
+                        _submit(
+                            "agreement_submit",
+                            ACTION_SUBMIT_AGREEMENT,
+                            "生成协议",
+                            extra={"kind": kind},
+                        ),
+                    ],
+                },
+                footnote(
+                    "费率填数字，例如 40 表示 40%。填的资料只用来生成这一份协议，不存进 Base。"
+                ),
+                back_to_menu_button(),
+            ]
+        },
+    }
+
+
+# ---------- 收款资料 ----------
+
+
+def _channel_options(referral_options: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    return [
+        (f"{no} {name}".strip() if name else f"{no}（未命名）", no) for no, name in referral_options
+    ]
+
+
+def payment_pick_card(referral_options: list[tuple[str, str]]) -> dict[str, Any]:
+    """第一步：选渠道。选好了下一张表单会把这个渠道已有的资料预填上。"""
+    if not referral_options:
+        return notice_card("还不能登记收款资料", "你名下还没有渠道。请先登记渠道。")
+    return {
+        "schema": "2.0",
+        "header": {
+            "title": {"tag": "plain_text", "content": "登记收款资料"},
+            "template": "blue",
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "form",
+                    "name": "payment_pick_form",
+                    "elements": [
+                        _text("**哪个渠道？**"),
+                        _select(
+                            F_PAY_REFERRAL,
+                            "选择一个你名下的渠道",
+                            _channel_options(referral_options),
+                        ),
+                        _submit("payment_pick_submit", ACTION_PAYMENT_FORM, "下一步"),
+                    ],
+                },
+                footnote("地址、银行账户或钱包地址，出 invoice 时印在上面。"),
+                back_to_menu_button(),
+            ]
+        },
+    }
+
+
+PAY_METHOD_CHOICES: list[tuple[str, str]] = [
+    (f"{schema.PAY_METHOD_BANK}（USD，出银行版 invoice）", schema.PAY_METHOD_BANK),
+    (f"{schema.PAY_METHOD_CRYPTO}（USDT 等，出加密货币版 invoice）", schema.PAY_METHOD_CRYPTO),
+]
+
+
+def payment_form_card(referral_no: str, name: str, info: Any) -> dict[str, Any]:
+    """第二步：这个渠道的收款资料，已有的预填上，改哪格填哪格。"""
+    lines = list(info.address_lines) + [""] * 3
+    return {
+        "schema": "2.0",
+        "header": {
+            "title": {"tag": "plain_text", "content": f"收款资料 · {referral_no} {name}".strip()},
+            "template": "blue",
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "form",
+                    "name": "payment_form",
+                    "elements": [
+                        _input(
+                            F_PAY_ADDRESS[0], "地址第 1 行", "例如 Flat 1, 5/F", default=lines[0]
+                        ),
+                        _input(
+                            F_PAY_ADDRESS[1],
+                            "地址第 2 行",
+                            "选填",
+                            required=False,
+                            default=lines[1],
+                        ),
+                        _input(
+                            F_PAY_ADDRESS[2],
+                            "地址第 3 行",
+                            "选填",
+                            required=False,
+                            default=lines[2],
+                        ),
+                        _text("**收款方式**"),
+                        _select(
+                            F_PAY_METHOD, "选择收款方式", PAY_METHOD_CHOICES, initial=info.method
+                        ),
+                        _text("**银行转账**填这三格"),
+                        _input(
+                            F_PAY_BANK_ACCOUNT_NAME,
+                            "银行户名（不填就用渠道名称）",
+                            "选填",
+                            required=False,
+                            default=info.bank_account_name,
+                        ),
+                        _input(
+                            F_PAY_BANK_NAME,
+                            "银行名称",
+                            "例如 DBS Bank Ltd",
+                            required=False,
+                            default=info.bank_name,
+                        ),
+                        _input(
+                            F_PAY_BANK_ACCOUNT_NO,
+                            "银行账号",
+                            "例如 0123456789",
+                            required=False,
+                            default=info.bank_account_no,
+                        ),
+                        _text("**加密货币**填这两格"),
+                        _input(
+                            F_PAY_CRYPTO_TYPE,
+                            "币种（不填就是 USDT）",
+                            "例如 USDT-ERC20",
+                            required=False,
+                            default=info.crypto_type,
+                        ),
+                        _input(
+                            F_PAY_WALLET,
+                            "钱包地址",
+                            "0x...",
+                            required=False,
+                            default=info.wallet_address,
+                        ),
+                        _submit(
+                            "payment_submit",
+                            ACTION_SUBMIT_PAYMENT,
+                            "保存",
+                            extra={"referral_no": referral_no},
+                        ),
+                    ],
+                },
+                footnote("只填你选的那种收款方式就行，另一种的格子空着没关系。"),
+                back_to_menu_button(),
+            ]
+        },
+    }
+
+
+# ---------- invoice ----------
+
+INVOICE_KIND_BOTH = "both"
+# 下拉的值 -> 要出哪几种（documents.invoice 的 KIND_*）。
+INVOICE_KINDS: dict[str, tuple[str, ...]] = {
+    INVOICE_KIND_BOTH: ("trade", "ecas"),
+    "trade": ("trade",),
+    "ecas": ("ecas",),
+}
+INVOICE_KIND_CHOICES: list[tuple[str, str]] = [
+    ("交易佣金 + ECAS 返佣（各出一份）", INVOICE_KIND_BOTH),
+    ("只要交易佣金", "trade"),
+    ("只要 ECAS 返佣", "ecas"),
+]
+
+
+def invoice_form_card(periods: list[str]) -> dict[str, Any]:
+    """选月份、类型、付款日期。月份只列结算表里真有记录的。"""
+    return {
+        "schema": "2.0",
+        "header": {
+            "title": {"tag": "plain_text", "content": "生成 Invoice"},
+            "template": "blue",
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "form",
+                    "name": "invoice_form",
+                    "elements": [
+                        _text("**哪个月？**"),
+                        _select(
+                            F_INVOICE_PERIOD,
+                            "选择月份",
+                            [(period, period) for period in periods],
+                            initial=periods[0] if periods else "",
+                        ),
+                        _text("**出哪种？**"),
+                        _select(
+                            F_INVOICE_KIND,
+                            "选择类型",
+                            INVOICE_KIND_CHOICES,
+                            initial=INVOICE_KIND_BOTH,
+                        ),
+                        _text("**付款日期**（印在 invoice 上）"),
+                        _date_picker(F_INVOICE_PAY_DATE, "选择付款日期"),
+                        _submit("invoice_submit", ACTION_SUBMIT_INVOICE, "生成"),
+                    ],
+                },
+                footnote(
+                    "金额取自每月 3 号结算写进去的结算表，就是实际要付的数。"
+                    "你名下的渠道各出一份；多份会打成一个 zip。"
+                ),
+                back_to_menu_button(),
+            ]
+        },
+    }
+
+
+def invoice_result_card(batch: Any) -> dict[str, Any]:
+    """出了哪些、跳过了哪些、哪些只印了总额。文件在上面几条消息里。"""
+    from ..documents.invoice import KIND_LABEL, month_label
+
+    title = f"Invoice · {month_label(batch.period)}"
+    if not batch.invoices and not batch.skipped:
+        return notice_card(title, "这个月你名下的渠道在结算表里没有要付的钱，没有要出的 invoice。")
+
+    parts: list[str] = []
+    if batch.invoices:
+        lines = [
+            f"· {inv.referral_no} {inv.referral_name}　{KIND_LABEL[inv.kind]}　{inv.total:,.2f} USD"
+            for inv in batch.invoices
+        ]
+        parts.append(f"**已生成 {len(batch.invoices)} 份**（文件在上面）\n" + "\n".join(lines))
+    if batch.skipped:
+        lines = [
+            f"· {s.referral_no} {s.referral_name}：缺 {'、'.join(s.missing)}" for s in batch.skipped
+        ]
+        parts.append(
+            "**这几个渠道没出**：收款资料还不全，先用「登记收款资料」补上再来出。\n"
+            + "\n".join(lines)
+        )
+    if batch.summary_only:
+        names = "、".join(
+            f"{inv.referral_no}（{KIND_LABEL[inv.kind]}）" for inv in batch.summary_only
+        )
+        parts.append(
+            f"**只印了总额、没列客户明细**：{names}。结算之后客户或比例有变，"
+            "现算的明细和结算表对不上 —— 总额以结算表为准。"
+        )
+    if batch.pdf_note:
+        parts.append(f"<font color='grey'>{batch.pdf_note}</font>")
+
+    template = "green" if batch.invoices and not batch.skipped else "orange"
+    return notice_card(title, "\n\n".join(parts), template=template)

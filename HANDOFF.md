@@ -234,6 +234,9 @@ uv run python -m crm_basebot.app        # 机器人（长连接，不需要公�
   Base 版，`sync_base.py --apply` 逐行核对两边。`verify_commission.py` 只核对关联和比例。
 - **晚登记的客户每天补挂**：看板的「客户」关联只在写入时挂，每天导入顺手补上客户晚登记的老行
   （`pipeline/board.relink_missing`，也可以手动跑 `scripts/relink_board.py`）。
+- **协议和 invoice 是发文件**（2026-09-29 并进来）：协议范本从 onboard-bot-lark 搬来、不写 Base；
+  invoice 金额只认两张结算表，收款资料在渠道表上。都要应用开 `im:resource`；invoice 转 PDF 要
+  跑机器人的那台 Mac 装着 Microsoft Word。更新代码后要 `uv sync`（多了 docxtpl / docx2pdf）。
 - **只导新加坡站**：站点是「新加坡站」的行才进看板，其它站点解析完就丢（既定口径）。
 - **关联一律按业务键**：客户 ↔ 渠道用「渠道编号」，看板 → 客户用「客户UID」。
   **不要**按姓名匹配（大小写/last-first 颠倒会错，原主人踩过）。

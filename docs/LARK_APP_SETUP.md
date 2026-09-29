@@ -123,6 +123,7 @@ LARK_APP_SECRET=你的secret
 | `bitable:app` | 查看、评论、编辑和管理多维表格 | 读写多维表格。渠道、客户、佣金、审计全靠它 |
 | `im:message.p2p_msg:readonly` | 读取用户发给机器人的单聊消息<br>英文后台：Get direct messages sent to bot | **第 5 步订阅 `im.message.receive_v1` 的前置条件**。销售私聊机器人的消息靠它推过来 |
 | `im:message:send_as_bot` | 以应用的身份发消息 | 以机器人身份发消息和卡片 |
+| `im:resource` | 获取与上传图片或文件资源 | 发文件：「生成转介协议」「生成 Invoice」先上传文件再发出去（2026-09-29 加的）。没开的话这两个按钮回一句「上传不上飞书」，其余功能不受影响 |
 | `contact:user.base:readonly` | 获取用户基本信息 | 用 open_id 反查姓名。**当前代码没调用**（卡片上的姓名读的是 Base 里的销售名册表），一起申请的理由见 [IT_APPROVAL.md](IT_APPROVAL.md) 第四节 |
 
 ### 接收消息的权限不是 `im:message`

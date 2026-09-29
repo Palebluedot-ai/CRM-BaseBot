@@ -51,9 +51,14 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
     P2CardActionTriggerResponse,
 )
 
+from ..documents import agreement
+from ..documents.agreement import AgreementError
+from ..domain import schema
 from ..domain.dates import DEFAULT_BUSINESS_TIMEZONE, months_ending, ms_to_date, period_of_day
+from ..domain.payment import PaymentInfo, masked
 from ..domain.referral import ReferralInput, ValidationError
 from ..domain.referred_client import ClientInput, validated_ai
+from ..lark.files import FileSendError
 from ..lark.values import to_number
 from . import cards
 from .auth import AuthError
@@ -115,6 +120,9 @@ class BotHandlers:
         commission_query=None,
         ecas_query=None,
         referral_history=None,
+        files=None,
+        payments=None,
+        invoices=None,
         background: Callable[[Callable[[], None]], None] = _run_in_thread,
         tz: tzinfo = DEFAULT_BUSINESS_TIMEZONE,
         greet_cooldown_seconds: float = GREET_COOLDOWN_SECONDS,
@@ -132,6 +140,11 @@ class BotHandlers:
         self._ecas_query = ecas_query
         # 详情卡上的「近 3 个月」。没注入就不显示那一节，卡片其余部分照常。
         self._referral_history = referral_history
+        # 发文件（协议、invoice）。没注入时那几个按钮回一句「未启用」。
+        self._files = files
+        # 收款资料（domain.payment.PaymentService）和 invoice（documents.invoice）。
+        self._payments = payments
+        self._invoices = invoices
         self._background = background
         self._tz = tz
         self._greet_cooldown = greet_cooldown_seconds
@@ -282,6 +295,31 @@ class BotHandlers:
 
         if action == cards.ACTION_QUERY_ECAS:
             return self._query_ecas(sales, form)
+
+        if action == cards.ACTION_OPEN_AGREEMENT:
+            return self._push(sales, cards.agreement_kind_card)
+
+        if action == cards.ACTION_AGREEMENT_FORM:
+            kind = _agreement_kind(action_value)
+            return self._push(sales, lambda: cards.agreement_form_card(kind))
+
+        if action == cards.ACTION_SUBMIT_AGREEMENT:
+            return self._submit_agreement(sales, form, action_value)
+
+        if action == cards.ACTION_OPEN_PAYMENT:
+            return self._open_payment(sales)
+
+        if action == cards.ACTION_PAYMENT_FORM:
+            return self._payment_form(sales, form)
+
+        if action == cards.ACTION_SUBMIT_PAYMENT:
+            return self._submit_payment(sales, form, action_value)
+
+        if action == cards.ACTION_OPEN_INVOICE:
+            return self._open_invoice(sales)
+
+        if action == cards.ACTION_SUBMIT_INVOICE:
+            return self._submit_invoice(sales, form)
 
         logger.warning("未知的卡片动作: %r", action)
         return self._push(
@@ -619,6 +657,202 @@ class BotHandlers:
             sales, build, toast=f"正在查询 {period}", failure="查询 ECAS 返佣失败，请稍后重试。"
         )
 
+    # ---------- 转介协议 ----------
+
+    def _submit_agreement(self, sales, form, action_value) -> P2CardActionTriggerResponse:
+        """填好的协议表单 -> Word 文件发给这个人。不写 Base。
+
+        校验（缺项、邮箱、费率）在回调里做，填错回 toast、表单留着；生成和上传在后台，
+        文件作为新消息发出来，表单换成回执（不然能再点一次，生成两份）。
+        """
+        if self._files is None:
+            return self._unavailable(sales, "生成转介协议")
+
+        kind = _agreement_kind(action_value)
+        values = {field.key: _form_text(form, field.key) for field in agreement.FIELDS[kind]}
+        period = _select_value(form.get(cards.F_AGREEMENT_PERIOD))
+        effective = _form_date(form, cards.F_AGREEMENT_DATE, tz=self._tz) or self._today()
+        try:
+            plan = agreement.plan(kind, values, fee_period=period, effective=effective)
+        except AgreementError as exc:
+            raise ValidationError(str(exc)) from exc
+
+        target = sales.open_id
+        files = self._files
+
+        def worker() -> None:
+            try:
+                files.send(target, plan.filename, agreement.render(plan))
+            except (AgreementError, FileSendError) as exc:
+                self._send_to_user(target, cards.with_menu(cards.error_card(str(exc))))
+                return
+            except Exception:
+                logger.exception("生成转介协议失败 open_id=%s", target)
+                self._send_to_user(target, cards.with_menu(cards.error_card(SYSTEM_ERROR)))
+                return
+            self._send_to_user(
+                target,
+                cards.with_menu(
+                    cards.success_card(
+                        "协议已生成", f"**{plan.filename}** 在上一条消息里，下载后发给对方签署。"
+                    )
+                ),
+            )
+
+        self._background(worker)
+        return _card_response(
+            cards.submitted_card(
+                "生成转介协议",
+                [
+                    ("类型", agreement.KIND_LABEL[kind]),
+                    ("名称", plan.primary_name),
+                    ("费率", plan.tokens["REFERRAL_FEE_PCT"]),
+                    ("结算周期", plan.tokens["FEE_PERIOD"]),
+                    ("生效日期", plan.tokens["EFFECTIVE_DATE"]),
+                ],
+                note="协议文件见下一条消息。",
+            ),
+            toast="已提交",
+        )
+
+    # ---------- 收款资料 ----------
+
+    def _open_payment(self, sales) -> P2CardActionTriggerResponse:
+        if self._payments is None:
+            return self._unavailable(sales, "登记收款资料")
+
+        def build() -> dict[str, Any]:
+            options = self._referrals.list_for(sales)
+            card = cards.payment_pick_card(options)
+            return card if options else cards.with_menu(card)
+
+        return self._push(sales, build)
+
+    def _payment_form(self, sales, form) -> P2CardActionTriggerResponse:
+        if self._payments is None:
+            return self._unavailable(sales, "登记收款资料")
+        referral_no = _select_value(form.get(cards.F_PAY_REFERRAL)).strip()
+        if not referral_no:
+            raise ValidationError("先选一个渠道")
+        payments = self._payments
+
+        def build() -> dict[str, Any]:
+            item = payments.get(sales, referral_no)
+            return cards.payment_form_card(item.no, item.name, item.info)
+
+        return self._push(sales, build)
+
+    def _submit_payment(self, sales, form, action_value) -> P2CardActionTriggerResponse:
+        """保存收款资料。格式在回调里校验（填错回 toast），写表在后台。"""
+        if self._payments is None:
+            return self._unavailable(sales, "登记收款资料")
+        referral_no = _referral_no(action_value)
+        if not referral_no:
+            raise ValidationError("不知道是哪个渠道，请回主菜单重新点「登记收款资料」。")
+        info = PaymentInfo(
+            method=_select_value(form.get(cards.F_PAY_METHOD)),
+            address_lines=tuple(_form_text(form, key) for key in cards.F_PAY_ADDRESS),
+            bank_account_name=_form_text(form, cards.F_PAY_BANK_ACCOUNT_NAME).strip(),
+            bank_name=_form_text(form, cards.F_PAY_BANK_NAME).strip(),
+            bank_account_no=_form_text(form, cards.F_PAY_BANK_ACCOUNT_NO).strip(),
+            crypto_type=_form_text(form, cards.F_PAY_CRYPTO_TYPE).strip(),
+            wallet_address=_form_text(form, cards.F_PAY_WALLET).strip(),
+        ).validated()
+        target = sales.open_id
+        payments = self._payments
+
+        def worker() -> None:
+            try:
+                saved = payments.update(sales, referral_no, info)
+            except (ValidationError, AuthError) as exc:
+                self._send_to_user(target, cards.with_menu(cards.error_card(str(exc))))
+                return
+            except Exception:
+                logger.exception("保存收款资料失败 open_id=%s", target)
+                self._send_to_user(target, cards.with_menu(cards.error_card(SYSTEM_ERROR)))
+                return
+            self._send_to_user(
+                target,
+                cards.with_menu(
+                    cards.success_card(
+                        "收款资料已保存",
+                        f"**{saved.no} {saved.name}**：{_payment_summary(info)}。"
+                        "出 invoice 时会用这一份。",
+                    )
+                ),
+            )
+
+        self._background(worker)
+        return _card_response(
+            cards.submitted_card(
+                "登记收款资料",
+                [
+                    ("渠道", referral_no),
+                    ("地址", " / ".join(info.address_lines)),
+                    ("收款方式", _payment_summary(info)),
+                ],
+                note="保存结果见下一条消息。",
+            ),
+            toast="已提交",
+        )
+
+    # ---------- invoice ----------
+
+    def _open_invoice(self, sales) -> P2CardActionTriggerResponse:
+        if self._invoices is None or self._files is None:
+            return self._unavailable(sales, "生成 Invoice")
+        invoices = self._invoices
+
+        def build() -> dict[str, Any]:
+            periods = invoices.periods_for(sales)
+            if not periods:
+                return cards.with_menu(
+                    cards.notice_card(
+                        "还没有能出 invoice 的月份",
+                        "你名下的渠道在两张结算表（交易佣金、ECAS）里都还没有记录。"
+                        "每月 3 号结算完上个月之后再来。",
+                    )
+                )
+            return cards.invoice_form_card(periods)
+
+        return self._push(sales, build, failure="读取结算月份失败，请稍后重试。")
+
+    def _submit_invoice(self, sales, form) -> P2CardActionTriggerResponse:
+        """按选的月份、类型、付款日期出 invoice。都在后台：读表、生成 Word、转 PDF。"""
+        if self._invoices is None or self._files is None:
+            return self._unavailable(sales, "生成 Invoice")
+        period = _select_value(form.get(cards.F_INVOICE_PERIOD)).strip()
+        if not _is_period(period):
+            raise ValidationError("先选一个月份")
+        kind = _select_value(form.get(cards.F_INVOICE_KIND)).strip() or cards.INVOICE_KIND_BOTH
+        if kind not in cards.INVOICE_KINDS:
+            raise ValidationError("类型没选对")
+        pay_date = _form_date(form, cards.F_INVOICE_PAY_DATE, tz=self._tz)
+        if pay_date is None:
+            raise ValidationError("付款日期要选一个日期")
+
+        target = sales.open_id
+        invoices = self._invoices
+        files = self._files
+
+        wanted = cards.INVOICE_KINDS[kind]
+
+        def build() -> dict[str, Any]:
+            batch = invoices.generate(sales, period, kinds=wanted, paid_on=pay_date)
+            try:
+                for filename, data in batch.files():
+                    files.send(target, filename, data)
+            except FileSendError as exc:
+                raise ValidationError(str(exc)) from exc
+            return cards.with_menu(cards.invoice_result_card(batch))
+
+        return self._push(
+            sales,
+            build,
+            toast=f"正在生成 {period} 的 invoice",
+            failure="生成 invoice 失败，请稍后重试或联系管理员。",
+        )
+
     # ---------- 发消息 ----------
 
     def _send(self, chat_id: str, card: dict[str, Any]) -> None:
@@ -690,6 +924,20 @@ def _page_index(action_value: dict[str, Any]) -> int:
     if isinstance(raw, str) and raw.isdigit():
         return int(raw)
     return 0
+
+
+def _payment_summary(info: PaymentInfo) -> str:
+    """回执上的一句：账号、钱包只露最后 4 位。"""
+    if info.method == schema.PAY_METHOD_BANK:
+        return f"{info.method}，{info.bank_name} {masked(info.bank_account_no)}"
+    return f"{info.method}，{info.crypto_type} {masked(info.wallet_address)}"
+
+
+def _agreement_kind(action_value: dict[str, Any]) -> str:
+    kind = str(action_value.get("kind") or "")
+    if kind not in agreement.KINDS:
+        raise ValidationError("协议类型没选对，请回主菜单重新点「生成转介协议」。")
+    return kind
 
 
 def _referral_no(action_value: dict[str, Any]) -> str:

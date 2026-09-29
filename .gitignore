@@ -47,3 +47,6 @@ htmlcov/
 # 每日跑批的产物：抓下来的附件（*.xlsx 已在上面忽略）和 launchd 日志
 /attachments/
 /logs/
+
+# 机器人生成的 invoice（含收款账号），留在出它的那台机器上，绝不入库
+output/

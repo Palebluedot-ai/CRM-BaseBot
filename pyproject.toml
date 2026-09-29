@@ -15,6 +15,8 @@ dependencies = [
     # 日读看板从 xlsx 导入 —— CSV 不行：Excel 会把 18-19 位 UID 抹掉低位，
     # 见 lark/values.py 里 EXCEL_SIGNIFICANT_DIGITS 的说明。
     "openpyxl>=3.1",
+    "docxtpl>=0.20.2",
+    "docx2pdf>=0.1.8 ; sys_platform == 'darwin'",
 ]
 
 [dependency-groups]
