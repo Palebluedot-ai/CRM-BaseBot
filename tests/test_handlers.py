@@ -1468,3 +1468,34 @@ def test_invoice_先说正在生成_再发结果(fake_bitable):
     )
     titles = [card["header"]["title"]["content"] for card in pushed(bots)]
     assert titles[-2:] == ["⏳ 正在生成 2026-08 的 invoice", "Invoice · August 2026"]
+
+
+def test_协议_PDF发送失败时Word已经到手_说明原因(fake_bitable):
+    from crm_basebot.lark.files import FileSendError
+
+    class PdfFails(FakeFiles):
+        def send(self, open_id, filename, data):
+            if filename.endswith(".pdf"):
+                raise FileSendError("上传失败")
+            super().send(open_id, filename, data)
+
+    files = PdfFails()
+    bots = make_handlers(
+        fake_bitable,
+        files=files,
+        pdf_converter=lambda docx: ({n.replace(".docx", ".pdf"): b"%PDF" for n in docx}, ""),
+    )
+    _submit_agreement(bots, AGREEMENT_FORM)
+    assert [name for _, name, _ in files.sent] == ["HTS Referral Agreement - Zhang San.docx"]
+    card = last_pushed(bots)
+    assert card["header"]["title"]["content"] == "协议已生成"
+    assert "PDF 没发出去" in _text(card)
+
+
+def test_更新AI_UID空着说不能为空(handlers):
+    payload = click(
+        handlers,
+        cards.ACTION_SUBMIT_AI,
+        form={cards.F_AI_UID: "", cards.F_AI_STATUS: schema.AI_STATUS_ALREADY},
+    )
+    assert "客户UID 不能为空" in payload["toast"]["content"]

@@ -187,7 +187,7 @@ def _select(
 
 # AI 状态下拉：标签说人话，值是写进 Base 的原文（单选列的三个选项，见 schema）。
 AI_CHOICES: list[tuple[str, str]] = [
-    (f"{schema.AI_STATUS_ALREADY}（登记时已经是 AI）", schema.AI_STATUS_ALREADY),
+    (f"{schema.AI_STATUS_ALREADY}（开户时就是 AI，所有交易都算）", schema.AI_STATUS_ALREADY),
     (f"{schema.AI_STATUS_UPGRADED}（先是普通客户，后来升级）", schema.AI_STATUS_UPGRADED),
     (f"{schema.AI_STATUS_NOT}（暂不算交易佣金）", schema.AI_STATUS_NOT),
 ]
@@ -374,6 +374,8 @@ def referral_form_card() -> dict[str, Any]:
 
 def client_form_card(referral_options: list[tuple[str, str]]) -> dict[str, Any]:
     """``referral_options`` 是 [(编号, 名称)]，只包含该销售名下的渠道。"""
+    # 编号还空着的渠道（自动编号还没回填）挂不了客户，下拉里也不能有空值的选项。
+    referral_options = [(no, name) for no, name in referral_options if no.strip()]
     if not referral_options:
         return notice_card(
             "还不能登记客户",
@@ -407,7 +409,8 @@ def client_form_card(referral_options: list[tuple[str, str]]) -> dict[str, Any]:
                     ],
                 },
                 _text(
-                    "<font color='grey'>客户UID 要和交易明细表里的完全一致，"
+                    "<font color='grey'>客户UID 要和看板（Daily Revenue Board）里的"
+                    "用户ID 完全一致，"
                     f"否则佣金对不上。{AI_RULE_NOTE}</font>",
                     size="notation",
                 ),
@@ -781,8 +784,9 @@ def ecas_query_card(default_period: str, period_options: list[str]) -> dict[str,
                 },
                 footnote(
                     "ECAS 开户返佣，和交易佣金是两笔钱。"
-                    "只显示你名下渠道介绍的开户；管理员可以看全部。"
+                    "只显示你名下渠道介绍的开户（名册「机器人可见范围」是看全部的人看全部）。"
                 ),
+                back_to_menu_button(),
             ]
         },
     }
@@ -830,8 +834,10 @@ def commission_query_card(default_period: str, period_options: list[str]) -> dic
                     ],
                 },
                 footnote(
-                    "列出这个月和前两个月，你名下每个渠道、每个客户的佣金。管理员可以看全部渠道。"
+                    "列出这个月和前两个月，你名下每个渠道、每个客户的佣金"
+                    "（名册「机器人可见范围」是看全部的人看全部渠道）。"
                 ),
+                back_to_menu_button(),
             ]
         },
     }
@@ -870,7 +876,8 @@ def commission_result_card(
                 "elements": [
                     _text(
                         f"{viewer_name} 名下 {span} 没有佣金。\n\n"
-                        "可能原因：这几个月看板里没有你名下客户的交易；或者客户还没登记归属。"
+                        "可能原因：这几个月看板里没有你名下客户的交易；客户还没登记归属；"
+                        "或者客户是非 AI、升级日期还没补（升级当天及之前的交易不算）。"
                     )
                 ]
             },
@@ -971,7 +978,7 @@ def agreement_kind_card() -> dict[str, Any]:
         },
         "body": {
             "elements": [
-                _text("转介方是个人还是公司？"),
+                _text("转介方是个人还是企业？"),
                 _callback_button(
                     KIND_LABEL[KIND_INDIVIDUAL],
                     {"action": ACTION_AGREEMENT_FORM, "kind": KIND_INDIVIDUAL},
@@ -1043,6 +1050,7 @@ def _channel_options(referral_options: list[tuple[str, str]]) -> list[tuple[str,
 
 def payment_pick_card(referral_options: list[tuple[str, str]]) -> dict[str, Any]:
     """第一步：选渠道。选好了下一张表单会把这个渠道已有的资料预填上。"""
+    referral_options = [(no, name) for no, name in referral_options if no.strip()]
     if not referral_options:
         return notice_card("还不能登记收款资料", "你名下还没有渠道。请先登记渠道。")
     return {
@@ -1222,7 +1230,7 @@ def invoice_form_card(periods: list[str]) -> dict[str, Any]:
                 },
                 footnote(
                     "金额取自每月 3 号结算写进去的结算表，就是实际要付的数。"
-                    "你名下的渠道各出一份；多份会打成一个 zip。"
+                    "每个渠道、每种佣金各出一份（Word + PDF）；超过一份会打成一个 zip。"
                 ),
                 back_to_menu_button(),
             ]
@@ -1264,7 +1272,8 @@ def invoice_result_card(batch: Any) -> dict[str, Any]:
             f"{inv.referral_no}（{KIND_LABEL[inv.kind]}）" for inv in batch.reallocated
         )
         parts.append(
-            f"**这几份的客户明细是按结算金额重新分摊的**：{names}。结算之后比例或客户变过，"
+            f"**这几份的客户明细是按结算金额重新分摊的**：{names}。现算的客户明细和结算表"
+            "对不上（结算之后比例、客户或 AI 状态变过，或者有客户当月是负数），"
             "每个客户的数按收入占比从结算总额分下来，总额以结算表为准。"
         )
     if batch.summary_only:
@@ -1272,8 +1281,8 @@ def invoice_result_card(batch: Any) -> dict[str, Any]:
             f"{inv.referral_no}（{KIND_LABEL[inv.kind]}）" for inv in batch.summary_only
         )
         parts.append(
-            f"**只印了总额**：{names}。这个渠道现在一个客户都找不到（可能被删了或改挂了别的渠道），"
-            "没法列明细。总额以结算表为准。"
+            f"**只印了总额**：{names}。这个渠道现在找不到可以列的客户（可能被删了、改挂了"
+            "别的渠道，或者 AI 状态改过），没法列明细。总额以结算表为准。"
         )
     if batch.pdf_note:
         parts.append(f"<font color='grey'>{batch.pdf_note}</font>")

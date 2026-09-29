@@ -242,6 +242,8 @@ def test_开户即AI可以不填日期(fake_bitable, services):
         ("随便写", None, "AI 状态要选一个"),
         (schema.AI_STATUS_UPGRADED, None, "要填升级日期"),
         (schema.AI_STATUS_NOT, AI_DAY, "不用填升级日期"),
+        # 开户即AI 所有交易都算：带着日期回执会写「…起」，看着像从那天才算
+        (schema.AI_STATUS_ALREADY, AI_DAY, "不用填日期"),
     ],
 )
 def test_AI状态和日期的校验(status, day, words):

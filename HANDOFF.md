@@ -57,9 +57,9 @@
 **飞书账号**（这一步最容易踩坑）
 
 - **必须是「企业/团队」账号，个人版不行**：个人版没有管理后台，而「开权限」「发版」都要管理员在后台点通过 —— 个人版里应用永远发不出去（拿到 App ID 也没用，权限和机器人能力都不生效）。自建免费企业即可，不需要营业执照。+86 手机号建飞书企业；只有港号走国际版 Lark。
-- 权限清单（**一次开齐**，免得反复发版）：`bitable:app`（必须）· `im:message.p2p_msg:readonly` + `im:message:send_as_bot`（机器人用）· `contact:user.base:readonly`（可选，当前代码没调用）。
+- 权限清单（**一次开齐**，免得反复发版）：`bitable:app`（必须）· `im:message.p2p_msg:readonly` + `im:message:send_as_bot`（机器人用）· `im:resource`（发协议、invoice 文件）· `contact:user.base:readonly`（可选，当前代码没调用）。
   **注意**：接收消息用的是 `im:message.p2p_msg:readonly`，**不是** `im:message`（官方事件文档里才写得对，见 `docs/LARK_APP_SETUP.md` 第 4 步）。
-- 事件订阅：`im.message.receive_v1` + 卡片回调 `card.action.trigger`，用**长连接**（不需要公网地址）。
+- 事件订阅：`im.message.receive_v1` + `im.chat.access_event.bot_p2p_chat_entered_v1`（用户进入和机器人的单聊，打开对话自动弹菜单）+ 卡片回调 `card.action.trigger`，用**长连接**（不需要公网地址）。
 - Base 不用手工建：第 3 步的方案 A 会让应用自己建一个（顺带省掉「把应用加成协作者」这个 403 坑）。
 
 **可选**（只有「每天自动取数」需要）：Microsoft Entra 应用 + `Mail.Read` 应用权限并限定到一个邮箱。没有也能用：手工把 xlsx 放进 `attachments/` 再跑导入。
@@ -147,7 +147,8 @@ uv run python scripts/verify_commission.py     # 期望：结论「逐行一致�
 ```
 
 `verify_commission.py` 不看 Base 的公式列，自己按 `用户ID → 客户表 → 所属渠道 → 分佣比例`
-复算一遍再逐行对比。它报「逐行一致」就说明**关联没搬错、公式在算、钱算得对**。
+复算一遍再逐行对比。它报「逐行一致」就说明**关联没搬错、比例对得上**（它不看 AI 规则，
+钱对不对以月结为准）。
 
 ## 5. 还需要人做的两件（机器代劳不了）
 

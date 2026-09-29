@@ -1048,3 +1048,14 @@ def test_主菜单每项emoji在前_左对齐_整条可点():
         assert label["content"] == f"{emoji}　{text}" and label["text_align"] == "left"
         assert item["width"] == "fill"
         assert item["behaviors"] == [{"type": "callback", "value": {"action": action}}]
+
+
+def test_编号空着的渠道不进下拉():
+    options = [("R001", "北极星资本"), ("", "还没编号")]
+    for card in (cards.client_form_card(options), cards.payment_pick_card(options)):
+        channel = [
+            s
+            for s in components(card, "select_static")
+            if s["name"] in (cards.F_CLIENT_REFERRAL, cards.F_PAY_REFERRAL)
+        ]
+        assert [o["value"] for s in channel for o in s["options"]] == ["R001"]

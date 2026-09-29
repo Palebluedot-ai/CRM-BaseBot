@@ -31,6 +31,12 @@ def validated_ai(status: str, ai_date: date | None) -> tuple[str, date | None]:
         raise ValidationError("AI 状态要选一个：" + " / ".join(schema.AI_STATUS_OPTIONS))
     if status == schema.AI_STATUS_UPGRADED and ai_date is None:
         raise ValidationError(f"选了「{schema.AI_STATUS_UPGRADED}」要填升级日期")
+    if status == schema.AI_STATUS_ALREADY and ai_date is not None:
+        # 开户即AI 所有交易都算，日期没有意义；留着会在回执上显示成「…起」，像是从那天才算。
+        raise ValidationError(
+            f"「{schema.AI_STATUS_ALREADY}」不用填日期（所有交易都算）；"
+            f"开户之后才升级的请选「{schema.AI_STATUS_UPGRADED}」"
+        )
     if status == schema.AI_STATUS_NOT and ai_date is not None:
         raise ValidationError(
             f"「{schema.AI_STATUS_NOT}」不用填升级日期；已经升级了请选「{schema.AI_STATUS_UPGRADED}」"

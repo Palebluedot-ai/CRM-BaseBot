@@ -9,7 +9,7 @@
   └─ scripts/import_daily_incremental.py --from-mail   ← 只下载，不改 Base
        └─ 本地解析 + 筛站点 + 算「哪些交易日是新的」
             └─ 增量导入 Daily Revenue Board（先删这些天，再写）
-                 └─ 每月 3 号月结按「收入 × 比例」算应付（domain/commission.py）
+                 └─ 每月 3 号月结按「收入 × 比例」算应付，只算 AI 客户升级次日起的交易（domain/commission.py）
 ```
 
 ## 只导新加坡站
@@ -103,7 +103,7 @@ tail -f logs/daily-import-stdout.log          # 看跑批输出
 ```
 
 - 每天 **10:45** 和 **16:00** 各跑一次。跑两次是因为邮件不一定准点，而脚本幂等
-  —— 没有新增交易日就一个写请求都不发。
+  —— 没有新增交易日就不写交易行，只补挂晚登记客户的关联。
 - `WorkingDirectory` 必须是仓库根目录：`Settings` 读的是相对路径 `.env`。
 - 回滚：`launchctl bootout "gui/$(id -u)/com.chao.crm-basebot.daily-import"`
 
@@ -142,4 +142,4 @@ uv run python scripts/inspect_base.py
 | 报「缺 MICROSOFT_GRAPH_* 键」 | `.env` 里那四个键没填全 |
 | 报「有 N 个 .xlsx 附件」 | 那封邮件里挂了多个附件 —— 不用猜，日志里列了名字 |
 | 报「最新一封取不到附件」 | 内部系统这封邮件没带附件，或发件人换了（核对 `GRAPH_SENDER`） |
-| 佣金列是空的 | 先确认这个用户有没有登记渠道，见 README 的「为什么有些行是空的」 |
+| 佣金列是空的 | 先确认这个用户有没有登记渠道，见 SCHEMA.md「没登记渠道的行」；AI 状态是非AI、或升级当天及之前的交易，本笔佣金也是 0 |

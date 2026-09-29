@@ -45,6 +45,16 @@ def to_pdf(docx_files: dict[str, bytes], work_dir: Path) -> tuple[dict[str, byte
     if sys.platform != "darwin":
         return {}, "这台机器不是 Mac，转不了 PDF（只有装了 Word 的 Mac 能转），先发 Word 版。"
 
+    # 转 PDF 是锦上添花：出了任何没料到的错（目录建不了、磁盘满……）都只换来一句说明，
+    # 调用方照发 Word。不能让它把整件事变成一张「系统错误」卡、连 Word 都拿不到。
+    try:
+        return _convert(docx_files, work_dir)
+    except Exception:
+        logger.exception("转 PDF 出错")
+        return {}, "转 PDF 出错了，先发 Word 版。管理员可以在 mac mini 的日志里看原因。"
+
+
+def _convert(docx_files: dict[str, bytes], work_dir: Path) -> tuple[dict[str, bytes], str]:
     source, target = work_dir / "docx", work_dir / "pdf"
     with _PDF_LOCK:
         _empty(source)

@@ -321,8 +321,14 @@ DAILY_BOARD_DERIVED_FORMULAS: dict[str, tuple[str, int]] = {
 }
 
 # 客户表上的公式列（sync_base 建在 CLIENT_FIELDS 后面）。
+# 「R094 HongKong Dimi …」这样一段字：所属渠道的编号 + 名称（2026-09-29 加）。
+# 给看板上的「渠道（自动查找）」按 UID 跨表取用 —— 那一列由 Base 自己算，机器人和
+# 每天的导入停了也照样显示（scripts/add_board_lookup.py）。
+CLIENT_CHANNEL_TEXT = "渠道"
+
 CLIENT_DERIVED_FIELDS: dict[str, int] = {
     CLIENT_AI_GATE: FIELD_TYPE_FORMULA,
+    CLIENT_CHANNEL_TEXT: FIELD_TYPE_FORMULA,
 }
 
 CLIENT_DERIVED_FORMULAS: dict[str, tuple[str, int]] = {
@@ -335,6 +341,11 @@ CLIENT_DERIVED_FORMULAS: dict[str, tuple[str, int]] = {
         f'[{CLIENT_AI_STATUS}] = "{AI_STATUS_UPGRADED}"), {AI_GATE_NEVER}, {AI_GATE_ALWAYS}), '
         f"{_day_number(CLIENT_AI_DATE)}))",
         FORMULA_DATA_TYPE_NUMBER,
+    ),
+    CLIENT_CHANNEL_TEXT: (
+        f'CONCATENATE([{CLIENT_REFERRAL_LINK}].[{REFERRAL_NO}], " ", '
+        f"[{CLIENT_REFERRAL_LINK}].[{REFERRAL_NAME}])",
+        FORMULA_DATA_TYPE_TEXT,
     ),
 }
 

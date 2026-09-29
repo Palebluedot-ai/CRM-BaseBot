@@ -201,7 +201,7 @@ def summarize(rows: list[ecas.EcasCommissionRow], *, period: str, viewer_name: s
         "",
     ]
     for row in rows:
-        label = row.payee.label or "(未命名)"
+        label = row.payee.label or "（未命名）"
         lines.append(f"**{label}**  —— 应付 {row.payable:,.2f} USD")
         lines.append(
             f"  小计：开户 {row.amount_total:,.2f} · "

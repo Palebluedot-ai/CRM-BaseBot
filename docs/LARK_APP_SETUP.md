@@ -223,7 +223,7 @@ uv run python scripts/sync_base.py          # 预演，打印将要建什么
 uv run python scripts/sync_base.py --apply  # 执行
 ```
 
-只增不改不删：缺的表和字段会补，已存在但类型不符的只报告给你决定，多出来的一概不碰。建出来的六张表和每个设计选择的理由，见 [SCHEMA.md](SCHEMA.md)。
+只增不删（只改我们维护的公式和数字格式）：缺的表和字段会补，已存在但类型不符的只报告给你决定，多出来的一概不碰。建出来的六张表和每个设计选择的理由，见 [SCHEMA.md](SCHEMA.md)。
 
 日读看板表也由它建。早期版本刻意不建交易明细表，因为那时的数据源是同事维护的只读表；2026-09-09 切到日读看板后，这张表是我们自己的写入面（`scripts/import_daily_board.py` 每天导入），结构归 sync_base 管。
 

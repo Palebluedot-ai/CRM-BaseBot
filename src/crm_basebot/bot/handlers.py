@@ -547,6 +547,8 @@ class BotHandlers:
     def _submit_ai(self, sales, form) -> P2CardActionTriggerResponse:
         """补 / 改客户的 AI 状态。和登记一样：格式在回调里校验，改写在后台，结果推新消息。"""
         uid = _form_text(form, cards.F_AI_UID).strip()
+        if not uid:
+            raise ValidationError("客户UID 不能为空")
         if not uid.isdigit():
             raise ValidationError(f"客户UID 应该是纯数字，你填的是「{uid}」")
         status, ai_date = validated_ai(
@@ -697,10 +699,16 @@ class BotHandlers:
         def worker() -> None:
             try:
                 docx = agreement.render(plan)
-                pdfs, note = convert({plan.filename: docx}) if convert else ({}, "")
+                # Word 先发：后面转 PDF 怎么出错，人手上都已经有一份能用的。
                 files.send(target, plan.filename, docx)
+                pdfs, note = convert({plan.filename: docx}) if convert else ({}, "")
                 for name, data in pdfs.items():
-                    files.send(target, name, data)
+                    try:
+                        files.send(target, name, data)
+                    except FileSendError:
+                        logger.exception("协议 PDF 发送失败 open_id=%s", target)
+                        pdfs, note = {}, "PDF 没发出去（上传飞书失败），先用 Word 版。"
+                        break
             except (AgreementError, FileSendError) as exc:
                 self._send_to_user(target, cards.with_menu(cards.error_card(str(exc))))
                 return

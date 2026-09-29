@@ -538,3 +538,37 @@ def test_收款资料搬家_也能读老的DataXlsx(monkeypatch, fake_bitable, t
     assert got[bank][schema.REFERRAL_BANK_ACCOUNT_NO] == "0012"
     assert schema.REFERRAL_PAY_METHOD not in got[blank]
     assert "TWALLET" not in capsys.readouterr().out
+
+
+# ---------- add_board_lookup ----------
+
+
+def test_看板查找列_挂了关联的行全对才算过():
+    lookup = _load("add_board_lookup")
+    rows = [
+        ("R094", "R094 HongKong Dimi Business Services Limited"),
+        ("R001", "R001 北极星"),
+        ("", "R095 JIANG JUN"),  # 还没挂关联，查找列已经查到 —— 这一列的用处
+        ("", ""),
+    ]
+    check = lookup.evaluate(rows)
+    assert check.passed
+    assert (check.linked, check.ok, check.extra) == (2, 2, 1)
+
+
+def test_看板查找列_空的或查错的都不算过():
+    lookup = _load("add_board_lookup")
+    assert not lookup.evaluate([("R094", "")]).passed
+    assert not lookup.evaluate([("R094", "R095 JIANG JUN")]).passed
+    assert not lookup.evaluate([("", "R095 JIANG JUN")]).passed  # 一行关联都没有，没法验证
+    # R09 不能因为是 R094 的前缀就算对
+    assert lookup.evaluate([("R09", "R094 X")]).wrong == 1
+
+
+def test_客户表的渠道公式从所属渠道带编号和名称():
+    from crm_basebot.domain import schema
+
+    expression, data_type = schema.CLIENT_DERIVED_FORMULAS[schema.CLIENT_CHANNEL_TEXT]
+    assert data_type == schema.FORMULA_DATA_TYPE_TEXT
+    assert f"[{schema.CLIENT_REFERRAL_LINK}].[{schema.REFERRAL_NO}]" in expression
+    assert f"[{schema.CLIENT_REFERRAL_LINK}].[{schema.REFERRAL_NAME}]" in expression

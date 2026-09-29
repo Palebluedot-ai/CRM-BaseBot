@@ -82,7 +82,7 @@ class ReferralInput:
             raise ValidationError("开始日期不能为空")
 
         if not 0 < self.commission_rate <= 100:
-            raise ValidationError(f"分佣比例要在 0 到 100 之间，你填的是 {self.commission_rate}")
+            raise ValidationError(f"分佣比例要在 0 到 100 之间，你填的是 {self.commission_rate:g}")
 
         if self.payout_frequency not in schema.PAYOUT_OPTIONS:
             raise ValidationError(
@@ -228,7 +228,7 @@ class ReferralService:
                 clean.name,
                 created.record_id,
             )
-            referral_no = "(编号待生成)"
+            referral_no = "（编号待生成）"
 
         # 每一次业务写入留一行服务端日志：销售说「我登记了」而 Base 里没有的时候，
         # 先翻这里，不用去查审计表。

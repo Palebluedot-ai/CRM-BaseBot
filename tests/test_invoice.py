@@ -336,3 +336,13 @@ def test_转PDF用固定目录_转完清空(tmp_path, monkeypatch):
         assert pdfs == {"A.pdf": b"%PDF"} and note == ""
     assert seen[0] == seen[1] == [str(tmp_path / "docx"), str(tmp_path / "pdf")]
     assert list((tmp_path / "docx").iterdir()) == [] and list((tmp_path / "pdf").iterdir()) == []
+
+
+def test_转PDF出任何意外都只换来一句说明(tmp_path, monkeypatch):
+    def boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pdf.sys, "platform", "darwin")
+    monkeypatch.setattr(pdf, "_convert", boom)
+    pdfs, note = pdf.to_pdf({"A.docx": b"PK"}, tmp_path)
+    assert pdfs == {} and "先发 Word 版" in note
