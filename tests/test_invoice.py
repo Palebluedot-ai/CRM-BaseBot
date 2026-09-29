@@ -167,8 +167,8 @@ def test_收款资料不全的渠道不出_说缺什么(base, tmp_path):
     assert "收款方式" in skipped.missing
 
 
-def test_结算后数据变了_只印总额(base, tmp_path):
-    """结算表写的是 300，但之后比例改了 / 客户变了，现算不再是 300：只印一行总额。"""
+def test_结算后数据变了_明细按结算金额重新分摊(base, tmp_path):
+    """结算表写 280，现算是 300（比例或客户变过）：照样逐个客户列，按收入占比从 280 分下来。"""
     record = next(
         rid
         for rid, f in base.tables[TBL_COMMISSION].records.items()
@@ -177,11 +177,42 @@ def test_结算后数据变了_只印总额(base, tmp_path):
     base.tables[TBL_COMMISSION].records[record][schema.COMM_PAYABLE] = 280.0
     batch = service(base, tmp_path).build(ALICE, "2026-08", kinds=["trade"])
     (only,) = batch.invoices
-    assert only.itemized is False
+    assert (only.itemized, only.reallocated) == (True, True)
+    # 收入 1000 : 500，280 分成 186.666… : 93.333…，差的一分给余数大的
     assert [(r.description, r.amount) for r in only.rows] == [
-        ("Referral fee for August 2026", Decimal("280.00"))
+        ("乙公司", Decimal("93.33")),
+        ("甲公司", Decimal("186.67")),
     ]
-    assert batch.summary_only == [only]
+    assert sum(r.amount for r in only.rows) == Decimal("280.00")
+    assert batch.reallocated == [only] and batch.summary_only == []
+
+
+def test_渠道下一个客户都找不到才只印总额(base, tmp_path):
+    base.tables[TBL_CLIENT].records.clear()
+    batch = service(base, tmp_path).build(ALICE, "2026-08", kinds=["trade"])
+    (only,) = batch.invoices
+    assert only.itemized is False
+    assert [r.description for r in only.rows] == ["Referral fee for August 2026"]
+
+
+def test_地址空着照样出_结果里点名(base, tmp_path):
+    record = next(
+        rid
+        for rid, f in base.tables[TBL_REFERRAL].records.items()
+        if f[schema.REFERRAL_NO] == "R001"
+    )
+    base.tables[TBL_REFERRAL].records[record][schema.REFERRAL_ADDRESS] = ""
+    batch = service(base, tmp_path).build(ALICE, "2026-08", kinds=["trade"])
+    assert [i.referral_no for i in batch.invoices] == ["R001"]
+    assert [i.referral_no for i in batch.no_address] == ["R001"]
+    text = re.sub(r"<[^>]+>", "", _xml(inv.render(batch.invoices[0], PAID)))
+    assert "{{" not in text and "0xWALLET" in text
+
+
+def test_分摊加起来一分不差():
+    parts = [inv.Part(str(i), Decimal(w), Decimal("0")) for i, w in enumerate([1, 1, 1])]
+    rows = inv.allocate(Decimal("100.00"), parts)
+    assert [r.amount for r in rows] == [Decimal("33.34"), Decimal("33.33"), Decimal("33.33")]
 
 
 def test_别人的渠道出不了(base, tmp_path):

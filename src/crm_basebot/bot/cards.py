@@ -1044,7 +1044,7 @@ def payment_pick_card(referral_options: list[tuple[str, str]]) -> dict[str, Any]
                         _submit("payment_pick_submit", ACTION_PAYMENT_FORM, "下一步"),
                     ],
                 },
-                footnote("地址、银行账户或钱包地址，出 invoice 时印在上面。"),
+                footnote("地址（选填）、银行账户或钱包地址，出 invoice 时印在上面。"),
                 back_to_menu_button(),
             ]
         },
@@ -1073,7 +1073,11 @@ def payment_form_card(referral_no: str, name: str, info: Any) -> dict[str, Any]:
                     "name": "payment_form",
                     "elements": [
                         _input(
-                            F_PAY_ADDRESS[0], "地址第 1 行", "例如 Flat 1, 5/F", default=lines[0]
+                            F_PAY_ADDRESS[0],
+                            "地址第 1 行（选填）",
+                            "例如 Flat 1, 5/F",
+                            required=False,
+                            default=lines[0],
                         ),
                         _input(
                             F_PAY_ADDRESS[1],
@@ -1227,16 +1231,31 @@ def invoice_result_card(batch: Any) -> dict[str, Any]:
             "**这几个渠道没出**：收款资料还不全，先用「登记收款资料」补上再来出。\n"
             + "\n".join(lines)
         )
+    if batch.no_address:
+        lines = [f"· {inv.referral_no} {inv.referral_name}" for inv in batch.no_address]
+        parts.append(
+            "⚠️ **这几份 invoice 上没有地址**（收款资料里地址是空的，其它照常出了）。"
+            "要补的话用「登记收款资料」填上地址，再出一次。\n" + "\n".join(lines)
+        )
+    if batch.reallocated:
+        names = "、".join(
+            f"{inv.referral_no}（{KIND_LABEL[inv.kind]}）" for inv in batch.reallocated
+        )
+        parts.append(
+            f"**这几份的客户明细是按结算金额重新分摊的**：{names}。结算之后比例或客户变过，"
+            "每个客户的数按收入占比从结算总额分下来，总额以结算表为准。"
+        )
     if batch.summary_only:
         names = "、".join(
             f"{inv.referral_no}（{KIND_LABEL[inv.kind]}）" for inv in batch.summary_only
         )
         parts.append(
-            f"**只印了总额、没列客户明细**：{names}。结算之后客户或比例有变，"
-            "现算的明细和结算表对不上 —— 总额以结算表为准。"
+            f"**只印了总额**：{names}。这个渠道现在一个客户都找不到（可能被删了或改挂了别的渠道），"
+            "没法列明细。总额以结算表为准。"
         )
     if batch.pdf_note:
         parts.append(f"<font color='grey'>{batch.pdf_note}</font>")
 
-    template = "green" if batch.invoices and not batch.skipped else "orange"
+    clean = batch.invoices and not (batch.skipped or batch.no_address)
+    template = "green" if clean else "orange"
     return notice_card(title, "\n\n".join(parts), template=template)

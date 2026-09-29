@@ -6,7 +6,7 @@
 
   · 银行转账：银行户名（不填就用渠道名称）、银行名称、银行账号
   · 加密货币：币种（不填就是 USDT）、钱包地址
-  · 地址：最多三行，invoice 抬头上一行一行印
+  · 地址：最多三行，invoice 抬头上一行一行印。**选填**：空着照样出 invoice，结果卡上提醒
 
 权限和别处一样：只能改**自己名下**的渠道（管理员全部）。审计表只记改了哪几项，
 **不记值** —— 账号、钱包地址不该在第二个地方再存一份。
@@ -54,10 +54,16 @@ class PaymentInfo:
         )
 
     def missing(self) -> list[str]:
-        """出 invoice 还缺哪几项。空列表 = 齐了。"""
+        """哪几项还空着（含地址）。给人看的「齐不齐」。"""
+        return (["地址"] if not self.address_lines else []) + self.missing_for_payment()
+
+    def missing_for_payment(self) -> list[str]:
+        """出 invoice **必须**有的还缺哪几项：收款方式和那种方式的账户。
+
+        地址不在里面（2026-09-29 定的）：地址空着照样出 invoice，结果卡上提醒一句。
+        钱包地址 / 银行账号少了不行 —— 那是钱往哪里打。
+        """
         lacking: list[str] = []
-        if not self.address_lines:
-            lacking.append("地址")
         if self.method == schema.PAY_METHOD_BANK:
             if not self.bank_name:
                 lacking.append("银行名称")
@@ -88,7 +94,7 @@ class PaymentInfo:
         )
         if info.method not in schema.PAY_METHOD_OPTIONS:
             raise ValidationError("收款方式要选一个：" + " / ".join(schema.PAY_METHOD_OPTIONS))
-        lacking = info.missing()
+        lacking = info.missing_for_payment()
         if lacking:
             raise ValidationError(f"还没填：{'、'.join(lacking)}")
         return info

@@ -33,7 +33,7 @@ import zipfile
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_FLOOR, Decimal
 from pathlib import Path
 
 from ..bot.auth import Sales
@@ -111,7 +111,9 @@ class Invoice:
     total: Decimal
     payment: PaymentInfo
     itemized: bool = True
-    """明细是不是逐客户列的。False = 现算和结算表对不上，只印了一行总额。"""
+    """明细是不是逐客户列的。False = 这个渠道现在一个客户都找不到，只能印一行总额。"""
+    reallocated: bool = False
+    """明细是按结算金额重新分摊的（结算之后比例或客户变过，现算的数和结算表不一样）。"""
 
     @property
     def filename(self) -> str:
@@ -286,6 +288,19 @@ class InvoiceBatch:
     def summary_only(self) -> list[Invoice]:
         return [invoice for invoice in self.invoices if not invoice.itemized]
 
+    @property
+    def reallocated(self) -> list[Invoice]:
+        return [invoice for invoice in self.invoices if invoice.itemized and invoice.reallocated]
+
+    @property
+    def no_address(self) -> list[Invoice]:
+        """出了，但地址是空的 —— 结果卡上提醒一句。"""
+        seen: dict[str, Invoice] = {}
+        for invoice in self.invoices:
+            if not invoice.payment.address_lines:
+                seen.setdefault(invoice.referral_no, invoice)
+        return list(seen.values())
+
     def files(self) -> list[tuple[str, bytes]]:
         """要发出去的文件。一份就发 Word + PDF 两个；多份就打成一个 zip，免得刷屏。"""
         if not self.docx:
@@ -346,6 +361,43 @@ def _periods(bitable: BitableClient, table_id: str, visible: set[str]) -> set[st
         if no in visible and re.fullmatch(r"\d{4}-\d{2}", period):
             found.add(period)
     return found
+
+
+@dataclass(frozen=True)
+class Part:
+    """明细里的一行：谁、按多少分（权重）、现算是多少钱。"""
+
+    description: str
+    weight: Decimal
+    fresh: Decimal
+
+
+def allocate(total: Decimal, parts: list[Part]) -> tuple[InvoiceRow, ...]:
+    """把结算金额按权重分给各行，**加起来一分不差**等于 ``total``。
+
+    最大余数法：先都往下取到分，差的那几分给被截掉最多的几行。和佣金查询里分客户份额
+    是同一个做法（commission_query.ReferralBreakdown.client_shares）。
+    """
+    weight_sum = sum((p.weight for p in parts), Decimal("0"))
+    exact = [total * p.weight / weight_sum for p in parts]
+    shares = [value.quantize(CENTS, rounding=ROUND_FLOOR) for value in exact]
+    missing = int(((total - sum(shares, Decimal("0"))) / CENTS).to_integral_value())
+    order = sorted(range(len(parts)), key=lambda i: (shares[i] - exact[i], i))
+    for i in order[:missing]:
+        shares[i] += CENTS
+    return tuple(InvoiceRow(p.description, share) for p, share in zip(parts, shares, strict=True))
+
+
+def _rows_for(
+    kind: str, period: str, payable: Decimal, parts: list[Part] | None
+) -> tuple[tuple[InvoiceRow, ...], bool, bool]:
+    """(明细行, 是否逐客户列, 是否重新分摊)。**只要找得到客户就逐个列**（2026-09-29 定的）。"""
+    parts = [p for p in parts or [] if p.weight > 0]
+    if not parts:
+        return _single_row(kind, period, payable), False, False
+    if sum((p.fresh for p in parts), Decimal("0")) == payable:
+        return tuple(InvoiceRow(p.description, p.fresh) for p in parts), True, False
+    return allocate(payable, parts), True, True
 
 
 def _single_row(invoice_kind: str, period: str, amount: Decimal) -> tuple[InvoiceRow, ...]:
@@ -422,14 +474,13 @@ class InvoiceService:
         settled.sort(key=lambda item: (item[1].referral_no, item[0] != KIND_TRADE))
         for kind, row in settled:
             channel = channels[row.referral_no]
-            lacking = channel.info.missing()
+            # 地址不算缺（2026-09-29 定的）：照出，结果卡上提醒。缺的只有收款方式和账户。
+            lacking = channel.info.missing_for_payment()
             if lacking:
                 skipped[channel.no] = Skipped(channel.no, channel.name, tuple(lacking))
                 continue
-            detail = (trade_breakdown if kind == KIND_TRADE else ecas_breakdown).get(channel.no)
-            itemized = (
-                detail is not None and sum((r.amount for r in detail), Decimal("0")) == row.payable
-            )
+            parts = (trade_breakdown if kind == KIND_TRADE else ecas_breakdown).get(channel.no)
+            rows, itemized, reallocated = _rows_for(kind, period, row.payable, parts)
             batch.invoices.append(
                 Invoice(
                     kind=kind,
@@ -437,10 +488,11 @@ class InvoiceService:
                     referral_no=channel.no,
                     referral_name=channel.name or channel.no,
                     fee_rate=row.rate,
-                    rows=tuple(detail) if itemized else _single_row(kind, period, row.payable),
+                    rows=rows,
                     total=row.payable,
                     payment=channel.info,
                     itemized=itemized,
+                    reallocated=reallocated,
                 )
             )
         batch.skipped = list(skipped.values())
@@ -459,32 +511,29 @@ class InvoiceService:
 
     # ---------- 明细（现算，只在和结算表对得上时用） ----------
 
-    def _trade_breakdown(self, sales: Sales, period: str) -> dict[str, list[InvoiceRow]]:
+    def _trade_breakdown(self, sales: Sales, period: str) -> dict[str, list[Part]]:
         if self._commission_query is None:
             return {}
         result = self._commission_query.query(sales, [period])
-        out: dict[str, list[InvoiceRow]] = {}
+        out: dict[str, list[Part]] = {}
         for referral in result.referrals_in(period):
             shares = referral.client_shares()
-            rows = [
-                InvoiceRow(client.name or client.uid, shares[uid])
+            out[referral.referral_no] = [
+                Part(client.name or client.uid, client.revenue, shares[uid])
                 for uid, client in sorted(
                     referral.clients.items(), key=lambda item: item[1].name or item[0]
                 )
-                if shares[uid] > 0
             ]
-            out[referral.referral_no] = rows
         return out
 
-    def _ecas_breakdown(self, period: str, channels: dict) -> dict[str, list[InvoiceRow]]:
+    def _ecas_breakdown(self, period: str, channels: dict) -> dict[str, list[Part]]:
         table = getattr(self._settings, "table_ecas", "")
         if not table:
             return {}
         payees = load_payees(self._bitable, self._settings.table_referral)
-        out: dict[str, list[InvoiceRow]] = {}
+        out: dict[str, list[Part]] = {}
         for app in load_applications(self._bitable, table, payees, tz=self._tz):
             if app.period != period or app.payee is None or app.payee.code not in channels:
                 continue
-            if app.fee > 0:
-                out.setdefault(app.payee.code, []).append(InvoiceRow(app.client_name, app.fee))
+            out.setdefault(app.payee.code, []).append(Part(app.client_name, app.fee, app.fee))
         return out

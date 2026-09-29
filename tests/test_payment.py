@@ -71,7 +71,6 @@ def test_管理员能改(service):
         (PaymentInfo(method=schema.PAY_METHOD_BANK, address_lines=("x",)), "银行名称、银行账号"),
         (PaymentInfo(method=schema.PAY_METHOD_CRYPTO, address_lines=("x",)), "钱包地址"),
         (PaymentInfo(method="", address_lines=("x",)), "收款方式"),
-        (PaymentInfo(method=schema.PAY_METHOD_CRYPTO, wallet_address="0x1"), "地址"),
     ],
 )
 def test_缺项说人话(info, message):
@@ -91,3 +90,10 @@ def test_只露最后四位():
     assert masked("0123456789") == "****6789"
     assert masked("12") == "****"
     assert masked("") == ""
+
+
+def test_地址选填_钱包必填():
+    info = PaymentInfo(method=schema.PAY_METHOD_CRYPTO, wallet_address="0x1").validated()
+    assert info.address_lines == ()
+    assert info.missing() == ["地址"]  # 给人看的「还空着」照样列出来
+    assert info.missing_for_payment() == []
