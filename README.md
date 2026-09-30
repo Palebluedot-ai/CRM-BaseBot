@@ -1,13 +1,12 @@
 # CRM-BaseBot
 
-> 第一次接手：先看 [docs/MAINTAINER_GUIDE.md](docs/MAINTAINER_GUIDE.md)（整体和日常维护），要改代码再看 [CONTRIBUTING.md](CONTRIBUTING.md)。
-
 > **先看哪一份？**
 >
 > | 你是谁 | 读这份 |
 > |---|---|
 > | **接手方（同事 / 他的 AI agent）**：要把整套系统建到自己账号 | **[HANDOFF.md](HANDOFF.md)**（机器读）· **[HANDOFF.html](HANDOFF.html)**（人读，`open HANDOFF.html` 打开；含「环境与账号要求」和「交付验收清单」） |
 > | **销售同事**：日常用机器人登记渠道/客户、查佣金 | **[docs/SALES_GUIDE.md](docs/SALES_GUIDE.md)** |
+> | **接手维护这个 bot 的人** | **[docs/MAINTAINER_GUIDE.md](docs/MAINTAINER_GUIDE.md)**（整体、日常、排错，也在 Lark 文档里）· 要改代码看 **[CONTRIBUTING.md](CONTRIBUTING.md)** |
 > | **维护者**：日常跑批、排错 | [docs/PIPELINE.md](docs/PIPELINE.md)（每日管线）· [docs/BOT.md](docs/BOT.md)（机器人现状与缺口）· [docs/MIGRATION.md](docs/MIGRATION.md)（迁移） |
 >
 > 接手方不需要原主人在电脑前操作；数据搬过去有「凭证迁移」和「只交接文件」两条路，见 HANDOFF。
