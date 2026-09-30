@@ -16,6 +16,7 @@ import importlib.util
 import sys
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -295,6 +296,11 @@ def _wire(monkeypatch, fake_bitable, *, ecas_code=0, settings=None):
     sent: list[dict] = []
     monkeypatch.setattr(job, "get_client", lambda: object())
     monkeypatch.setattr(job, "send_card", lambda _c, _o, card: sent.append(card) or True)
+    monkeypatch.setattr(
+        job,
+        "archive_period",
+        lambda _s, _b, _c, period: SimpleNamespace(line=f"已存档 {period}"),
+    )
     return sent
 
 
@@ -362,3 +368,43 @@ def test_no_notify时不发但照样写(monkeypatch, fake_bitable, flag):
     sent = _wire(monkeypatch, fake_bitable)
     assert job.main(["--period", "2026-08", "--apply", flag]) == 0
     assert sent == []
+
+
+def _admin(fake_bitable):
+    fake_bitable.tables[TBL_SALES].add_existing(
+        {
+            schema.SALES_OPEN_ID: "ou_admin",
+            schema.SALES_NAME: "Admin",
+            schema.SALES_ROLE: schema.ROLE_ADMIN,
+            schema.SALES_STATUS: schema.SALES_STATUS_ACTIVE,
+        }
+    )
+
+
+def test_结算完存档_卡片上说一句(monkeypatch, fake_bitable):
+    sent = _wire(monkeypatch, fake_bitable)
+    _admin(fake_bitable)
+    assert job.main(["--period", "2026-08", "--apply"]) == 0
+    (card,) = sent
+    assert "已存档 2026-08" in card["body"]["elements"][0]["content"]
+
+
+def test_存档失败不影响结算_卡片上说怎么补(monkeypatch, fake_bitable):
+    sent = _wire(monkeypatch, fake_bitable)
+    _admin(fake_bitable)
+
+    def boom(*_args):
+        raise RuntimeError("接口挂了")
+
+    monkeypatch.setattr(job, "archive_period", boom)
+    assert job.main(["--period", "2026-08", "--apply"]) == 0
+    text = sent[0]["body"]["elements"][0]["content"]
+    assert "存档没做成" in text and "archive_month.py --period 2026-08" in text
+
+
+def test_预演不存档(monkeypatch, fake_bitable):
+    _wire(monkeypatch, fake_bitable)
+    called = []
+    monkeypatch.setattr(job, "archive_period", lambda *a: called.append(a))
+    job.main(["--period", "2026-08"])
+    assert called == []

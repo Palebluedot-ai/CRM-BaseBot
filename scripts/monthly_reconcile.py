@@ -64,6 +64,7 @@ from crm_basebot.bot import cards  # noqa: E402
 from crm_basebot.domain import ecas, schema  # noqa: E402
 from crm_basebot.domain.ecas_query import latest_applied_date  # noqa: E402
 from crm_basebot.jobs import ecas_reconcile, reconcile  # noqa: E402
+from crm_basebot.jobs.archive import archive_period  # noqa: E402
 from crm_basebot.lark.bitable import BitableClient  # noqa: E402
 from crm_basebot.lark.client import get_client  # noqa: E402
 from crm_basebot.lark.values import extract_text, to_number  # noqa: E402
@@ -176,7 +177,7 @@ def send_card(client, open_id: str, card: dict) -> bool:
     return True
 
 
-def build_card(period: str, books: list[Book]) -> dict:
+def build_card(period: str, books: list[Book], archive_note: str = "") -> dict:
     """两套账一张卡，底下给两项合计。
 
     合计那一行是这张卡存在的主要理由：2026-08 交易佣金 19,294.51、ECAS 65,000.00，
@@ -199,6 +200,8 @@ def build_card(period: str, books: list[Book]) -> dict:
         lines.append(
             "<font color='grey'>上面的合计**不含**没算出来的那套。服务端日志里有原因。</font>"
         )
+    if archive_note:
+        lines += ["", archive_note]
     lines += ["", "开发票前请在 Base 里核对一遍。"]
 
     if any(b.failed for b in books):
@@ -359,6 +362,21 @@ def main(argv: list[str] | None = None) -> int:
     for book in books:
         print(f"Base 里 {period} 的{book.label}：{book.count} 条，应付合计 {book.total:,.2f} USD")
 
+    # 存档：结算完那一刻的明细和汇总各建一张表（jobs/archive.py）。已经存过就不动。
+    # 它失败不影响结算本身：卡片上说一句，可以之后用 scripts/archive_month.py 补。
+    archive_note = ""
+    if not trades.failed:
+        try:
+            archived = archive_period(settings, bitable, get_client(), period)
+            archive_note = archived.line
+            print(f"\n{archive_note}")
+        except Exception:  # noqa: BLE001 - 见上
+            logger.exception("月结存档失败")
+            archive_note = (
+                "⚠️ 存档没做成。可以之后跑 "
+                f"scripts/archive_month.py --period {period} --apply 补上。"
+            )
+
     # 交易佣金结不出来就不发通知 —— 这是这个任务的主要产出，它没了这张卡没什么好报的。
     # ECAS 失败不拦：交易佣金那个数是真的，照发，卡片上写明 ECAS 这次没算出来。
     if trades.failed:
@@ -377,7 +395,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    card = build_card(period, books)
+    card = build_card(period, books, archive_note)
     client = get_client()
     sent = 0
     for open_id, name in recipients:
