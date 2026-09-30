@@ -84,6 +84,8 @@ class DailyResult:
     written: int = 0
     # 以前的交易里，客户后来才登记、这次补挂上关联的行数（见 board.relink_missing）。
     relinked: int = 0
+    # 结算存档总表里「未结算」月份这次刷新写了几行（jobs/archive.refresh_live）。
+    live_rows: int = 0
     linked_rows: int = 0
     unregistered_users: int = 0
 
@@ -248,6 +250,7 @@ def run_daily(
     allow_many_days: bool = False,
     dry_run: bool = False,
     fetch: Callable[..., Path] = source_module.fetch_from_mail,
+    refresh_live: Callable[[], int] | None = None,
 ) -> DailyResult:
     """每天那件事的完整入口：取数 → 解析 → 算增量 →（除非 dry_run）写 Base。"""
     xlsx_path = resolve_export(
@@ -280,5 +283,12 @@ def run_daily(
         )
     except Exception:  # noqa: BLE001 - 见上
         logger.exception("补挂客户关联失败（今天的导入不受影响），明天会再试")
-        return result
-    return replace(result, relinked=relinked)
+    else:
+        result = replace(result, relinked=relinked)
+    # 补挂之后再刷：刚补挂上的客户，这个月的明细里才有他。同样是顺手的事，失败只记日志。
+    if refresh_live is not None:
+        try:
+            result = replace(result, live_rows=refresh_live())
+        except Exception:  # noqa: BLE001 - 见上
+            logger.exception("刷新结算存档里未结算的月份失败（今天的导入不受影响）")
+    return result

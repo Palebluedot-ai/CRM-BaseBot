@@ -105,6 +105,8 @@ tail -f logs/daily-import-stdout.log          # 看跑批输出
 - 每月 3 号 10:00 的月结结完之后会**存档**：建「YYYY-MM 结算明细 / 结算汇总」两张表，追加进
   「结算明细（全部月份）」（`jobs/archive.py`）。存档失败不影响结算，卡片上会写怎么补
   （`scripts/archive_month.py`）。
+- 每天导入完、补挂完，刷新结算存档总表里「未结算」的月份（`jobs/archive.refresh_live`）；
+  失败只记日志，不影响导入。
 - 每天 **10:45** 和 **16:00** 各跑一次。跑两次是因为邮件不一定准点，而脚本幂等
   —— 没有新增交易日就不写交易行，只补挂晚登记客户的关联。
 - `WorkingDirectory` 必须是仓库根目录：`Settings` 读的是相对路径 `.env`。

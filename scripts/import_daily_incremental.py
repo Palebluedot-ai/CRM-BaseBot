@@ -28,9 +28,11 @@ import logging
 import sys
 from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from crm_basebot.jobs import archive  # noqa: E402
 from crm_basebot.lark.bitable import BitableClient  # noqa: E402
 from crm_basebot.pipeline import (  # noqa: E402
     BoardImportError,
@@ -145,6 +147,10 @@ def run(args: argparse.Namespace, settings, bitable: BitableClient) -> int:
             max_days=args.max_days,
             allow_many_days=args.allow_many_days,
             dry_run=args.dry_run,
+            # 结算存档总表里「未结算」的月份跟着每天的导入刷新（jobs/archive.py）。
+            refresh_live=lambda: archive.refresh_live(
+                settings, bitable, datetime.now(ZoneInfo(settings.business_timezone)).date()
+            ),
         )
     except BoardImportError as exc:
         print(f"\n读不了这份导出：{exc}", file=sys.stderr)

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal as D
 from types import SimpleNamespace
+
+import pytest
 
 from crm_basebot.jobs import archive as arc
 from crm_basebot.lark.bitable import Record, TableInfo
@@ -127,3 +130,47 @@ def test_存过的不再写_下个月只追加总表():
     arc.write_archive(base, client, "app", _snapshot("2026-10"))
     cumulative = base.rows[base.tables_by_name[arc.CUMULATIVE_TABLE]]
     assert [r[arc.F_PERIOD] for r in cumulative] == ["2026-09", "2026-10"]
+
+
+class _BaseWithDelete(_Base):
+    def batch_delete_records(self, table_id, record_ids):
+        keep = {f"r{i}" for i in range(len(self.rows[table_id]))} - set(record_ids)
+        self.rows[table_id] = [r for i, r in enumerate(self.rows[table_id]) if f"r{i}" in keep]
+        return len(record_ids)
+
+
+def test_正式存档后_那个月的未结算行删掉_别的月留着():
+    base = _BaseWithDelete()
+    client = _Client(base)
+    cumulative = client.create(
+        SimpleNamespace(
+            request_body=SimpleNamespace(
+                table=SimpleNamespace(name=arc.CUMULATIVE_TABLE, fields=[])
+            )
+        )
+    ).data.table_id
+    base.rows[cumulative] = [
+        {arc.F_PERIOD: arc.live_label("2026-09"), arc.F_AMOUNT: 1.0},
+        {arc.F_PERIOD: arc.live_label("2026-10"), arc.F_AMOUNT: 2.0},
+    ]
+    arc.write_archive(base, client, "app", _snapshot("2026-09"))
+    periods = [r[arc.F_PERIOD] for r in base.rows[cumulative]]
+    assert periods == [arc.live_label("2026-10"), "2026-09"]
+
+
+def test_明细和结算差一分就不存():
+    snapshot = _snapshot()
+    broken = arc.Snapshot(
+        snapshot.period,
+        snapshot.summary,
+        [replace(snapshot.details[0], amount=snapshot.details[0].amount - D("0.01"))],
+    )
+    assert broken.mismatches()
+    with pytest.raises(ValueError, match="对不上"):
+        arc.write_archive(_Base(), _Client(_Base()), "app", broken)
+    assert _snapshot().mismatches() == []
+
+
+def test_上个月还没结_月初两个月都刷新():
+    assert arc._previous("2026-10") == "2026-09"
+    assert arc._previous("2026-01") == "2025-12"

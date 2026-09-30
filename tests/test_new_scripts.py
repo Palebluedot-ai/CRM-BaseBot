@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from datetime import date, datetime
+from decimal import Decimal as D
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -614,3 +615,69 @@ def test_结算对比_收入只差小数尾巴不算变了():
     now = [CommissionRow("2026-03", "R076", "D", D("50"), D("17918.3799"), 1, {"a"})]
     (diff,) = cmp.compare(settled, now)
     assert diff.reasons == ("比例改过：30% → 50%",)
+
+
+# ---------- compare_finance ----------
+
+
+def _finance_xlsx(tmp_path):
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Summary"
+    ws.append(
+        [
+            "Referrer Code",
+            "Name of Referrer",
+            "Commission Rate (%)",
+            "Client Name",
+            "Trade Count",
+            "Total PnL (USD)",
+            "Total Commission (USD)",
+        ]
+    )
+    ws.append(["R029", "YIN TONG", "20%", None, 1, 66.94, 13.39])
+    ws.append([None, None, "20%", "HAN BAO", 1, 66.94, 13.39])
+    ws.append(["R090", "VISION GLOBAL", "50%", None, 2, 76.9, 38.45])
+    ws.append([None, None, "50%", "SHANG MING INTERNATIONAL TRADING CO LIMITED", 1, 2.7, 1.35])
+    ws.append([None, None, "50%", "ZHENGPENG TRADE CO., LIMITED", 1, 74.2, 37.1])
+    ws.append([None, "GRAND TOTAL", None, None, 3, 143.84, 51.84])
+    path = tmp_path / "july.xlsx"
+    wb.save(path)
+    return path
+
+
+def test_财务表_渠道和客户都读出来(tmp_path):
+    cf = _load("compare_finance")
+    fin = cf.read_finance(_finance_xlsx(tmp_path))
+    assert fin.grand_total == D("51.84")
+    assert set(fin.channels) == {"R029", "R090"}
+    assert len(fin.channels["R090"].clients) == 2
+
+
+def test_财务对比_说出我们缺的客户_四舍五入不算(tmp_path):
+    cf = _load("compare_finance")
+    fin = cf.read_finance(_finance_xlsx(tmp_path))
+    settled = {"R090": ("VISION GLOBAL", D("38.50"))}  # 只差 5 分：四舍五入
+    now = {
+        "R090": cf.Channel(
+            "R090",
+            "VISION GLOBAL",
+            "50%",
+            D("76.9"),
+            D("38.50"),
+            {
+                cf.norm("SHANG MING INTERNATIONAL TRADING CO., LIMITED"): (
+                    "SHANG MING",
+                    D("2.70"),
+                    D("1.35"),
+                ),
+                cf.norm("ZHENGPENG TRADE CO., LIMITED"): ("ZHENGPENG", D("74.20"), D("37.15")),
+            },
+        )
+    }
+    lines = cf.compare(fin, settled, now)
+    assert lines[0].startswith("R029 YIN TONG：财务 13.39　结算 0.00")
+    assert any("财务有、我们没有：HAN BAO" in line for line in lines)
+    assert not any(line.startswith("R090") for line in lines)

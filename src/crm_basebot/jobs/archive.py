@@ -156,6 +156,29 @@ class Snapshot:
     def total(self, kind: str) -> Decimal:
         return sum((s.amount for s in self.summary if s.kind == kind), ZERO)
 
+    def mismatches(self) -> list[str]:
+        """每个渠道的明细加起来不等于结算数的，逐个说出来。正常情况下永远是空的。"""
+        problems: list[str] = []
+        for settled in self.summary:
+            if settled.amount <= 0:
+                continue
+            got = sum(
+                (
+                    d.amount
+                    for d in self.details
+                    if d.kind == settled.kind
+                    and d.referral_no == settled.referral_no
+                    and d.name == settled.name
+                ),
+                ZERO,
+            )
+            if got != settled.amount:
+                problems.append(
+                    f"{settled.kind} {settled.referral_no} {settled.name}："
+                    f"结算 {settled.amount:,.2f}，明细合计 {got:,.2f}"
+                )
+        return problems
+
 
 # ---------- 算（纯函数，方便测） ----------
 
@@ -286,6 +309,93 @@ def build_snapshot(
     return Snapshot(period, summary, build_details(summary, contributions))
 
 
+# ---------- 还没结算的月份（每天导入后刷新） ----------
+
+LIVE_SUFFIX = "（未结算）"
+
+
+def live_label(period: str) -> str:
+    return f"{period}{LIVE_SUFFIX}"
+
+
+def _percent(value: Decimal | None) -> str:
+    return f"{value.normalize():f}%" if value is not None else ""
+
+
+def build_live(
+    bitable: BitableClient, settings: Any, period: str, *, tz, commission_query
+) -> list[DetailRow]:
+    """还没结算的月份按现在的资料现算：交易按渠道保底后分给客户，ECAS 一笔一行。
+
+    和月结是同一套算法（CommissionQueryService / ECAS 申请表），结算那天会被正式存档替换。
+    """
+    rows: list[DetailRow] = []
+    if commission_query is not None:
+        result = commission_query.query(_EVERYONE, [period])
+        for referral in result.referrals_in(period):
+            shares = referral.client_shares()
+            rate = rate_text(referral.rate_percent)
+            for uid, client in sorted(
+                referral.clients.items(), key=lambda item: item[1].name or item[0]
+            ):
+                if client.revenue == 0 and shares.get(uid, ZERO) == 0:
+                    continue
+                rows.append(
+                    DetailRow(
+                        KIND_TRADE,
+                        referral.referral_no,
+                        referral.referral_name,
+                        client.name or uid,
+                        uid,
+                        client.revenue,
+                        rate,
+                        shares.get(uid, ZERO),
+                    )
+                )
+    table = getattr(settings, "table_ecas", "")
+    if table:
+        payees = load_payees(bitable, settings.table_referral)
+        for app in load_applications(bitable, table, payees, tz=tz):
+            if app.period != period or app.payee is None:
+                continue
+            rows.append(
+                DetailRow(
+                    KIND_ECAS,
+                    app.payee.code,
+                    app.payee.name,
+                    app.client_name,
+                    app.client_uid,
+                    app.amount,
+                    _percent(app.rate_percent),
+                    app.fee.quantize(CENTS),
+                )
+            )
+    return rows
+
+
+def _settled_periods(bitable: BitableClient, settings: Any) -> set[str]:
+    found: set[str] = set()
+    for record in bitable.iter_records(settings.table_commission, field_names=[schema.COMM_PERIOD]):
+        found.add(extract_text(record.fields.get(schema.COMM_PERIOD)).strip())
+    return found
+
+
+def _previous(period: str) -> str:
+    year, month = int(period[:4]), int(period[5:7])
+    return f"{year - 1}-12" if month == 1 else f"{year}-{month - 1:02d}"
+
+
+def _delete_live(bitable: BitableClient, table_id: str, only: str | None = None) -> int:
+    """删掉总表里「未结算」的行。``only`` 给了就只删那个月的。"""
+    ids = [
+        record.record_id
+        for record in bitable.iter_records(table_id, field_names=[F_PERIOD])
+        if (label := extract_text(record.fields.get(F_PERIOD)).strip()).endswith(LIVE_SUFFIX)
+        and (only is None or label == live_label(only))
+    ]
+    return bitable.batch_delete_records(table_id, ids) if ids else 0
+
+
 # ---------- 写 ----------
 
 
@@ -371,8 +481,14 @@ class ArchiveResult:
 def write_archive(
     bitable: BitableClient, client: lark.Client, app_token: str, snapshot: Snapshot
 ) -> ArchiveResult:
-    """建这个月的两张表、追加总表。**已经有的一律不动**：存档写一次就是那个月的样子。"""
+    """建这个月的两张表、追加总表。**已经有的一律不动**：存档写一次就是那个月的样子。
+
+    写之前自检：任何一个渠道的明细合计和结算数差一分钱，就不写，报出来。
+    """
     period = snapshot.period
+    problems = snapshot.mismatches()
+    if problems:
+        raise ValueError(f"{period} 明细和结算对不上，没有存档：" + "；".join(problems))
     result = ArchiveResult(period, [], [])
     tables = {t.name: t.table_id for t in bitable.list_tables()}
 
@@ -410,6 +526,8 @@ def write_archive(
         result.appended = bitable.batch_create_records(
             cumulative, [detail_fields(period, r) for r in snapshot.details]
         )
+    # 这个月之前每天写进去的「未结算」行，正式存档后就不要了。
+    _delete_live(bitable, cumulative, only=period)
     return result
 
 
@@ -432,3 +550,39 @@ def archive_period(
         commission_query=commission_query,
     )
     return write_archive(bitable, client, settings.base_app_token, snapshot)
+
+
+def refresh_live(
+    settings: Any, bitable: BitableClient, today, client: lark.Client | None = None
+) -> int:
+    """每天导入后跑：把还没结算的月份（上个月如果还没结 + 这个月）现算一遍，覆盖总表里的
+    「未结算」行。返回写了几行。月初 1–3 号上个月还没结，两个月都会在。"""
+    from zoneinfo import ZoneInfo
+
+    from ..domain.commission_query import CommissionQueryService
+    from ..lark.client import get_client
+
+    current = f"{today.year}-{today.month:02d}"
+    settled = _settled_periods(bitable, settings)
+    months = [m for m in (_previous(current), current) if m not in settled]
+
+    tables = {t.name: t.table_id for t in bitable.list_tables()}
+    cumulative = tables.get(CUMULATIVE_TABLE)
+    if cumulative is None:
+        cumulative = create_table(
+            client or get_client(), settings.base_app_token, CUMULATIVE_TABLE, DETAIL_COLUMNS
+        )
+    _delete_live(bitable, cumulative)
+
+    commission_query = (
+        CommissionQueryService(bitable, settings=settings) if settings.table_daily_board else None
+    )
+    tz = ZoneInfo(settings.business_timezone)
+    written = 0
+    for month in months:
+        rows = build_live(bitable, settings, month, tz=tz, commission_query=commission_query)
+        if rows:
+            written += bitable.batch_create_records(
+                cumulative, [detail_fields(live_label(month), r) for r in rows]
+            )
+    return written

@@ -345,3 +345,32 @@ def test_登记后按UID补挂_只补这一个人空着的行(fake_bitable):
     assert schema.BOARD_CLIENT_LINK not in rows[other]
     # 按 UID 在服务端筛，不扫整张看板
     assert fake_bitable.filtered_reads == [(TBL_BOARD, schema.BOARD_CLIENT_UID, ("333",))]
+
+
+def test_导入后刷新结算存档的未结算月份_失败不影响导入(fake_bitable, tmp_path, caplog):
+    xlsx = _make_xlsx(tmp_path, [_row(when="2026-09-17", uid="222")])
+    result = run_daily(
+        settings=_settings(), bitable=fake_bitable, file=xlsx, refresh_live=lambda: 7
+    )
+    assert result.live_rows == 7
+
+    def boom():
+        raise RuntimeError("接口挂了")
+
+    xlsx2 = _make_xlsx(tmp_path, [_row(when="2026-09-18", uid="222")])
+    result = run_daily(settings=_settings(), bitable=fake_bitable, file=xlsx2, refresh_live=boom)
+    assert result.written == 1 and result.live_rows == 0
+    assert "刷新结算存档" in caplog.text
+
+
+def test_dry_run不刷新结算存档(fake_bitable, tmp_path):
+    called = []
+    xlsx = _make_xlsx(tmp_path, [_row(when="2026-09-17", uid="222")])
+    run_daily(
+        settings=_settings(),
+        bitable=fake_bitable,
+        file=xlsx,
+        dry_run=True,
+        refresh_live=lambda: called.append(1) or 0,
+    )
+    assert called == []
