@@ -601,3 +601,16 @@ def test_结算对比_说出比例改过和补登记的客户():
     assert "比例改过：30% → 50%" in diffs["R076"].reasons[0]
     assert diffs["R095"].settled == 0 and diffs["R095"].now == D("100.00")
     assert "结算时没有这个渠道" in diffs["R095"].reasons[0]
+    assert len(diffs["R076"].reasons) == 1  # 收入一样就不说收入
+
+
+def test_结算对比_收入只差小数尾巴不算变了():
+    from decimal import Decimal as D
+
+    from crm_basebot.domain.commission import CommissionRow
+
+    cmp = _load("compare_settled")
+    settled = [cmp.Settled("2026-03", "R076", "D", D("30"), D("17918.38"), 1, D("5375.51"))]
+    now = [CommissionRow("2026-03", "R076", "D", D("50"), D("17918.3799"), 1, {"a"})]
+    (diff,) = cmp.compare(settled, now)
+    assert diff.reasons == ("比例改过：30% → 50%",)

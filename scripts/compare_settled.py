@@ -35,6 +35,7 @@ from crm_basebot.lark.values import extract_text, to_number  # noqa: E402
 from crm_basebot.startup import load_settings, require_settings  # noqa: E402
 
 ZERO = Decimal("0")
+CENTS = Decimal("0.01")
 
 
 @dataclass(frozen=True)
@@ -92,7 +93,8 @@ def compare(settled: list[Settled], now: list[CommissionRow]) -> list[Diff]:
         else:
             if old.rate != new.rate_percent:
                 reasons.append(f"比例改过：{_rate(old.rate)} → {_rate(new.rate_percent)}")
-            if old.revenue != new.revenue_total:
+            # 结算表里的收入是存进 Base 的数字（读回来是浮点），比到分就够了
+            if old.revenue.quantize(CENTS) != new.revenue_total.quantize(CENTS):
                 reasons.append(
                     f"收入 {old.revenue:,.2f} → {new.revenue_total:,.2f}"
                     f"（客户 {old.clients} → {new.client_count} 个，结算后登记或改挂的客户）"
