@@ -572,3 +572,32 @@ def test_客户表的渠道公式从所属渠道带编号和名称():
     assert data_type == schema.FORMULA_DATA_TYPE_TEXT
     assert f"[{schema.CLIENT_REFERRAL_LINK}].[{schema.REFERRAL_NO}]" in expression
     assert f"[{schema.CLIENT_REFERRAL_LINK}].[{schema.REFERRAL_NAME}]" in expression
+
+
+# ---------- compare_settled ----------
+
+
+def test_结算对比_说出比例改过和补登记的客户():
+    from decimal import Decimal as D
+
+    from crm_basebot.domain.commission import CommissionRow
+
+    cmp = _load("compare_settled")
+    settled = [
+        cmp.Settled("2026-08", "R076", "DAI CANGWEI", D("30"), D("100"), 1, D("30.00")),
+        cmp.Settled("2026-08", "R001", "Same", D("20"), D("50"), 1, D("10.00")),
+    ]
+    now = [
+        CommissionRow("2026-08", "R076", "DAI CANGWEI", D("50"), D("100"), 1, {"a"}),
+        CommissionRow("2026-08", "R001", "Same", D("20"), D("50"), 1, {"b"}),
+        CommissionRow("2026-08", "R095", "JIANG JUN", D("20"), D("500"), 3, {"c", "d"}),
+        CommissionRow(
+            "2026-09", "R095", "JIANG JUN", D("20"), D("500"), 3, {"c"}
+        ),  # 没结算的月不比
+    ]
+    diffs = {d.referral_no: d for d in cmp.compare(settled, now)}
+    assert set(diffs) == {"R076", "R095"}
+    assert diffs["R076"].delta == D("20.00")
+    assert "比例改过：30% → 50%" in diffs["R076"].reasons[0]
+    assert diffs["R095"].settled == 0 and diffs["R095"].now == D("100.00")
+    assert "结算时没有这个渠道" in diffs["R095"].reasons[0]
