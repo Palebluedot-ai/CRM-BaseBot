@@ -1,5 +1,7 @@
 # CRM-BaseBot
 
+> 第一次接手：先看 [docs/MAINTAINER_GUIDE.md](docs/MAINTAINER_GUIDE.md)（整体和日常维护），要改代码再看 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
 > **先看哪一份？**
 >
 > | 你是谁 | 读这份 |
