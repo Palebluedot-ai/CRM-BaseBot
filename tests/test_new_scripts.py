@@ -681,3 +681,24 @@ def test_财务对比_说出我们缺的客户_四舍五入不算(tmp_path):
     assert lines[0].startswith("R029 YIN TONG：财务 13.39　结算 0.00")
     assert any("财务有、我们没有：HAN BAO" in line for line in lines)
     assert not any(line.startswith("R090") for line in lines)
+
+
+# ---------- register_from_board ----------
+
+
+def test_按看板名字找UID_忽略大小写和标点_相近的列出来():
+    reg = _load("register_from_board")
+    rows = [
+        {schema.BOARD_CLIENT_NAME: "Han Bao", schema.BOARD_CLIENT_UID: "2285000000000000001"},
+        {schema.BOARD_CLIENT_NAME: "HAN BAO", schema.BOARD_CLIENT_UID: "2285000000000000001"},
+        {
+            schema.BOARD_CLIENT_NAME: "PRIMAL TECH SUPPLY PTE LTD",
+            schema.BOARD_CLIENT_UID: "2285000000000000002",
+        },
+        {schema.BOARD_CLIENT_NAME: "HAN BAOBAO", schema.BOARD_CLIENT_UID: "2285000000000000003"},
+    ]
+    exact, similar = reg.board_uids(rows, "HAN BAO")
+    assert dict(exact) == {"2285000000000000001": 2}
+    assert similar == {"HAN BAOBAO": "2285000000000000003"}
+    exact, _ = reg.board_uids(rows, "PRIMAL TECH SUPPLY PTE. LTD.")
+    assert list(exact) == ["2285000000000000002"]
