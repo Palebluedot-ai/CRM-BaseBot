@@ -113,6 +113,7 @@ uv run python scripts/sync_base.py --apply
 | 机器人没反应 | mac mini `logs/bot.log`；`scripts/bot_connectivity_report.py` 看断线空窗 |
 | 某个客户的佣金对不上 | `scripts/diagnose_client.py --name "..."` |
 | 结算和现在重算差多少、为什么 | `scripts/compare_settled.py` |
+| 渠道要逐笔明细核对 | `scripts/export_channel_trades.py --channel R095 [--period YYYY-MM]`，Excel 存到 `output/` |
 | 和财务的月度表对账 | `scripts/compare_finance.py --period YYYY-MM --file 财务表.xlsx` |
 | 交易在不在每日导出里、哪个站点 | `scripts/find_in_exports.py --uid ...`（在 mac mini 跑） |
 | 客户登记了但看板没挂上 | `scripts/relink_board.py --apply` |

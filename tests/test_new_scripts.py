@@ -720,3 +720,96 @@ def test_结算表补归属销售_只补空的_没OpenID的列出来():
     updates, missing = back.plan(records, {"R001": "ou_alice", "R002": "ou_bob"})
     assert updates == {"r1": {schema.COMM_OWNER: [{"id": "ou_alice"}]}}
     assert missing == {"R009": 2}
+
+
+# ---------- export_channel_trades ----------
+
+
+def test_渠道明细导出_升级AI前的不计_月合计和结算表对上(
+    tmp_path, monkeypatch, fake_bitable, r095, capsys
+):
+    from openpyxl import load_workbook
+
+    from .conftest import TBL_COMMISSION
+
+    exporter = _load("export_channel_trades")
+    _wire(monkeypatch, exporter, fake_bitable)
+    monkeypatch.setattr(
+        exporter,
+        "load_settings",
+        lambda: SimpleNamespace(**vars(_settings()), table_commission=TBL_COMMISSION),
+    )
+    fake_bitable.tables[TBL_REFERRAL].records[r095][schema.REFERRAL_RATE] = 20
+    clients = fake_bitable.tables[TBL_CLIENT]
+    clients.add_existing(
+        {
+            schema.CLIENT_UID: "2219795833498687744",
+            schema.CLIENT_NAME: "WILAI SONNAM",
+            schema.CLIENT_REFERRAL_LINK: [r095],
+            schema.CLIENT_AI_STATUS: schema.AI_STATUS_ALREADY,
+        }
+    )
+    clients.add_existing(
+        {
+            schema.CLIENT_UID: "2256003665583491328",
+            schema.CLIENT_NAME: "SUDARAT",
+            schema.CLIENT_REFERRAL_LINK: [r095],
+            schema.CLIENT_AI_STATUS: schema.AI_STATUS_UPGRADED,
+            schema.CLIENT_AI_DATE: date_to_ms(date(2026, 9, 10), tz=SGT),
+        }
+    )
+    clients.add_existing({schema.CLIENT_UID: "999", schema.CLIENT_REFERRAL_LINK: ["recOther"]})
+    board = fake_bitable.tables[TBL_BOARD]
+
+    def trade(uid, day, fee, volume):
+        board.add_existing(
+            {
+                schema.BOARD_CLIENT_UID: uid,
+                schema.BOARD_ORDER_DATE: date_to_ms(day, tz=SGT),
+                schema.BOARD_TOTAL_REVENUE: fee,
+                schema.BOARD_TOTAL_VOLUME: volume,
+            }
+        )
+
+    trade("2219795833498687744", date(2026, 9, 3), 10.005, 5000)
+    trade("2256003665583491328", date(2026, 9, 10), 50, 9000)  # 升级当天，不算
+    trade("2256003665583491328", date(2026, 9, 15), 40, 8000)
+    trade("999", date(2026, 9, 15), 1000, 1)  # 别的渠道
+    trade("2219795833498687744", date(2026, 10, 1), 5, 100)
+    fake_bitable.tables[TBL_COMMISSION].add_existing(
+        {
+            schema.COMM_PERIOD: "2026-09",
+            schema.COMM_REFERRAL_NO: "R095",
+            schema.COMM_PAYABLE: 10.0,
+            schema.COMM_STATUS: schema.SETTLE_DONE,
+        }
+    )
+
+    out = tmp_path / "x.xlsx"
+    assert exporter.main(["--channel", "jiang-jun", "--period", "2026-09", "--out", str(out)]) == 0
+
+    printed = capsys.readouterr().out
+    assert "共 3 笔，其中 2 笔计入佣金" in printed
+    assert "2026-09：应付 10.00　和结算表一致（已结算）" in printed
+
+    book = load_workbook(out)
+    detail = list(book["交易明细"].iter_rows(min_row=3, values_only=True))
+    assert [row[3] for row in detail] == [
+        "2219795833498687744",
+        "2256003665583491328",
+        "2256003665583491328",
+    ]
+    assert [row[6] for row in detail] == ["是", "否（升级 AI 之前）", "是"]
+    assert [row[7] for row in detail] == [2.0, 0.0, 8.0]
+    month = list(book["按月汇总"].iter_rows(min_row=2, values_only=True))
+    assert month == [("2026-09", 2, 2, 13000.0, 50.005, "20%", 10.0, 10.0, "已结算")]
+
+
+def test_渠道明细导出_名字对上几个就停下(monkeypatch, fake_bitable, r095, capsys):
+    exporter = _load("export_channel_trades")
+    _wire(monkeypatch, exporter, fake_bitable)
+    fake_bitable.tables[TBL_REFERRAL].add_existing(
+        {schema.REFERRAL_NO: "R096", schema.REFERRAL_NAME: "JIANG JUN 2"}
+    )
+    assert exporter.main(["--channel", "jiang"]) == 1
+    assert "对上 2 个渠道" in capsys.readouterr().out
