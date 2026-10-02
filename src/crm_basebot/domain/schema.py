@@ -125,8 +125,8 @@ AI_STATUS_UPGRADED = "升级为AI"
 AI_STATUS_NOT = "非AI"
 AI_STATUS_OPTIONS = (AI_STATUS_ALREADY, AI_STATUS_UPGRADED, AI_STATUS_NOT)
 
-# 公式：把上面两列换算成一个「门槛数」，交易日（写成 20260910 这种数）大于它才算佣金。
-# 0 = 什么时候的交易都算；99999999 = 都不算；20260910 = 9 月 10 日升级，11 日起算。
+# 公式：把上面两列换算成一个「门槛数」，交易日（写成 20260910 这种数）大于等于它才算佣金。
+# 0 = 什么时候的交易都算；99999999 = 都不算；20260910 = 9 月 10 日升级，当天起算。
 # 规则本身在 domain/ai_status.py（``AiEligibility.gate_number`` 是同一个数的 Python 版）。
 CLIENT_AI_GATE = "AI佣金起算"
 AI_GATE_ALWAYS = 0
@@ -241,7 +241,7 @@ BOARD_REFERRAL_NAME = "渠道名称"  # 公式：渠道的 Name
 BOARD_CLIENT_RATE = "分佣比例"  # 公式：渠道的 Commission Rate，百分数
 BOARD_MONTH = "月份"  # 公式：交易日期所属月份，形如 2026-07
 BOARD_AI_GATE = "AI佣金起算"  # 公式：客户的 AI 门槛数，照抄客户表同名列
-# 公式：这一笔该分出去的钱，按 AI 规则（升级第二天起才算，之前的显示 0）。
+# 公式：这一笔该分出去的钱，按 AI 规则（升级当天起才算，之前的显示 0）。
 # 2026-09-25 一度要删（那时它不知道 AI 规则，会和机器人对不上），9-26 改成带 AI 规则留下：
 # 超哥每天就看这一列。**结算从来不读它**，钱一直是 Python 算的（domain/commission.py），
 # 这一列只是让 Base 里看到的和机器人一致。
@@ -309,12 +309,12 @@ DAILY_BOARD_DERIVED_FORMULAS: dict[str, tuple[str, int]] = {
         FORMULA_DATA_TYPE_NUMBER,
     ),
     # 没挂上渠道 → 空（不是 0：0 等于宣称「这笔没有佣金」，实际是「不知道」）。
-    # 9 月以前的交易、或者交易日晚于门槛 → 收入 × 比例；否则 0（还不是 AI）。
+    # 9 月以前的交易、或者交易日不早于门槛 → 收入 × 比例；否则 0（还不是 AI）。
     # 日期换成 20260910 这种数再比，理由同「AI佣金起算」。
     BOARD_ROW_COMMISSION: (
         f'IF(ISBLANK([{BOARD_CLIENT_RATE}]), "", '
         f"IF(OR({_day_number(BOARD_ORDER_DATE)} < {AI_RULE_START_NUMBER}, "
-        f"{_day_number(BOARD_ORDER_DATE)} > [{BOARD_AI_GATE}]), "
+        f"{_day_number(BOARD_ORDER_DATE)} >= [{BOARD_AI_GATE}]), "
         f"[{BOARD_TOTAL_REVENUE}] * [{BOARD_CLIENT_RATE}] / 100, 0))",
         FORMULA_DATA_TYPE_NUMBER,
     ),

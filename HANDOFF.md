@@ -231,7 +231,7 @@ uv run python -m crm_basebot.app        # 机器人（长连接，不需要公�
 ## 9. 这套东西的设计要点（免得你误改）
 
 - **钱在 Python 里算**（`domain/commission.py`）：看板的 `分佣比例` / `月份` / `本笔佣金` 是给人看的公式列，
-  月结不读它们。交易佣金只算 AI 客户，升级第二天起（`domain/ai_status.py`）；`本笔佣金` 是同一条规则的
+  月结不读它们。交易佣金只算 AI 客户，升级当天起（`domain/ai_status.py`）；`本笔佣金` 是同一条规则的
   Base 版，`sync_base.py --apply` 逐行核对两边。`verify_commission.py` 只核对关联和比例。
 - **晚登记的客户每天补挂**：看板的「客户」关联只在写入时挂，每天导入顺手补上客户晚登记的老行
   （`pipeline/board.relink_missing`，也可以手动跑 `scripts/relink_board.py`）。

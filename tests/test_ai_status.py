@@ -1,6 +1,6 @@
 """交易佣金只付给 AI 客户带来的交易（2026-09-26 JY 定的规则）。
 
-规则一句话：**升级 AI 的第二天起的交易才算；开户即AI 全算；非AI 不算；只管 2026-09-01 起的
+规则一句话：**升级 AI 当天起的交易就算；开户即AI 全算；非AI 不算；只管 2026-09-01 起的
 交易；以前登记、没填 AI 那两列的客户照旧算。**
 
 月结、佣金查询、渠道详情卡三处都走 ``commission.trade_counts``，这里除了规则本身，
@@ -50,11 +50,11 @@ def test_八月及以前永远照旧(day):
     assert SEP_10.counts(day)
 
 
-def test_升级第二天起才算():
-    """JY：9 月 10 号升级，9 月 1–9 号不能有佣金，11 号开始有。"""
+def test_升级当天起就算():
+    """9 月 10 号升级，9 月 1–9 号不能有佣金，10 号当天开始有（2026-10-02 改，原先是 11 号起）。"""
     assert not SEP_10.counts(date(2026, 9, 1))
     assert not SEP_10.counts(date(2026, 9, 9))
-    assert not SEP_10.counts(date(2026, 9, 10))  # 升级当天也不算
+    assert SEP_10.counts(date(2026, 9, 10))  # 升级当天就算
     assert SEP_10.counts(date(2026, 9, 11))
     assert SEP_10.counts(date(2026, 10, 1))
 
@@ -118,8 +118,8 @@ def test_老表没有那两列时照旧算():
 
 
 def test_一笔交易按它自己那天判():
-    assert not trade_counts(SEP_10, date_to_ms(date(2026, 9, 10), tz=SGT), tz=SGT)
-    assert trade_counts(SEP_10, date_to_ms(date(2026, 9, 11), tz=SGT), tz=SGT)
+    assert not trade_counts(SEP_10, date_to_ms(date(2026, 9, 9), tz=SGT), tz=SGT)
+    assert trade_counts(SEP_10, date_to_ms(date(2026, 9, 10), tz=SGT), tz=SGT)
     assert trade_counts(None, date_to_ms(date(2026, 9, 1), tz=SGT), tz=SGT)
 
 
@@ -174,7 +174,7 @@ def base(fake_bitable):
             schema.CLIENT_AI_DATE: date_to_ms(date(2026, 9, 10), tz=SGT),
         }
     )
-    for day in ("2026/09/05", "2026/09/10", "2026/09/11"):
+    for day in ("2026/09/05", "2026/09/09", "2026/09/10"):  # 只有升级当天那笔算
         fake_bitable.tables[TBL_BOARD].add_existing(
             {
                 schema.BOARD_CLIENT_UID: UID_MID,

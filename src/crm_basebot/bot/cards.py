@@ -192,7 +192,7 @@ AI_CHOICES: list[tuple[str, str]] = [
     (f"{schema.AI_STATUS_NOT}（暂不算交易佣金）", schema.AI_STATUS_NOT),
 ]
 
-AI_RULE_NOTE = "交易佣金从客户升级 AI 的第二天起算；非 AI 不算。ECAS 返佣不看 AI。"
+AI_RULE_NOTE = "交易佣金从客户升级 AI 当天起算；非 AI 不算。ECAS 返佣不看 AI。"
 
 
 def _ai_fields(status_name: str, date_name: str) -> list[dict[str, Any]]:
@@ -877,7 +877,7 @@ def commission_result_card(
                     _text(
                         f"{viewer_name} 名下 {span} 没有佣金。\n\n"
                         "可能原因：这几个月看板里没有你名下客户的交易；客户还没登记归属；"
-                        "或者客户是非 AI、升级日期还没补（升级当天及之前的交易不算）。"
+                        "或者客户是非 AI、升级日期还没补（升级之前的交易不算）。"
                     )
                 ]
             },

@@ -3,8 +3,8 @@
 AI = Accredited Investor / Professional Investor，这里两者通用。规则（2026-09-26 JY 定的，
 取代 9-25 那版「按月」的说法）：
 
-  · **按天算**：客户升级 AI 的**第二天起**的交易才算佣金。9 月 10 日升级，9 月 11 日起的
-    交易算；9 月 10 日当天和之前的都不算。
+  · **按天算**：客户升级 AI **当天起**的交易就算佣金。9 月 10 日升级，9 月 10 日当天和之后的
+    交易算；9 月 9 日及之前的不算。（2026-10-02 改：原先是第二天起，业务确认升级当天就算。）
   · 「开户即AI」的客户，所有交易都算。
   · 「非AI」不算；「升级为AI」但日期还没补的，也先不算（补上日期后重算就回来了）。
   · **只管 2026-09-01 起的交易**（``RULE_START_DAY``）。8 月及以前已经结算付款，任何时候
@@ -16,7 +16,7 @@ AI = Accredited Investor / Professional Investor，这里两者通用。规则�
   ``AI状态``    开户即AI / 升级为AI / 非AI
   ``升级AI日期``  升级为AI 时必填；开户即AI 可填可不填（填了也不看）
 
-判定顺序：开户即AI 全算 → 有日期看日期（晚于那天才算）→ 没日期时「非AI」「升级为AI」不算
+判定顺序：开户即AI 全算 → 有日期看日期（当天及之后才算）→ 没日期时「非AI」「升级为AI」不算
 → 其余（老客户）照算。
 
 **只管交易佣金。** ECAS 返佣开了户就返，不看 AI（见 domain/ecas.py）。
@@ -55,10 +55,10 @@ def day_number(day: date) -> int:
 class AiEligibility:
     status: str = ""
     upgraded_on: date | None = None
-    """升级 AI 的那一天（这一天本身不算）。None 表示没填日期。"""
+    """升级 AI 的那一天（这一天本身就算）。None 表示没填日期。"""
 
     def gate_number(self) -> int:
-        """交易日（写成 20260910 这种数）**大于**它才算佣金。和 Base 公式一一对应。"""
+        """交易日（写成 20260910 这种数）**大于等于**它才算佣金。和 Base 公式一一对应。"""
         if self.status == schema.AI_STATUS_ALREADY:
             return GATE_ALWAYS
         if self.upgraded_on is not None:
@@ -71,7 +71,7 @@ class AiEligibility:
         """这个客户在 ``day`` 这一天的交易算不算佣金。"""
         if day < RULE_START_DAY:
             return True
-        return day_number(day) > self.gate_number()
+        return day_number(day) >= self.gate_number()
 
 
 def eligibility_of(fields: dict[str, Any], *, tz: tzinfo) -> AiEligibility:

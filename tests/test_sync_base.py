@@ -247,7 +247,7 @@ def test_本笔佣金按AI规则算():
     assert data_type == schema.FORMULA_DATA_TYPE_NUMBER
     assert expression.startswith(f'IF(ISBLANK([{schema.BOARD_CLIENT_RATE}]), ""')  # 没渠道是空
     assert f"< {schema.AI_RULE_START_NUMBER}" in expression  # 9 月以前照旧
-    assert f"> [{schema.BOARD_AI_GATE}]" in expression  # 晚于门槛才算（第二天起）
+    assert f">= [{schema.BOARD_AI_GATE}]" in expression  # 不早于门槛就算（升级当天起）
     assert f"[{schema.BOARD_TOTAL_REVENUE}] * [{schema.BOARD_CLIENT_RATE}] / 100, 0))" in expression
 
 
@@ -462,15 +462,15 @@ def test_月份自检通过时不报警(fake_bitable, capsys):
 # ---------- AI 规则自检 ----------
 
 
-def _ai_board(fake_bitable, *, commission_on_sep_10: float):
-    """一个 9/10 升级的客户，9/10 和 9/11 各一笔 1000 的交易，比例 20%。"""
+def _ai_board(fake_bitable, *, commission_on_sep_9: float):
+    """一个 9/10 升级的客户，9/9 和 9/10 各一笔 1000 的交易，比例 20%。"""
     client = fake_bitable.tables[TBL_CLIENT].add_existing(
         {
             schema.CLIENT_AI_STATUS: schema.AI_STATUS_UPGRADED,
             schema.CLIENT_AI_DATE: date_to_ms(date(2026, 9, 10), tz=SGT),
         }
     )
-    for day, commission in ((10, commission_on_sep_10), (11, 200.0)):
+    for day, commission in ((9, commission_on_sep_9), (10, 200.0)):
         fake_bitable.tables[TBL_BOARD].add_existing(
             {
                 schema.BOARD_ORDER_DATE: date_to_ms(date(2026, 9, day), tz=SGT),
@@ -484,17 +484,17 @@ def _ai_board(fake_bitable, *, commission_on_sep_10: float):
 
 
 def test_AI自检_Base和月结算的一样就说全对(fake_bitable, capsys):
-    _ai_board(fake_bitable, commission_on_sep_10=0.0)
+    _ai_board(fake_bitable, commission_on_sep_9=0.0)
     assert sync_base._verify_ai_commission(fake_bitable, TBL_BOARD, TBL_CLIENT, tz=SGT)
     assert "核对 2 行，全对" in capsys.readouterr().out
 
 
-def test_AI自检_升级当天Base还算了钱就报出来(fake_bitable, capsys):
-    _ai_board(fake_bitable, commission_on_sep_10=200.0)
+def test_AI自检_升级前一天Base还算了钱就报出来(fake_bitable, capsys):
+    _ai_board(fake_bitable, commission_on_sep_9=200.0)
     assert not sync_base._verify_ai_commission(fake_bitable, TBL_BOARD, TBL_CLIENT, tz=SGT)
     out = capsys.readouterr().out
     assert "1 行对不上" in out
-    assert "2026-09-10 本笔佣金 200.0（应为 0.00）" in out
+    assert "2026-09-09 本笔佣金 200.0（应为 0.00）" in out
 
 
 # ---------- 数字显示格式 ----------

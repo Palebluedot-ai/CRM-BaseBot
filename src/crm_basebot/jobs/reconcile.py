@@ -284,7 +284,7 @@ def run(args: argparse.Namespace, settings, bitable: BitableClient) -> int:
         # 免得有人拿看板对账时以为这几笔掉了。
         print(
             f"\n另有 {len(excluded)} 个「客户 × 月份」里有交易因为当天还不是 AI，没算佣金"
-            "（升级第二天起才算）："
+            "（升级当天起才算）："
         )
         for p, uid in excluded[:20]:
             print(f"    {p}  {uid}")

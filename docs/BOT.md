@@ -228,7 +228,7 @@ OpenID；名册里没有的人一律被拒，不是默默放行。
 ```
 
 关键点：**机器人登记「归属」和 AI 状态，算钱只有一套代码**：`domain/commission.py`（月结）和
-`commission_query.accumulate`（佣金查询、渠道详情）用同一条「收入 × 比例、升级 AI 第二天起才算」
+`commission_query.accumulate`（佣金查询、渠道详情）用同一条「收入 × 比例、升级 AI 当天起就算」
 规则（`domain/ai_status.py`）。看板上的「本笔佣金」公式是同一条规则的 Base 版，只给人看，不参与结算。
 
 ## 三、闭环还缺什么（2026-09-18 实测）
