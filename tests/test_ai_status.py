@@ -1,6 +1,6 @@
 """交易佣金只付给 AI 客户带来的交易（2026-09-26 JY 定的规则）。
 
-规则一句话：**升级 AI 当天起的交易就算；开户即AI 全算；非AI 不算；只管 2026-09-01 起的
+规则一句话：**升级 AI 当天起的交易就算；开户即AI 全算；非AI 不算；只管 2026-08-01 起的
 交易；以前登记、没填 AI 那两列的客户照旧算。**
 
 月结、佣金查询、渠道详情卡三处都走 ``commission.trade_counts``，这里除了规则本身，
@@ -39,12 +39,12 @@ SEP_10 = AiEligibility(status=schema.AI_STATUS_UPGRADED, upgraded_on=date(2026, 
 
 
 def test_规则从九月一号的交易开始():
-    assert RULE_START_DAY == date(2026, 9, 1)
+    assert RULE_START_DAY == date(2026, 8, 1)
     assert day_number(RULE_START_DAY) == schema.AI_RULE_START_NUMBER  # Base 公式里那个数
 
 
-@pytest.mark.parametrize("day", [date(2026, 8, 31), date(2026, 1, 5)])
-def test_八月及以前永远照旧(day):
+@pytest.mark.parametrize("day", [date(2026, 7, 31), date(2026, 1, 5)])
+def test_七月及以前永远照旧(day):
     """已经结算付款的月份，任何时候重算都不能因为新规则变。"""
     assert AiEligibility(status=schema.AI_STATUS_NOT).counts(day)
     assert SEP_10.counts(day)
@@ -57,6 +57,14 @@ def test_升级当天起就算():
     assert SEP_10.counts(date(2026, 9, 10))  # 升级当天就算
     assert SEP_10.counts(date(2026, 9, 11))
     assert SEP_10.counts(date(2026, 10, 1))
+
+
+def test_八月也按AI规则():
+    """2026-10-02：8 月也按 AI 规则。8/24 升级的，8/20 那笔不算，8/24 当天起算。"""
+    ai = AiEligibility(status=schema.AI_STATUS_UPGRADED, upgraded_on=date(2026, 8, 24))
+    assert not ai.counts(date(2026, 8, 20))
+    assert ai.counts(date(2026, 8, 24))
+    assert AiEligibility(status=schema.AI_STATUS_ALREADY).counts(date(2026, 8, 1))
 
 
 def test_八月升级的九月全算():
@@ -183,7 +191,7 @@ def base(fake_bitable):
             }
         )
     for uid in (UID_OLD, UID_LATE):
-        for day in ("2026/08/15", "2026/09/15", "2026/10/15"):
+        for day in ("2026/07/15", "2026/09/15", "2026/10/15"):
             fake_bitable.tables[TBL_BOARD].add_existing(
                 {
                     schema.BOARD_CLIENT_UID: uid,
@@ -199,8 +207,8 @@ def test_月结不算升级之前的交易(base):
     rows, _ = CommissionCalculator(base, settings=Settings()).compute()
     revenue = {row.period: row.revenue_total for row in rows}
     assert revenue == {
-        "2026-08": Decimal("2000"),  # 八月照旧：两个都算
-        "2026-09": Decimal("1100"),  # 老客户 1000 + 九月十号升级的只算 11 号那笔 100
+        "2026-07": Decimal("2000"),  # 七月照旧：两个都算
+        "2026-09": Decimal("1100"),  # 老客户 1000 + 九月十号升级的只算 10 号那笔 100
         "2026-10": Decimal("2000"),  # 十月五号升级的，15 号的交易算
     }
 
@@ -214,7 +222,7 @@ def test_月结说出哪些因为不是AI没算(base):
 def test_佣金查询不算升级之前的交易(base):
     prance = Sales(open_id="ou_prance", name="Prance", role=schema.ROLE_SALES, is_active=True)
     result = CommissionQueryService(base, settings=Settings()).query(
-        prance, ["2026-08", "2026-09", "2026-10"]
+        prance, ["2026-07", "2026-09", "2026-10"]
     )
     assert [result.total_payable(p) for p in result.periods] == [
         Decimal("400.00"),

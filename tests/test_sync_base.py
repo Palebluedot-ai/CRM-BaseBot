@@ -246,7 +246,7 @@ def test_本笔佣金按AI规则算():
     expression, data_type = schema.DAILY_BOARD_DERIVED_FORMULAS[schema.BOARD_ROW_COMMISSION]
     assert data_type == schema.FORMULA_DATA_TYPE_NUMBER
     assert expression.startswith(f'IF(ISBLANK([{schema.BOARD_CLIENT_RATE}]), ""')  # 没渠道是空
-    assert f"< {schema.AI_RULE_START_NUMBER}" in expression  # 9 月以前照旧
+    assert f"< {schema.AI_RULE_START_NUMBER}" in expression  # 8 月以前照旧
     assert f">= [{schema.BOARD_AI_GATE}]" in expression  # 不早于门槛就算（升级当天起）
     assert f"[{schema.BOARD_TOTAL_REVENUE}] * [{schema.BOARD_CLIENT_RATE}] / 100, 0))" in expression
 

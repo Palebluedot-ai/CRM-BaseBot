@@ -131,7 +131,7 @@ AI_STATUS_OPTIONS = (AI_STATUS_ALREADY, AI_STATUS_UPGRADED, AI_STATUS_NOT)
 CLIENT_AI_GATE = "AI佣金起算"
 AI_GATE_ALWAYS = 0
 AI_GATE_NEVER = 99999999
-AI_RULE_START_NUMBER = 20260901  # 2026-09-01 以前的交易不看 AI，照旧算
+AI_RULE_START_NUMBER = 20260801  # 2026-08-01 以前的交易不看 AI，照旧算
 
 CLIENT_FIELDS: dict[str, int] = {
     # 必须是文本。18-19 位 UID 存成数字会在服务端就被 float64 抹平精度。
@@ -309,7 +309,7 @@ DAILY_BOARD_DERIVED_FORMULAS: dict[str, tuple[str, int]] = {
         FORMULA_DATA_TYPE_NUMBER,
     ),
     # 没挂上渠道 → 空（不是 0：0 等于宣称「这笔没有佣金」，实际是「不知道」）。
-    # 9 月以前的交易、或者交易日不早于门槛 → 收入 × 比例；否则 0（还不是 AI）。
+    # 8 月以前的交易、或者交易日不早于门槛 → 收入 × 比例；否则 0（还不是 AI）。
     # 日期换成 20260910 这种数再比，理由同「AI佣金起算」。
     BOARD_ROW_COMMISSION: (
         f'IF(ISBLANK([{BOARD_CLIENT_RATE}]), "", '
