@@ -5,6 +5,7 @@
     uv run python -m crm_basebot.jobs.reconcile --period 2026-03 --write
     uv run python -m crm_basebot.jobs.reconcile --period 2026-03 --write --replace
     uv run python -m crm_basebot.jobs.reconcile --all-periods
+    uv run python -m crm_basebot.jobs.reconcile --period 2026-08 --write --referral R095
 
 默认**只算不写**。要真的写进 Base 得显式加 ``--write`` —— 这是一次会改动结算
 数据的操作，不应该手滑就发生。
@@ -14,6 +15,10 @@
 加 ``--replace``：先删掉那些月份的旧行，再写新的（2026-09-05 定的）。删的范围就是
 本次结算的月份，``--all-periods --replace`` 则清空整张汇总表。算出来是空的时候
 不会拿空结果去顶掉旧汇总 —— 看板没导完就跑一次，不该把上个月好好的账删没。
+
+``--referral R095``（可以给几次）只结这几个渠道：算、删、写都只碰它们那几行，同月别的渠道
+一行不动。给已经结过的月份补一个渠道用 —— 2026-10-02 江军 8 月的客户结算后才登记，要补
+他的 8 月，但整月 ``--replace`` 会顺手把结算后改过比例的 R076 等也改掉，和已付的对不上。
 
 先删后写没有事务：删完写到一半失败，表里就是半套数据。这种情况下再跑一次
 ``--write --replace`` 就好，不需要人工清理。
@@ -60,17 +65,26 @@ class WriteRefused(RuntimeError):
 
 
 def existing_summary(
-    bitable: BitableClient, table_id: str, periods: set[str] | None
+    bitable: BitableClient,
+    table_id: str,
+    periods: set[str] | None,
+    referrals: set[str] | None = None,
 ) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
     """汇总表里已有的行，按结算月份分组：(已结算的, 进行中的)，值是 record_id。
 
-    ``periods`` 给 None 表示不限月份。整行读（不指定列）：汇总表很小，而且「状态」那一列
+    ``periods`` 给 None 表示不限月份；``referrals``（大写的渠道编号）给了就只看这几个渠道的行。
+    整行读（不指定列）：汇总表很小，而且「状态」那一列
     在跑过 sync_base 之前可能还不存在 —— 指定一个不存在的列名，接口整个报错。
     """
     settled: dict[str, list[str]] = defaultdict(list)
     live: dict[str, list[str]] = defaultdict(list)
     for record in bitable.iter_records(table_id):
         period = extract_text(record.fields.get(schema.COMM_PERIOD))
+        if referrals is not None and (
+            extract_text(record.fields.get(schema.COMM_REFERRAL_NO)).strip().upper()
+            not in referrals
+        ):
+            continue
         if periods is None or period in periods:
             (live if is_live(record.fields) else settled)[period].append(record.record_id)
     return dict(settled), dict(live)
@@ -91,13 +105,15 @@ def write_summary(
     replace: bool,
     live: bool = False,
     owners: dict[str, str] | None = None,
+    referrals: set[str] | None = None,
 ) -> tuple[int, int]:
     """把汇总行写进 Base，返回 (删除行数, 写入行数)。
 
     ``owners`` 是 渠道编号 -> 归属销售 open_id（``settlement.referral_owners``），
     填进「归属销售」那一列，给 Base 高级权限按人筛行用。
 
-    ``periods`` 是本次覆盖的月份，None 表示全部。
+    ``periods`` 是本次覆盖的月份，None 表示全部。``referrals`` 给了就只覆盖这几个渠道的行
+    （``rows`` 由调用方先筛好），同月别的渠道一行不碰。
 
     - ``live=True``（每天导入后刷新当月）：写成「进行中」，先删这些月份进行中的旧行。
       这些月份里只要有**已结算**的行就拒绝 —— 每天的数永远不顶掉结算。
@@ -106,7 +122,7 @@ def write_summary(
 
     拒绝都发生在动手之前，拒绝了就一行都没动。
     """
-    existing, provisional = existing_summary(bitable, table_id, periods)
+    existing, provisional = existing_summary(bitable, table_id, periods, referrals)
 
     if existing and live:
         raise WriteRefused(f"{_describe(existing)} 已经结算过了，每天的刷新不会去改它。")
@@ -188,6 +204,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="汇总表里已有本次结算月份的行时，先删掉它们再写。只和 --write 一起用",
     )
     parser.add_argument(
+        "--referral",
+        action="append",
+        default=[],
+        metavar="RXXX",
+        help="只结这个渠道（可以给几次），同月别的渠道一行不动。必须配 --period",
+    )
+    parser.add_argument(
         "--strict",
         action="store_true",
         help="交易明细里有未登记归属的客户时直接失败",
@@ -200,6 +223,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.replace and not args.write:
         parser.error("--replace 只在 --write 时有意义：不写就没有什么可替换的")
+    if args.referral and not args.period:
+        parser.error("--referral 要配 --period：只补一个渠道时得说清楚是哪个月")
 
     settings = load_settings()
     require_settings(settings, *REQUIRED_KEYS)
@@ -244,6 +269,18 @@ def run(args: argparse.Namespace, settings, bitable: BitableClient) -> int:
             )
             return 1
         scope = f"{period}（自动选定：日读看板里最新有数据的月份）"
+
+    referrals = {no.strip().upper() for no in args.referral} or None
+    if referrals:
+        found = {row.referral_no.upper() for row in rows}
+        rows = [row for row in rows if row.referral_no.upper() in referrals]
+        scope += f"，只结 {'、'.join(sorted(referrals))}"
+        missing = referrals - found
+        if missing:
+            print(
+                f"\n{'、'.join(sorted(missing))} 在 {period} 没有算出任何佣金"
+                "（没有交易或渠道编号写错）。"
+            )
 
     # 把实际结算的月份原原本本打出来。默认值是算出来的而不是写死的，
     # 不打印的话，看报表的人没法确认这个数对应的是哪个月。
@@ -306,6 +343,7 @@ def run(args: argparse.Namespace, settings, bitable: BitableClient) -> int:
             periods=target_periods,
             replace=args.replace,
             owners=referral_owners(bitable, settings.table_referral),
+            referrals=referrals,
         )
     except WriteRefused as exc:
         print(f"\n没有写入：{exc}")
@@ -320,6 +358,7 @@ def run(args: argparse.Namespace, settings, bitable: BitableClient) -> int:
             # 记的是实际结算的月份，不是命令行传进来的原始值 —— 默认值是算出来的，
             # 审计里必须能看出那次跑的到底是哪个月。
             "结算范围": period or "全部月份",
+            "只结渠道": sorted(referrals) if referrals else "全部",
             "替换": args.replace,
             "删除行数": deleted,
             "写入行数": written,

@@ -319,3 +319,57 @@ def test_写结算行时带上归属销售_没有负责人的就不填(fake_bita
     }
     assert rows["R001"][schema.COMM_OWNER] == [{"id": "ou_alice"}]
     assert schema.COMM_OWNER not in rows["R002"]
+
+
+# ---------- --referral：给已结的月份只补一个渠道 ----------
+
+
+def test_只补一个渠道_同月别的渠道一行不动(base, capsys):
+    """2026-10-02：江军 8 月的客户结算后才登记，只补 R095，不碰已付的其他渠道。"""
+    others = _old_summary(base, "2026-03", 2)  # R001、R002 已结
+    base.tables[TBL_COMMISSION].records[others[0]][schema.COMM_PAYABLE] = 999.0
+
+    assert _run(base, "--period", "2026-03", "--write", "--replace", "--referral", "r001") == 0
+
+    records = base.tables[TBL_COMMISSION].records
+    assert others[0] not in records  # R001 换成新算的
+    assert others[1] in records  # R002 一行不动
+    new = [r for rid, r in records.items() if rid not in others]
+    assert [(r[schema.COMM_REFERRAL_NO], r[schema.COMM_PAYABLE]) for r in new] == [("R001", 146.0)]
+    (audit,) = base.tables[TBL_AUDIT].records.values()
+    assert json.loads(audit[schema.AUDIT_DETAIL])["只结渠道"] == ["R001"]
+
+
+def test_只补一个渠道_那个渠道还没结过就不用replace(base):
+    other = _old_summary(base, "2026-03", 2)[1]  # 只有 R002 结过
+    base.tables[TBL_COMMISSION].records.pop(_summary_ids(base, "R001")[0])
+
+    assert _run(base, "--period", "2026-03", "--write", "--referral", "R001") == 0
+    assert other in base.tables[TBL_COMMISSION].records
+    assert sorted(_summary_nos(base)) == ["R001", "R002"]
+
+
+def test_只补一个渠道_已经结过还是要replace(base, capsys):
+    _old_summary(base, "2026-03", 1)
+
+    assert _run(base, "--period", "2026-03", "--write", "--referral", "R001") == 1
+    assert "--replace" in capsys.readouterr().out
+
+
+def test_referral不带period是用法错误():
+    with pytest.raises(SystemExit):
+        main(["--referral", "R001"])
+
+
+def _summary_ids(fake_bitable, no: str) -> list[str]:
+    return [
+        rid
+        for rid, r in fake_bitable.tables[TBL_COMMISSION].records.items()
+        if r.get(schema.COMM_REFERRAL_NO) == no
+    ]
+
+
+def _summary_nos(fake_bitable) -> list[str]:
+    return [
+        r[schema.COMM_REFERRAL_NO] for r in fake_bitable.tables[TBL_COMMISSION].records.values()
+    ]

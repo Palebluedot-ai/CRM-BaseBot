@@ -78,6 +78,7 @@ uv run python -m crm_basebot.jobs.reconcile --period 2026-03   # 指定月份
 uv run python -m crm_basebot.jobs.reconcile --all-periods      # 全部月份
 uv run python -m crm_basebot.jobs.reconcile --period 2026-03 --write
 uv run python -m crm_basebot.jobs.reconcile --period 2026-03 --write --replace   # 重算：先删该月旧汇总再写
+uv run python -m crm_basebot.jobs.reconcile --period 2026-08 --write --referral R095    # 只补一个渠道，同月别的渠道不动
 ```
 
 不传 `--period` 时结算的是**日读看板里最新有数据的那个月**，不是「上个月」。写死上个月，月初跑的时候会算出一片空白，而它又恰好在「这个月的数据其实已经有了」的时候什么都不说。实际选中的月份一定会打印在输出第一行，不用猜。
