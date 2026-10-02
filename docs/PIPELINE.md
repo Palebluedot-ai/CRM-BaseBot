@@ -9,7 +9,7 @@
   └─ scripts/import_daily_incremental.py --from-mail   ← 只下载，不改 Base
        └─ 本地解析 + 筛站点 + 算「哪些交易日是新的」
             └─ 增量导入 Daily Revenue Board（先删这些天，再写）
-                 └─ 每月 3 号月结按「收入 × 比例」算应付，只算 AI 客户升级次日起的交易（domain/commission.py）
+                 └─ 每月 1 号 16:30 月结按「收入 × 比例」算应付，只算 AI 客户升级次日起的交易（domain/commission.py）
 ```
 
 ## 只导新加坡站
@@ -102,7 +102,9 @@ GRAPH_SENDER=
 tail -f logs/daily-import-stdout.log          # 看跑批输出
 ```
 
-- 每月 3 号 10:00 的月结结完之后会**存档**：建「YYYY-MM 结算明细 / 结算汇总」两张表，追加进
+- 每天导入完、补挂完，把两张结算表里还没结算的月份写成「进行中」（`jobs/live_summary.refresh`）；
+  已结算的月份一行都不碰。失败只记日志，不影响导入。
+- 每月 1 号 16:30 的月结结完之后会**存档**：建「YYYY-MM 结算明细 / 结算汇总」两张表，追加进
   「结算明细（全部月份）」（`jobs/archive.py`）。存档失败不影响结算，卡片上会写怎么补
   （`scripts/archive_month.py`）。
 - 每天导入完、补挂完，刷新结算存档总表里「未结算」的月份（`jobs/archive.refresh_live`）；

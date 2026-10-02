@@ -204,7 +204,7 @@ uv run python -m crm_basebot.app        # 机器人（长连接，不需要公�
 ```bash
 ./scripts/install-bot-launchd.sh                 # 机器人：开机自启 + 崩溃自动拉起
 ./scripts/run-monthly-reconcile.sh --dry-run     # 先验月结：应该算出上个月的金额
-./scripts/install-monthly-reconcile-launchd.sh   # 每月 3 号 10:00 结算上月并私信管理员
+./scripts/install-monthly-reconcile-launchd.sh   # 每月 1 号 16:30 结算上月并私信管理员
 ```
 
 ⚠️ 机器人同时只能有一个进程 —— 两个进程拿同一对 App ID/Secret 连上去，飞书按集群处理，

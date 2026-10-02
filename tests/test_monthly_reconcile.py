@@ -408,3 +408,15 @@ def test_预演不存档(monkeypatch, fake_bitable):
     monkeypatch.setattr(job, "archive_period", lambda *a: called.append(a))
     job.main(["--period", "2026-08"])
     assert called == []
+
+
+def test_读回只算已结算的行_进行中的不算(fake_bitable):
+    table = fake_bitable.tables[TBL_COMMISSION]
+    table.add_existing(
+        {schema.COMM_PERIOD: "2026-09", schema.COMM_PAYABLE: 10.0, schema.COMM_STATUS: "进行中"}
+    )
+    assert job.read_summary(fake_bitable, TBL_COMMISSION, "2026-09") == (0, 0.0)
+    table.add_existing(
+        {schema.COMM_PERIOD: "2026-09", schema.COMM_PAYABLE: 12.0, schema.COMM_STATUS: "已结算"}
+    )
+    assert job.read_summary(fake_bitable, TBL_COMMISSION, "2026-09") == (1, 12.0)

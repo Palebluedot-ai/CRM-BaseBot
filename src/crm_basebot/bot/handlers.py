@@ -833,7 +833,7 @@ class BotHandlers:
                     cards.notice_card(
                         "还没有能出 invoice 的月份",
                         "你名下的渠道在两张结算表（交易佣金、ECAS）里都还没有记录。"
-                        "每月 3 号结算完上个月之后再来。",
+                        "每月 1 号下午结算完上个月之后再来。",
                     )
                 )
             return cards.invoice_form_card(periods)

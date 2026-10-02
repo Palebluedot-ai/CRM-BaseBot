@@ -247,3 +247,59 @@ def test_replace不带write是用法错误():
     with pytest.raises(SystemExit) as exc_info:
         main(["--replace"])
     assert exc_info.value.code == 2
+
+
+# ---------- 进行中 / 已结算（2026-10-02 起结算表每天更新） ----------
+
+
+def _statuses(fake_bitable) -> list[tuple[str, str]]:
+    records = fake_bitable.tables[TBL_COMMISSION].records.values()
+    return sorted((r[schema.COMM_PERIOD], r.get(schema.COMM_STATUS, "")) for r in records)
+
+
+def test_每天刷新写成进行中_再刷新就覆盖(fake_bitable):
+    for _ in range(2):
+        write_summary(
+            fake_bitable,
+            TBL_COMMISSION,
+            [_row("2026-10")],
+            periods={"2026-10"},
+            replace=False,
+            live=True,
+        )
+    assert _statuses(fake_bitable) == [("2026-10", schema.SETTLE_LIVE)]
+
+
+def test_每天刷新碰到已结算的月份就拒绝_一行不动(fake_bitable):
+    _old_summary(fake_bitable, "2026-09", 2)  # 状态空着 = 以前结算的
+    with pytest.raises(WriteRefused, match="已经结算过了"):
+        write_summary(
+            fake_bitable,
+            TBL_COMMISSION,
+            [_row("2026-09")],
+            periods={"2026-09"},
+            replace=False,
+            live=True,
+        )
+    assert _statuses(fake_bitable) == [("2026-09", ""), ("2026-09", "")]
+
+
+def test_月结把进行中的行换成已结算_不用加replace(fake_bitable):
+    write_summary(
+        fake_bitable,
+        TBL_COMMISSION,
+        [_row("2026-09"), _row("2026-09", "R002")],
+        periods={"2026-09"},
+        replace=False,
+        live=True,
+    )
+    deleted, written = write_summary(
+        fake_bitable, TBL_COMMISSION, [_row("2026-09")], periods={"2026-09"}, replace=False
+    )
+    assert (deleted, written) == (2, 1)
+    assert _statuses(fake_bitable) == [("2026-09", schema.SETTLE_DONE)]
+    # 结过的月份再结一次照样拒绝
+    with pytest.raises(WriteRefused):
+        write_summary(
+            fake_bitable, TBL_COMMISSION, [_row("2026-09")], periods={"2026-09"}, replace=False
+        )

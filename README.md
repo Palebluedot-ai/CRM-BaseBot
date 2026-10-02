@@ -55,7 +55,7 @@ uv run python scripts/import_client_directory.py --file 全量UID.xlsx         #
 uv run python scripts/backfill_client_uids.py --file 全量UID.xlsx            # 按客户名补客户表里空着的 UID，先预演，加 --apply 真写
 ./scripts/install-daily-import-launchd.sh        # 挂成每天 10:45 / 16:00 自动导入
 ./scripts/install-bot-launchd.sh                 # 机器人挂成常驻：开机自启、崩溃自动拉起
-./scripts/install-monthly-reconcile-launchd.sh   # 每月 3 号 10:00 结算上月并通知管理员
+./scripts/install-monthly-reconcile-launchd.sh   # 每月 1 号 16:30 结算上月并通知管理员
 uv run python -m crm_basebot.app            # 前台手动启动机器人（装了上面那个常驻任务就不用）
 ```
 
@@ -84,9 +84,11 @@ uv run python -m crm_basebot.jobs.reconcile --period 2026-03 --write --replace  
 
 **重跑**：`--write` 遇到汇总表里已经有本次结算月份的行会拒绝，不会在旁边再写一套。数据改过要重算就加 `--replace`，先删那些月份的旧行再写新的；`--all-periods --replace` 清空整张汇总表。算出来是空的时候不会拿空结果顶掉旧汇总（2026-09-05 定的）。
 
-**月结不用人记得跑**：`./scripts/install-monthly-reconcile-launchd.sh` 每月 3 号 10:00 自动结算上个月，写完把「月份 / 渠道数 / 应付合计」私信给名册里的管理员。
+**结算表每天更新**（2026-10-02 起）：每天 10:45、16:00 导入之后，两张结算表把当月（和月初还没结的上个月）写成「**进行中**」，每次覆盖（`jobs/live_summary.py`）。仪表盘的「该付」表当月也看得到。
 
-为什么是 3 号不是 1 号：上个月最后一天的交易，内部系统那封邮件通常第二天早上才发，而每日导入 10:45 才跑第一趟。1 号结算会漏掉最后一天，而汇总一旦写进去就是结算快照 —— 发现漏了要 `--replace` 重来，还得跟已经看过数字的人解释一遍。留两天缓冲便宜得多。
+**月结不用人记得跑**：`./scripts/install-monthly-reconcile-launchd.sh` 每月 1 号 16:30 把上个月改成「**已结算**」、存档，把「月份 / 渠道数 / 应付合计」私信给名册里的管理员。结过的月份之后不再变（每天的刷新碰到已结算会拒绝），invoice 只出已结算的月份。
+
+为什么是 1 号 16:30：上个月最后一天的交易邮件第二天早上才到，1 号 10:45、16:00 两趟导入之后一般已经进了看板。以前是 3 号 10:00、留两天缓冲；超哥说不用等。
 
 同一个月跑第二次不会重复写：`reconcile` 本来就拒绝往已有数据的月份写，月结任务把那种拒绝当成正常结果（已经结算过了），照样发通知、退出码 0 —— 否则 launchd 每个月都报一次失败，久了就没人看了。
 

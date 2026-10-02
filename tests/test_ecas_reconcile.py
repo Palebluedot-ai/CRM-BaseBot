@@ -300,3 +300,28 @@ def test_结算只写ECAS自己的汇总表(fake_bitable):
     run(_args(write=True), Settings(), fake_bitable)
     written_tables = {table_id for table_id, _ in fake_bitable.writes}
     assert written_tables == {TBL_ECAS_COMMISSION, TBL_AUDIT}
+
+
+def test_ECAS每天刷新是进行中_月结换成已结算_结过的不再刷新(fake_bitable):
+    write_summary(
+        fake_bitable,
+        TBL_ECAS_COMMISSION,
+        [_row("2026-09")],
+        periods={"2026-09"},
+        replace=False,
+        live=True,
+    )
+    assert [r[ecas.ECOMM_STATUS] for r in _summary_rows(fake_bitable)] == ["进行中"]
+    assert write_summary(
+        fake_bitable, TBL_ECAS_COMMISSION, [_row("2026-09")], periods={"2026-09"}, replace=False
+    ) == (1, 1)
+    assert [r[ecas.ECOMM_STATUS] for r in _summary_rows(fake_bitable)] == ["已结算"]
+    with pytest.raises(WriteRefused, match="已经结算过了"):
+        write_summary(
+            fake_bitable,
+            TBL_ECAS_COMMISSION,
+            [_row("2026-09")],
+            periods={"2026-09"},
+            replace=False,
+            live=True,
+        )

@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from crm_basebot.domain import schema  # noqa: E402
 from crm_basebot.domain.commission import CommissionCalculator, CommissionRow  # noqa: E402
+from crm_basebot.domain.settlement import is_live  # noqa: E402
 from crm_basebot.lark.bitable import BitableClient  # noqa: E402
 from crm_basebot.lark.values import extract_text, to_number  # noqa: E402
 from crm_basebot.startup import load_settings, require_settings  # noqa: E402
@@ -109,7 +110,7 @@ def _load_settled(bitable: BitableClient, table_id: str, period: str | None) -> 
     for record in bitable.iter_records(table_id):
         f = record.fields
         month = extract_text(f.get(schema.COMM_PERIOD))
-        if not month or (period and month != period):
+        if not month or (period and month != period) or is_live(f):
             continue
         out.append(
             Settled(

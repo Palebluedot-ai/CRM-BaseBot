@@ -96,6 +96,7 @@ def written(fake_bitable, services):
                 client_uids={UID},
             )
         ],
+        status=schema.SETTLE_DONE,
     )
 
     by_table: dict[str, list[dict[str, Any]]] = {}

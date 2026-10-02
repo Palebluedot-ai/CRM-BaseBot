@@ -1,6 +1,6 @@
 """月结存档：结算完的那个月，拍一份不会再变的明细和汇总放进 Base。
 
-每月 3 号结完账，建两张新表，再往一张总表里追加：
+每月 1 号 16:30 结完账，建两张新表，再往一张总表里追加：
 
   · ``2026-09 结算明细``  —— 每个渠道下每个客户一行（交易和 ECAS 都在），金额按
     invoice 的同一套分法，**加起来一分不差**等于结算表
@@ -21,7 +21,7 @@
 （最大余数法，``documents.invoice.allocate``）。一个客户都找不到的渠道写一行
 「（找不到客户明细）」，金额就是结算数。
 
-每月 3 号当场存档时，资料和结算是同一刻的，客户明细就是准的。事后补存的旧月份
+每月结算当场存档时，资料和结算是同一刻的，客户明细就是准的。事后补存的旧月份
 （``scripts/archive_month.py``），渠道金额仍然准，客户分法按现在的资料，是近似。
 
 ## 左边栏的「Archive」分组
@@ -48,6 +48,7 @@ from ..bot.auth import Sales
 from ..documents.invoice import Part, allocate, rate_text
 from ..domain import ecas, schema
 from ..domain.ecas_query import load_applications, load_payees
+from ..domain.settlement import is_live
 from ..lark.bitable import FIELD_TYPE_NUMBER, FIELD_TYPE_TEXT, BitableClient
 from ..lark.values import extract_text, to_number
 from ..structure import FORMAT_COUNT, FORMAT_MONEY, StructureError, build_field
@@ -238,7 +239,7 @@ def load_settled(bitable: BitableClient, settings: Any, period: str) -> list[Set
     out: list[Settled] = []
     for record in bitable.iter_records(settings.table_commission):
         f = record.fields
-        if extract_text(f.get(schema.COMM_PERIOD)).strip() != period:
+        if extract_text(f.get(schema.COMM_PERIOD)).strip() != period or is_live(f):
             continue
         rate = to_number(f.get(schema.COMM_RATE))
         out.append(
@@ -256,7 +257,7 @@ def load_settled(bitable: BitableClient, settings: Any, period: str) -> list[Set
     if table:
         for record in bitable.iter_records(table):
             f = record.fields
-            if extract_text(f.get(ecas.ECOMM_PERIOD)).strip() != period:
+            if extract_text(f.get(ecas.ECOMM_PERIOD)).strip() != period or is_live(f):
                 continue
             out.append(
                 Settled(
@@ -374,9 +375,15 @@ def build_live(
 
 
 def _settled_periods(bitable: BitableClient, settings: Any) -> set[str]:
+    """交易佣金结算表里有「已结算」行的月份。一个月结没结，以交易佣金那张为准。"""
+    return settled_periods(bitable, settings.table_commission)
+
+
+def settled_periods(bitable: BitableClient, table_id: str) -> set[str]:
     found: set[str] = set()
-    for record in bitable.iter_records(settings.table_commission, field_names=[schema.COMM_PERIOD]):
-        found.add(extract_text(record.fields.get(schema.COMM_PERIOD)).strip())
+    for record in bitable.iter_records(table_id):
+        if not is_live(record.fields):
+            found.add(extract_text(record.fields.get(schema.COMM_PERIOD)).strip())
     return found
 
 
@@ -556,7 +563,7 @@ def refresh_live(
     settings: Any, bitable: BitableClient, today, client: lark.Client | None = None
 ) -> int:
     """每天导入后跑：把还没结算的月份（上个月如果还没结 + 这个月）现算一遍，覆盖总表里的
-    「未结算」行。返回写了几行。月初 1–3 号上个月还没结，两个月都会在。"""
+    「未结算」行。返回写了几行。月初 1 号下午结账之前上个月还没结，两个月都会在。"""
     from zoneinfo import ZoneInfo
 
     from ..domain.commission_query import CommissionQueryService

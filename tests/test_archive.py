@@ -174,3 +174,14 @@ def test_明细和结算差一分就不存():
 def test_上个月还没结_月初两个月都刷新():
     assert arc._previous("2026-10") == "2026-09"
     assert arc._previous("2026-01") == "2025-12"
+
+
+def test_结过的月份只看已结算的行():
+    base = _Base()
+    base.tables_by_name["Commission Summary"] = "tblC"
+    base.rows["tblC"] = [
+        {"结算月份": "2026-08"},  # 以前的，状态空着 = 已结算
+        {"结算月份": "2026-09", "状态": "已结算"},
+        {"结算月份": "2026-10", "状态": "进行中"},
+    ]
+    assert arc.settled_periods(base, "tblC") == {"2026-08", "2026-09"}

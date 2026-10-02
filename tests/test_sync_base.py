@@ -662,3 +662,40 @@ def test_换公式时带上格式_不会把千分位洗掉():
     )
     (body,) = endpoint.updated
     assert body.property.formatter == "1,000.00"
+
+
+def test_ECAS结算表在的话补状态列_不在就不建():
+    from types import SimpleNamespace
+
+    from crm_basebot.domain import ecas
+    from crm_basebot.lark.bitable import TableInfo
+    from crm_basebot.structure import ensure_structure
+
+    fields = _complete_fields({})
+    old_ecas = [
+        _field(name, type_code)
+        for name, type_code in ecas.ECAS_COMMISSION_FIELDS.items()
+        if name != ecas.ECOMM_STATUS
+    ]
+
+    class WithEcas(_Base):
+        def list_tables(self):
+            return super().list_tables() + [
+                TableInfo(
+                    table_id=f"tbl_{ecas.TABLE_ECAS_COMMISSION_NAME}",
+                    name=ecas.TABLE_ECAS_COMMISSION_NAME,
+                )
+            ]
+
+    sdk = _Sdk()
+    result = ensure_structure(
+        settings=SimpleNamespace(base_app_token="bascn"),
+        bitable=WithEcas({**fields, ecas.TABLE_ECAS_COMMISSION_NAME: old_ecas}),
+        client=sdk,
+        apply=True,
+    )
+    assert sdk.app_table_field.created == [ecas.ECOMM_STATUS]
+    assert not any("建表" in item for item in result.plan)
+
+    result, endpoint = _ensure(_complete_fields({}), apply=True)  # 没有 ECAS 表
+    assert endpoint.created == [] and not any("ECAS" in item for item in result.plan)

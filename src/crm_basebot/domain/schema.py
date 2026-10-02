@@ -362,6 +362,12 @@ COMM_REVENUE_TOTAL = "总收入合计"  # 曾叫 Pnl 合计。切到日读看板
 COMM_RATE = "分佣比例"
 COMM_PAYABLE = "应付佣金"
 COMM_COMPUTED_AT = "计算时间"
+# 进行中 = 当月（和月初还没结的上个月），每天导入后重算覆盖；已结算 = 每月 1 号 16:30 锁住，
+# 之后不再变，invoice 只认它。2026-10-02 起（超哥：不用等 3 号，每天更新）。
+# 这一列空着的行（2026-10 之前写的）都是已结算。
+COMM_STATUS = "状态"
+SETTLE_LIVE = "进行中"
+SETTLE_DONE = "已结算"
 
 COMMISSION_FIELDS: dict[str, int] = {
     COMM_PERIOD: FIELD_TYPE_TEXT,
@@ -373,6 +379,7 @@ COMMISSION_FIELDS: dict[str, int] = {
     COMM_RATE: FIELD_TYPE_NUMBER,
     COMM_PAYABLE: FIELD_TYPE_NUMBER,
     COMM_COMPUTED_AT: FIELD_TYPE_DATETIME,
+    COMM_STATUS: FIELD_TYPE_TEXT,
 }
 
 # ---------- 表 5：审计日志（只增不改） ----------
@@ -415,7 +422,7 @@ SALES_STATUS_ACTIVE = "在职"
 SALES_STATUS_DISABLED = "停用"
 
 # 机器人里看得到谁的数据（2026-09-29 从「角色」里拆出来的）。
-# 「管理员」只管收每月 3 号的月结卡片；看得到哪些渠道由这一列决定。空着 = 只看自己。
+# 「管理员」只管收每月 1 号的月结卡片；看得到哪些渠道由这一列决定。空着 = 只看自己。
 # 起因：超哥是管理员，也是带客户的销售 —— 机器人里只该看到他自己名下的渠道，
 # 看全部人的数据去 Base 的仪表盘。
 SALES_SCOPE = "机器人可见范围"

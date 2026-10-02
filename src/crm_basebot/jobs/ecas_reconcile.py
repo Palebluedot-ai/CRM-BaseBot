@@ -25,9 +25,10 @@ from collections import defaultdict
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from ..domain import ecas
+from ..domain import ecas, schema
 from ..domain.audit import ACTION_COMPUTE_ECAS, AuditLog
 from ..domain.ecas_query import load_applications, load_payees
+from ..domain.settlement import is_live
 from ..lark.bitable import BitableClient, assert_fields_present
 from ..lark.values import extract_text
 from ..startup import load_settings, require_settings
@@ -52,13 +53,15 @@ class WriteRefused(RuntimeError):
 
 def existing_summary(
     bitable: BitableClient, table_id: str, periods: set[str] | None
-) -> dict[str, list[str]]:
-    found: dict[str, list[str]] = defaultdict(list)
-    for record in bitable.iter_records(table_id, field_names=[ecas.ECOMM_PERIOD]):
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """(已结算的, 进行中的)，按月份分组。规则和交易佣金那边一样（jobs/reconcile.py）。"""
+    settled: dict[str, list[str]] = defaultdict(list)
+    live: dict[str, list[str]] = defaultdict(list)
+    for record in bitable.iter_records(table_id):
         period = extract_text(record.fields.get(ecas.ECOMM_PERIOD))
         if periods is None or period in periods:
-            found[period].append(record.record_id)
-    return dict(found)
+            (live if is_live(record.fields) else settled)[period].append(record.record_id)
+    return dict(settled), dict(live)
 
 
 def _describe(existing: dict[str, list[str]]) -> str:
@@ -74,9 +77,15 @@ def write_summary(
     *,
     periods: set[str] | None,
     replace: bool,
+    live: bool = False,
 ) -> tuple[int, int]:
-    """写汇总，返回 (删除行数, 写入行数)。两种拒绝都发生在动手之前。"""
-    existing = existing_summary(bitable, table_id, periods)
+    """写汇总，返回 (删除行数, 写入行数)。进行中 / 已结算的规则见 jobs/reconcile.write_summary。"""
+    existing, provisional = existing_summary(bitable, table_id, periods)
+
+    if existing and live:
+        raise WriteRefused(
+            f"ECAS 汇总表里 {_describe(existing)} 已经结算过了，每天的刷新不会去改它。"
+        )
 
     if existing and not replace:
         raise WriteRefused(
@@ -90,11 +99,13 @@ def write_summary(
         )
 
     deleted = 0
-    for record_ids in existing.values():
-        for record_id in record_ids:
-            bitable.delete_record(table_id, record_id)
-            deleted += 1
+    for group in (existing, provisional):
+        for record_ids in group.values():
+            for record_id in record_ids:
+                bitable.delete_record(table_id, record_id)
+                deleted += 1
 
+    status = schema.SETTLE_LIVE if live else schema.SETTLE_DONE
     now_ms = int(time.time() * 1000)
     written = 0
     for row in rows:
@@ -110,6 +121,7 @@ def write_summary(
                 ecas.ECOMM_RATE_NOTE: row.rate_note,
                 ecas.ECOMM_PAYABLE: float(row.payable),
                 ecas.ECOMM_COMPUTED_AT: now_ms,
+                ecas.ECOMM_STATUS: status,
             },
             reread=False,
         )

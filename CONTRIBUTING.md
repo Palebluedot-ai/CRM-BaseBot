@@ -9,7 +9,7 @@ HashKey OTC 的渠道佣金系统。三样东西：
 
 1. **Lark Base（多维表格）**：所有资料都在这里 —— 渠道、客户、每日交易、结算、名册、审计。
 2. **Lark 机器人「CRM-BaseBot」**：销售在里面登记渠道和客户、查佣金、生成协议和 Invoice。
-3. **定时任务**：每天把交易导进 Base，每月 3 号结算上个月、存档、发月结卡片给管理员。
+3. **定时任务**：每天把交易导进 Base、更新结算表里当月（进行中）的数；每月 1 号 16:30 把上个月结掉（已结算）、存档、发月结卡片给管理员。
 
 机器人和定时任务都跑在**公司的 mac mini** 上（launchd 管着，崩了自动重启）。
 
@@ -59,7 +59,7 @@ uv run ruff format .      # 格式
 - **钱永远用 `Decimal`**，写进 Base 才转 float。分摊用最大余数法（`documents/invoice.allocate`），
   保证加起来一分不差。
 - **客户 UID 永远当文本**（19 位，存成数字会丢精度）。取值用 `lark/values.to_uid`。
-- **结算过的月份不重写。** 结算表、存档写一次就是那个月的样子；要重算得显式 `--replace`。
+- **结算过的月份不重写。** 结算表每一行有「状态」：进行中（每天覆盖）/ 已结算（空着也算已结算）。已结算的行、存档写一次就是那个月的样子；要重算得显式 `--replace`。读结算表算钱的地方只认已结算（`domain/settlement.is_live`）。
 - **脚本默认预演，`--apply` 才写。** 新脚本照这个做。
 - **客户资料、xlsx、`output/` 不进仓库**（`.gitignore` 已挡）。收款账号、证件号不写日志、不进审计表。
 
@@ -101,8 +101,8 @@ uv run python scripts/sync_base.py --apply
 | 任务 | 时间 | 做什么 | 日志 |
 | --- | --- | --- | --- |
 | `com.chao.crm-basebot.bot` | 常驻 | 机器人 | `logs/bot.log` |
-| `com.chao.crm-basebot.daily-import` | 每天 10:45、16:00 | 取邮件导出 → 写看板 → 补挂客户 → 刷新存档里未结算的月份 | `logs/daily-import-*.log` |
-| `com.chao.crm-basebot.monthly-reconcile` | 每月 3 号 10:00 | 结算上个月（交易 + ECAS）→ 存档 → 发卡片给管理员 | `logs/monthly-reconcile-*.log` |
+| `com.chao.crm-basebot.daily-import` | 每天 10:45、16:00 | 取邮件导出 → 写看板 → 补挂客户 → 刷新结算表和存档里还没结算的月份 | `logs/daily-import-*.log` |
+| `com.chao.crm-basebot.monthly-reconcile` | 每月 1 号 16:30 | 结算上个月（交易 + ECAS，进行中 → 已结算）→ 存档 → 发卡片给管理员 | `logs/monthly-reconcile-*.log` |
 
 安装脚本在 `scripts/install-*-launchd.sh`。
 

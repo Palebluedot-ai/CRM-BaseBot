@@ -9,7 +9,7 @@
 
 **一个任务结两套账，发一张卡。** 交易佣金和 ECAS 开户返佣的算法完全独立
 （``jobs/reconcile.py`` 和 ``jobs/ecas_reconcile.py``，两边不共用任何数据），
-但「每个月 3 号把上个月结掉、告诉管理员多少钱」是一件运维的事，不是两件。
+但「每个月 1 号把上个月结掉、告诉管理员多少钱」是一件运维的事，不是两件。
 
 分成两个任务发两张卡的话，收卡片的人得自己把两个数加起来 —— 而 2026-08 那个月
 交易佣金 19,294.51、ECAS 65,000.00，只看到前一张就去开票会漏掉四分之三的钱。
@@ -20,9 +20,10 @@
 
 四件事值得说清楚：
 
-**为什么每月 3 号跑，不是 1 号。** 上个月最后一天的交易，内部系统那封邮件通常
-第二天早上才发。1 号跑等于把最后一天漏掉，而汇总一旦写进去就是结算快照 ——
-发现漏了要 ``--replace`` 重来，还得跟已经看过数字的人解释一遍。留两天缓冲便宜得多。
+**为什么每月 1 号 16:30 跑（2026-10-02 起，以前是 3 号）。** 两张结算表现在每天导入后都会
+把当月写成「进行中」（jobs/live_summary.py），不用再留缓冲等。上个月最后一天的交易邮件第二天
+早上才到，1 号 10:45、16:00 两趟导入之后一般已经进了看板；16:30 结算，把上个月的进行中行
+换成「已结算」。结过的月份之后不再变（每天的刷新碰到已结算会拒绝）。
 
 **通知里的数字是从 Base 读回来的，不是脚本自己算完报给你的。** 后者只能证明
 "脚本以为自己写了什么"，前者证明"Base 里现在实际有什么"。写接口返回成功不等于
@@ -63,6 +64,7 @@ from lark_oapi.api.im.v1 import (  # noqa: E402
 from crm_basebot.bot import cards  # noqa: E402
 from crm_basebot.domain import ecas, schema  # noqa: E402
 from crm_basebot.domain.ecas_query import latest_applied_date  # noqa: E402
+from crm_basebot.domain.settlement import is_live  # noqa: E402
 from crm_basebot.jobs import ecas_reconcile, reconcile  # noqa: E402
 from crm_basebot.jobs.archive import archive_period  # noqa: E402
 from crm_basebot.lark.bitable import BitableClient  # noqa: E402
@@ -89,12 +91,10 @@ def previous_period(today: date) -> str:
 
 
 def read_summary(bitable: BitableClient, table_id: str, period: str) -> tuple[int, float]:
-    """从 Base 读回这个月已经写进去的 (行数, 应付合计)。"""
+    """从 Base 读回这个月**已结算**的 (行数, 应付合计)。每天写的进行中行不算。"""
     count, total = 0, 0.0
-    for record in bitable.iter_records(
-        table_id, field_names=[schema.COMM_PERIOD, schema.COMM_PAYABLE]
-    ):
-        if extract_text(record.fields.get(schema.COMM_PERIOD)) != period:
+    for record in bitable.iter_records(table_id):
+        if extract_text(record.fields.get(schema.COMM_PERIOD)) != period or is_live(record.fields):
             continue
         count += 1
         total += to_number(record.fields.get(schema.COMM_PAYABLE)) or 0.0
@@ -108,10 +108,8 @@ def read_ecas_summary(bitable: BitableClient, table_id: str, period: str) -> tup
     不是约定。哪天 ECAS 那张表的列改了名，该炸的是这个函数，不是两张表一起错。
     """
     count, total = 0, 0.0
-    for record in bitable.iter_records(
-        table_id, field_names=[ecas.ECOMM_PERIOD, ecas.ECOMM_PAYABLE]
-    ):
-        if extract_text(record.fields.get(ecas.ECOMM_PERIOD)) != period:
+    for record in bitable.iter_records(table_id):
+        if extract_text(record.fields.get(ecas.ECOMM_PERIOD)) != period or is_live(record.fields):
             continue
         count += 1
         total += to_number(record.fields.get(ecas.ECOMM_PAYABLE)) or 0.0

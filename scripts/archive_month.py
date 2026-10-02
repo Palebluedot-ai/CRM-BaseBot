@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""给一个已经结算过的月份补建存档（月结每月 3 号会自动做，这个是补旧月份用的）。
+"""给一个已经结算过的月份补建存档（月结每月 1 号会自动做，这个是补旧月份用的）。
 
     uv run python scripts/archive_month.py --period 2026-08            # 预演：列出会写什么
     uv run python scripts/archive_month.py --period 2026-08 --apply    # 真建表

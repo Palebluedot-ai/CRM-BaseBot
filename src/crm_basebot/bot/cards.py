@@ -1229,7 +1229,7 @@ def invoice_form_card(periods: list[str]) -> dict[str, Any]:
                     ],
                 },
                 footnote(
-                    "金额取自每月 3 号结算写进去的结算表，就是实际要付的数。"
+                    "金额取自结算表里已结算的数（每月 1 号下午结上个月），就是实际要付的数。"
                     "每个渠道、每种佣金各出一份（Word + PDF）；超过一份会打成一个 zip。"
                 ),
                 back_to_menu_button(),

@@ -70,6 +70,12 @@ TARGET_TABLES: dict[str, dict[str, int]] = {
     schema.TABLE_SALES_NAME: schema.SALES_FIELDS,
 }
 
+# 不归我们建、但有的话要补列的表。ECAS 两张表由 scripts/import_ecas.py 建；
+# 2026-10-02 起结算表多了「状态」（进行中 / 已结算），老表靠这里补上。没有这张表就跳过。
+OPTIONAL_TABLES: dict[str, dict[str, int]] = {
+    ecas.TABLE_ECAS_COMMISSION_NAME: ecas.ECAS_COMMISSION_FIELDS,
+}
+
 # 关联字段指向哪张表。(表名, 字段名) -> 被关联的表名。
 # 单向关联（type 18）的 property.table_id 是**必填**的，缺了接口直接拒绝建字段。
 # 建表顺序上 Referral 排在 Client 前面，所以轮到建这个字段时目标表一定已经有 id。
@@ -370,9 +376,11 @@ def ensure_structure(
         target = LINK_TARGETS.get((table_name, field_name))
         return result.table_ids.get(target) if target else None
 
-    for table_name, target_fields in TARGET_TABLES.items():
+    for table_name, target_fields in {**TARGET_TABLES, **OPTIONAL_TABLES}.items():
         table_id = existing.get(table_name)
 
+        if table_id is None and table_name in OPTIONAL_TABLES:
+            continue
         if table_id is None:
             result.plan.append(f"建表「{table_name}」并添加 {len(target_fields)} 个字段")
             if apply:

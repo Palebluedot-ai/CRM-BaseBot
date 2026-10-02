@@ -35,6 +35,7 @@ from collections import defaultdict
 from ..domain import schema
 from ..domain.audit import ACTION_COMPUTE_COMMISSION, AuditLog
 from ..domain.commission import CommissionCalculator, CommissionRow, summarize
+from ..domain.settlement import is_live
 from ..lark.bitable import BitableClient, assert_fields_present
 from ..lark.values import extract_text, uid_health_advice
 from ..startup import load_settings, require_settings
@@ -60,18 +61,19 @@ class WriteRefused(RuntimeError):
 
 def existing_summary(
     bitable: BitableClient, table_id: str, periods: set[str] | None
-) -> dict[str, list[str]]:
-    """汇总表里已有的行，按结算月份分组，值是 record_id。``periods`` 给 None 表示不限月份。
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """汇总表里已有的行，按结算月份分组：(已结算的, 进行中的)，值是 record_id。
 
-    只拉结算月份这一列。汇总表很小（每月每渠道一行），扫一遍比按月份 filter 少一种
-    请求形态，也不用担心字段名对不上时 filter 静默返回空、让检查形同虚设。
+    ``periods`` 给 None 表示不限月份。整行读（不指定列）：汇总表很小，而且「状态」那一列
+    在跑过 sync_base 之前可能还不存在 —— 指定一个不存在的列名，接口整个报错。
     """
-    found: dict[str, list[str]] = defaultdict(list)
-    for record in bitable.iter_records(table_id, field_names=[schema.COMM_PERIOD]):
+    settled: dict[str, list[str]] = defaultdict(list)
+    live: dict[str, list[str]] = defaultdict(list)
+    for record in bitable.iter_records(table_id):
         period = extract_text(record.fields.get(schema.COMM_PERIOD))
         if periods is None or period in periods:
-            found[period].append(record.record_id)
-    return dict(found)
+            (live if is_live(record.fields) else settled)[period].append(record.record_id)
+    return dict(settled), dict(live)
 
 
 def _describe(existing: dict[str, list[str]]) -> str:
@@ -87,14 +89,23 @@ def write_summary(
     *,
     periods: set[str] | None,
     replace: bool,
+    live: bool = False,
 ) -> tuple[int, int]:
     """把汇总行写进 Base，返回 (删除行数, 写入行数)。
 
-    ``periods`` 是本次结算覆盖的月份，None 表示全部。汇总表里已经有这些月份的行时：
-    不带 ``replace`` 直接拒绝；带了就先删旧行再写新行。两种拒绝都发生在动手之前，
-    拒绝了就一行都没动。
+    ``periods`` 是本次覆盖的月份，None 表示全部。
+
+    - ``live=True``（每天导入后刷新当月）：写成「进行中」，先删这些月份进行中的旧行。
+      这些月份里只要有**已结算**的行就拒绝 —— 每天的数永远不顶掉结算。
+    - ``live=False``（月结）：写成「已结算」。进行中的旧行本来就是临时的，直接删掉；
+      已结算的旧行不带 ``replace`` 就拒绝，带了才先删再写。
+
+    拒绝都发生在动手之前，拒绝了就一行都没动。
     """
-    existing = existing_summary(bitable, table_id, periods)
+    existing, provisional = existing_summary(bitable, table_id, periods)
+
+    if existing and live:
+        raise WriteRefused(f"{_describe(existing)} 已经结算过了，每天的刷新不会去改它。")
 
     if existing and not replace:
         raise WriteRefused(
@@ -109,15 +120,19 @@ def write_summary(
         )
 
     deleted = 0
-    for record_ids in existing.values():
-        for record_id in record_ids:
-            bitable.delete_record(table_id, record_id)
-            deleted += 1
+    for group in (existing, provisional):
+        for record_ids in group.values():
+            for record_id in record_ids:
+                bitable.delete_record(table_id, record_id)
+                deleted += 1
 
-    return deleted, _write_rows(bitable, table_id, rows)
+    status = schema.SETTLE_LIVE if live else schema.SETTLE_DONE
+    return deleted, _write_rows(bitable, table_id, rows, status=status)
 
 
-def _write_rows(bitable: BitableClient, table_id: str, rows: list[CommissionRow]) -> int:
+def _write_rows(
+    bitable: BitableClient, table_id: str, rows: list[CommissionRow], *, status: str
+) -> int:
     now_ms = int(time.time() * 1000)
     written = 0
     for row in rows:
@@ -133,6 +148,7 @@ def _write_rows(bitable: BitableClient, table_id: str, rows: list[CommissionRow]
                 schema.COMM_RATE: float(row.rate_percent),
                 schema.COMM_PAYABLE: float(row.payable),
                 schema.COMM_COMPUTED_AT: now_ms,
+                schema.COMM_STATUS: status,
             },
             # 汇总表没有要读回来的系统字段，一行一个往返就够了
             reread=False,

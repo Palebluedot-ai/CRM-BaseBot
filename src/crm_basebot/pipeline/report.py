@@ -89,6 +89,8 @@ def print_result(result: DailyResult) -> None:
             f"补挂客户关联：{result.relinked} 行以前的交易，客户后来才登记，"
             "这次把渠道、比例、本笔佣金补上了。"
         )
+    if result.summary_rows:
+        print(f"结算表：进行中的月份刷新了 {result.summary_rows} 行（当月每天更新）。")
     if result.live_rows:
         print(f"结算存档总表：未结算月份刷新了 {result.live_rows} 行。")
     if not result.plan.has_work:

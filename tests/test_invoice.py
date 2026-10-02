@@ -346,3 +346,18 @@ def test_转PDF出任何意外都只换来一句说明(tmp_path, monkeypatch):
     monkeypatch.setattr(pdf, "_convert", boom)
     pdfs, note = pdf.to_pdf({"A.docx": b"PK"}, tmp_path)
     assert pdfs == {} and "先发 Word 版" in note
+
+
+def test_进行中的月份不能出invoice(base, tmp_path):
+    base.tables[TBL_COMMISSION].add_existing(
+        {
+            schema.COMM_PERIOD: "2026-10",
+            schema.COMM_REFERRAL_NO: "R001",
+            schema.COMM_RATE: 30,
+            schema.COMM_PAYABLE: 99.0,
+            schema.COMM_STATUS: schema.SETTLE_LIVE,
+        }
+    )
+    assert service(base, tmp_path).periods_for(ALICE) == ["2026-08"]
+    batch = service(base, tmp_path).build(ALICE, "2026-10", kinds=["trade"])
+    assert batch.invoices == []

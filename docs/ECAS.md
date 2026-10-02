@@ -225,7 +225,7 @@ uv run python -m crm_basebot.jobs.ecas_reconcile --period 2026-08 --write --repl
 
 ## 每月自动结算
 
-**和交易佣金同一个任务、同一张卡。** `scripts/monthly_reconcile.py` 每月 3 号 10:00
+**和交易佣金同一个任务、同一张卡。** `scripts/monthly_reconcile.py` 每月 1 号 16:30
 由 launchd 跑一次，两套账都结掉，然后把**一张**卡发给名册里的管理员：
 
 ```
@@ -242,7 +242,7 @@ uv run python -m crm_basebot.jobs.ecas_reconcile --period 2026-08 --write --repl
 ```
 
 算法还是两套（`jobs/reconcile.py` 和 `jobs/ecas_reconcile.py` 不共用任何数据），
-合并的只是「谁在 3 号早上按下去」。分两个任务发两张卡的话，收卡片的人得自己把两个数
+合并的只是「谁在 1 号下午按下去」。分两个任务发两张卡的话，收卡片的人得自己把两个数
 加起来 —— 8 月只看到交易佣金那张就去开票，会漏掉四分之三的钱。
 
 - 一边失败不影响另一边：ECAS 没结成，交易佣金那半照发，卡片写明 ECAS 这次没算出来，
@@ -250,10 +250,12 @@ uv run python -m crm_basebot.jobs.ecas_reconcile --period 2026-08 --write --repl
 - `TABLE_ECAS` / `TABLE_ECAS_COMMISSION` 空着时整节跳过 —— 没上 ECAS 的租户照样能用。
   也可以显式 `--skip-ecas`。
 - 同一个月跑第二次不会重复写，两套账各自独立判断。
+- 平时每天导入后，ECAS Commission Summary 的当月也会写成「进行中」、每次覆盖
+  （`jobs/live_summary.py`）；数取决于当时申请表里导进来了什么。1 号结算换成「已结算」。
 
 ### 数据新鲜度：这一条要留意
 
-交易看板每天从邮件自动导，**ECAS 申请表要人手工跑 `import_ecas.py`**。所以 3 号结算的
+交易看板每天从邮件自动导，**ECAS 申请表要人手工跑 `import_ecas.py`**。所以 1 号结算的
 是表里当下有什么 —— 上个月的申请没导进来的话，会算出一个偏小的数字，而且
 「这个月只有 5,000」和「这个月的申请还没导」在金额上长得一模一样。
 

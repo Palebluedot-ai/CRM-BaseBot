@@ -37,6 +37,7 @@ from ..bot.auth import Sales
 from ..domain import ecas, schema
 from ..domain.ecas_query import load_applications, load_payees
 from ..domain.payment import PaymentInfo, PaymentService
+from ..domain.settlement import is_live
 from ..lark.bitable import BitableClient
 from ..lark.values import extract_text, to_number
 from .docx import safe_filename, template_path
@@ -259,7 +260,8 @@ def _summary_rows(
         return rows
     for record in bitable.iter_records(table_id):
         fields = record.fields
-        if extract_text(fields.get(schema.COMM_PERIOD)).strip() != period:
+        # 进行中的数每天还在变，出 invoice 只认已结算的（domain/settlement.py）。
+        if extract_text(fields.get(schema.COMM_PERIOD)).strip() != period or is_live(fields):
             continue
         no = extract_text(fields.get(schema.COMM_REFERRAL_NO)).strip()
         payable = to_number(fields.get(schema.COMM_PAYABLE))
@@ -281,11 +283,11 @@ def _periods(bitable: BitableClient, table_id: str, visible: set[str]) -> set[st
     found: set[str] = set()
     if not table_id:
         return found
-    for record in bitable.iter_records(
-        table_id, field_names=[schema.COMM_PERIOD, schema.COMM_REFERRAL_NO]
-    ):
+    for record in bitable.iter_records(table_id):
         no = extract_text(record.fields.get(schema.COMM_REFERRAL_NO)).strip()
         period = extract_text(record.fields.get(schema.COMM_PERIOD)).strip()
+        if is_live(record.fields):
+            continue
         if no in visible and re.fullmatch(r"\d{4}-\d{2}", period):
             found.add(period)
     return found

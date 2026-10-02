@@ -374,3 +374,23 @@ def test_dry_run不刷新结算存档(fake_bitable, tmp_path):
         refresh_live=lambda: called.append(1) or 0,
     )
     assert called == []
+
+
+def test_导入后先刷结算表再刷存档_失败互不影响(fake_bitable, tmp_path, caplog):
+    order = []
+
+    def summaries():
+        order.append("summary")
+        raise RuntimeError("接口挂了")
+
+    xlsx = _make_xlsx(tmp_path, [_row(when="2026-09-17", uid="222")])
+    result = run_daily(
+        settings=_settings(),
+        bitable=fake_bitable,
+        file=xlsx,
+        refresh_summaries=summaries,
+        refresh_live=lambda: order.append("live") or 3,
+    )
+    assert order == ["summary", "live"]
+    assert result.written == 1 and result.summary_rows == 0 and result.live_rows == 3
+    assert "刷新结算表里进行中的月份失败" in caplog.text
