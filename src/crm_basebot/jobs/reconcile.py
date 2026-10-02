@@ -35,7 +35,7 @@ from collections import defaultdict
 from ..domain import schema
 from ..domain.audit import ACTION_COMPUTE_COMMISSION, AuditLog
 from ..domain.commission import CommissionCalculator, CommissionRow, summarize
-from ..domain.settlement import is_live
+from ..domain.settlement import is_live, owner_value, referral_owners
 from ..lark.bitable import BitableClient, assert_fields_present
 from ..lark.values import extract_text, uid_health_advice
 from ..startup import load_settings, require_settings
@@ -90,8 +90,12 @@ def write_summary(
     periods: set[str] | None,
     replace: bool,
     live: bool = False,
+    owners: dict[str, str] | None = None,
 ) -> tuple[int, int]:
     """把汇总行写进 Base，返回 (删除行数, 写入行数)。
+
+    ``owners`` 是 渠道编号 -> 归属销售 open_id（``settlement.referral_owners``），
+    填进「归属销售」那一列，给 Base 高级权限按人筛行用。
 
     ``periods`` 是本次覆盖的月份，None 表示全部。
 
@@ -127,32 +131,37 @@ def write_summary(
                 deleted += 1
 
     status = schema.SETTLE_LIVE if live else schema.SETTLE_DONE
-    return deleted, _write_rows(bitable, table_id, rows, status=status)
+    return deleted, _write_rows(bitable, table_id, rows, status=status, owners=owners or {})
 
 
 def _write_rows(
-    bitable: BitableClient, table_id: str, rows: list[CommissionRow], *, status: str
+    bitable: BitableClient,
+    table_id: str,
+    rows: list[CommissionRow],
+    *,
+    status: str,
+    owners: dict[str, str] | None = None,
 ) -> int:
     now_ms = int(time.time() * 1000)
     written = 0
     for row in rows:
-        bitable.create_record(
-            table_id,
-            {
-                schema.COMM_PERIOD: row.period,
-                schema.COMM_REFERRAL_NO: row.referral_no,
-                schema.COMM_REFERRAL_NAME: row.referral_name,
-                schema.COMM_CLIENT_COUNT: row.client_count,
-                schema.COMM_TXN_COUNT: row.txn_count,
-                schema.COMM_REVENUE_TOTAL: float(row.revenue_total),
-                schema.COMM_RATE: float(row.rate_percent),
-                schema.COMM_PAYABLE: float(row.payable),
-                schema.COMM_COMPUTED_AT: now_ms,
-                schema.COMM_STATUS: status,
-            },
-            # 汇总表没有要读回来的系统字段，一行一个往返就够了
-            reread=False,
-        )
+        fields = {
+            schema.COMM_PERIOD: row.period,
+            schema.COMM_REFERRAL_NO: row.referral_no,
+            schema.COMM_REFERRAL_NAME: row.referral_name,
+            schema.COMM_CLIENT_COUNT: row.client_count,
+            schema.COMM_TXN_COUNT: row.txn_count,
+            schema.COMM_REVENUE_TOTAL: float(row.revenue_total),
+            schema.COMM_RATE: float(row.rate_percent),
+            schema.COMM_PAYABLE: float(row.payable),
+            schema.COMM_COMPUTED_AT: now_ms,
+            schema.COMM_STATUS: status,
+        }
+        owner = (owners or {}).get(row.referral_no)
+        if owner:
+            fields[schema.COMM_OWNER] = owner_value(owner)
+        # 汇总表没有要读回来的系统字段，一行一个往返就够了
+        bitable.create_record(table_id, fields, reread=False)
         written += 1
     return written
 
@@ -296,6 +305,7 @@ def run(args: argparse.Namespace, settings, bitable: BitableClient) -> int:
             rows,
             periods=target_periods,
             replace=args.replace,
+            owners=referral_owners(bitable, settings.table_referral),
         )
     except WriteRefused as exc:
         print(f"\n没有写入：{exc}")

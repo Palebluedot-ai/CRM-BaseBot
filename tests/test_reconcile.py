@@ -303,3 +303,19 @@ def test_月结把进行中的行换成已结算_不用加replace(fake_bitable):
         write_summary(
             fake_bitable, TBL_COMMISSION, [_row("2026-09")], periods={"2026-09"}, replace=False
         )
+
+
+def test_写结算行时带上归属销售_没有负责人的就不填(fake_bitable):
+    write_summary(
+        fake_bitable,
+        TBL_COMMISSION,
+        [_row("2026-09", "R001"), _row("2026-09", "R002")],
+        periods={"2026-09"},
+        replace=False,
+        owners={"R001": "ou_alice"},
+    )
+    rows = {
+        r[schema.COMM_REFERRAL_NO]: r for r in fake_bitable.tables[TBL_COMMISSION].records.values()
+    }
+    assert rows["R001"][schema.COMM_OWNER] == [{"id": "ou_alice"}]
+    assert schema.COMM_OWNER not in rows["R002"]

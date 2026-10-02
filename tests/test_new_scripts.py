@@ -702,3 +702,21 @@ def test_按看板名字找UID_忽略大小写和标点_相近的列出来():
     assert similar == {"HAN BAOBAO": "2285000000000000003"}
     exact, _ = reg.board_uids(rows, "PRIMAL TECH SUPPLY PTE. LTD.")
     assert list(exact) == ["2285000000000000002"]
+
+
+# ---------- backfill_summary_owners ----------
+
+
+def test_结算表补归属销售_只补空的_没OpenID的列出来():
+    from crm_basebot.lark.bitable import Record
+
+    back = _load("backfill_summary_owners")
+    records = [
+        Record("r1", {schema.COMM_REFERRAL_NO: "R001"}),
+        Record("r2", {schema.COMM_REFERRAL_NO: "R002", schema.COMM_OWNER: [{"id": "ou_x"}]}),
+        Record("r3", {schema.COMM_REFERRAL_NO: "R009"}),
+        Record("r4", {schema.COMM_REFERRAL_NO: "R009"}),
+    ]
+    updates, missing = back.plan(records, {"R001": "ou_alice", "R002": "ou_bob"})
+    assert updates == {"r1": {schema.COMM_OWNER: [{"id": "ou_alice"}]}}
+    assert missing == {"R009": 2}

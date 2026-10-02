@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 from ..domain import ecas
 from ..domain.commission import CommissionCalculator
 from ..domain.ecas_query import load_applications, load_payees
+from ..domain.settlement import referral_owners
 from ..lark.bitable import BitableClient
 from . import ecas_reconcile, reconcile
 from .archive import settled_periods
@@ -40,12 +41,19 @@ def open_months(today: date, settled: set[str]) -> list[str]:
 def refresh(settings: Any, bitable: BitableClient, today: date) -> int:
     """刷新两张结算表里进行中的月份，返回写了几行。"""
     months = open_months(today, settled_periods(bitable, settings.table_commission))
+    owners = referral_owners(bitable, settings.table_referral) if months else {}
     written = 0
     for month in months:
         rows, _ = CommissionCalculator(bitable, settings=settings).compute(period=month)
         try:
             written += reconcile.write_summary(
-                bitable, settings.table_commission, rows, periods={month}, replace=False, live=True
+                bitable,
+                settings.table_commission,
+                rows,
+                periods={month},
+                replace=False,
+                live=True,
+                owners=owners,
             )[1]
         except reconcile.WriteRefused as exc:
             logger.info("交易佣金 %s 不刷新：%s", month, exc)
@@ -65,6 +73,7 @@ def refresh(settings: Any, bitable: BitableClient, today: date) -> int:
                     periods={month},
                     replace=False,
                     live=True,
+                    owners=owners,
                 )[1]
             except ecas_reconcile.WriteRefused as exc:
                 logger.info("ECAS %s 不刷新：%s", month, exc)

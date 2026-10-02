@@ -44,6 +44,7 @@ from ..lark.bitable import (
     FIELD_TYPE_NUMBER,
     FIELD_TYPE_SINGLE_LINK,
     FIELD_TYPE_TEXT,
+    FIELD_TYPE_USER,
 )
 from . import schema
 
@@ -125,6 +126,7 @@ ECOMM_RATE_NOTE = "比例说明"
 ECOMM_PAYABLE = "应付佣金"
 ECOMM_COMPUTED_AT = "计算时间"
 ECOMM_STATUS = schema.COMM_STATUS  # 进行中 / 已结算，和交易佣金那张一样（见 schema.COMM_STATUS）
+ECOMM_OWNER = schema.COMM_OWNER  # 归属销售（人员），给高级权限用，见 schema.COMM_OWNER
 
 ECAS_COMMISSION_FIELDS: dict[str, int] = {
     ECOMM_PERIOD: FIELD_TYPE_TEXT,
@@ -140,6 +142,7 @@ ECAS_COMMISSION_FIELDS: dict[str, int] = {
     ECOMM_PAYABLE: FIELD_TYPE_NUMBER,
     ECOMM_COMPUTED_AT: FIELD_TYPE_DATETIME,
     ECOMM_STATUS: FIELD_TYPE_TEXT,
+    ECOMM_OWNER: FIELD_TYPE_USER,
 }
 
 

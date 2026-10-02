@@ -368,6 +368,9 @@ COMM_COMPUTED_AT = "计算时间"
 COMM_STATUS = "状态"
 SETTLE_LIVE = "进行中"
 SETTLE_DONE = "已结算"
+# 这个渠道归谁（人员字段），照渠道表那一行的「登记人OpenID」填。给 Base 高级权限用：
+# 销售角色设「只能看归属销售包含自己的记录」，打开结算表就只看到自己渠道的行（2026-10-02）。
+COMM_OWNER = "归属销售"
 
 COMMISSION_FIELDS: dict[str, int] = {
     COMM_PERIOD: FIELD_TYPE_TEXT,
@@ -380,6 +383,7 @@ COMMISSION_FIELDS: dict[str, int] = {
     COMM_PAYABLE: FIELD_TYPE_NUMBER,
     COMM_COMPUTED_AT: FIELD_TYPE_DATETIME,
     COMM_STATUS: FIELD_TYPE_TEXT,
+    COMM_OWNER: FIELD_TYPE_USER,
 }
 
 # ---------- 表 5：审计日志（只增不改） ----------

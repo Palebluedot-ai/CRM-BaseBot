@@ -325,3 +325,16 @@ def test_ECAS每天刷新是进行中_月结换成已结算_结过的不再刷�
             replace=False,
             live=True,
         )
+
+
+def test_ECAS结算行也带归属销售(fake_bitable):
+    write_summary(
+        fake_bitable,
+        TBL_ECAS_COMMISSION,
+        [_row()],
+        periods={"2026-08"},
+        replace=False,
+        owners={"R095": "ou_prance"},
+    )
+    (stored,) = _summary_rows(fake_bitable)
+    assert stored[ecas.ECOMM_OWNER] == [{"id": "ou_prance"}]

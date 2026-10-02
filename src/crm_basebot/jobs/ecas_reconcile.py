@@ -28,7 +28,7 @@ from zoneinfo import ZoneInfo
 from ..domain import ecas, schema
 from ..domain.audit import ACTION_COMPUTE_ECAS, AuditLog
 from ..domain.ecas_query import load_applications, load_payees
-from ..domain.settlement import is_live
+from ..domain.settlement import is_live, owner_value, referral_owners
 from ..lark.bitable import BitableClient, assert_fields_present
 from ..lark.values import extract_text
 from ..startup import load_settings, require_settings
@@ -78,6 +78,7 @@ def write_summary(
     periods: set[str] | None,
     replace: bool,
     live: bool = False,
+    owners: dict[str, str] | None = None,
 ) -> tuple[int, int]:
     """写汇总，返回 (删除行数, 写入行数)。进行中 / 已结算的规则见 jobs/reconcile.write_summary。"""
     existing, provisional = existing_summary(bitable, table_id, periods)
@@ -109,22 +110,22 @@ def write_summary(
     now_ms = int(time.time() * 1000)
     written = 0
     for row in rows:
-        bitable.create_record(
-            table_id,
-            {
-                ecas.ECOMM_PERIOD: row.period,
-                ecas.ECOMM_REFERRAL_NO: row.payee.code,
-                ecas.ECOMM_REFERRAL_NAME: row.payee.name,
-                ecas.ECOMM_CLIENT_COUNT: row.client_count,
-                ecas.ECOMM_TXN_COUNT: row.txn_count,
-                ecas.ECOMM_AMOUNT_TOTAL: float(row.amount_total),
-                ecas.ECOMM_RATE_NOTE: row.rate_note,
-                ecas.ECOMM_PAYABLE: float(row.payable),
-                ecas.ECOMM_COMPUTED_AT: now_ms,
-                ecas.ECOMM_STATUS: status,
-            },
-            reread=False,
-        )
+        fields = {
+            ecas.ECOMM_PERIOD: row.period,
+            ecas.ECOMM_REFERRAL_NO: row.payee.code,
+            ecas.ECOMM_REFERRAL_NAME: row.payee.name,
+            ecas.ECOMM_CLIENT_COUNT: row.client_count,
+            ecas.ECOMM_TXN_COUNT: row.txn_count,
+            ecas.ECOMM_AMOUNT_TOTAL: float(row.amount_total),
+            ecas.ECOMM_RATE_NOTE: row.rate_note,
+            ecas.ECOMM_PAYABLE: float(row.payable),
+            ecas.ECOMM_COMPUTED_AT: now_ms,
+            ecas.ECOMM_STATUS: status,
+        }
+        owner = (owners or {}).get(row.payee.code)
+        if owner:
+            fields[ecas.ECOMM_OWNER] = owner_value(owner)
+        bitable.create_record(table_id, fields, reread=False)
         written += 1
     return deleted, written
 
@@ -224,6 +225,7 @@ def run(args: argparse.Namespace, settings, bitable: BitableClient) -> int:
             rows,
             periods=target_periods,
             replace=args.replace,
+            owners=referral_owners(bitable, settings.table_referral),
         )
     except WriteRefused as exc:
         print(f"\n没有写入：{exc}")
