@@ -91,7 +91,10 @@ def test_关联目标声明指向渠道表():
 
 def test_声明为单向关联的字段都在_link_targets_里有目标():
     """schema 里新增一个关联字段却忘了配目标表，建表时才炸就太晚了。"""
-    for table_name, fields in sync_base.TARGET_TABLES.items():
+    from crm_basebot.structure import OPTIONAL_TABLES
+
+    tables = {**sync_base.TARGET_TABLES, **OPTIONAL_TABLES}
+    for table_name, fields in tables.items():
         for field_name, type_code in fields.items():
             if type_code == FIELD_TYPE_SINGLE_LINK:
                 assert (table_name, field_name) in sync_base.LINK_TARGETS
@@ -379,6 +382,55 @@ def test_预演时公式只说不改():
     key = (schema.TABLE_DAILY_BOARD_NAME, schema.BOARD_ROW_COMMISSION)
     result, endpoint = _ensure(_complete_fields({key: "1"}), apply=False)
     assert result.plan and endpoint.updated == []
+
+
+def test_平台内部公式翻成列名后和现行公式算同一条():
+    from crm_basebot.lark.bitable import FIELD_TYPE_SINGLE_LINK, FIELD_TYPE_TEXT, FieldInfo
+    from crm_basebot.structure import _formula_catalog, _same_expression
+
+    board, client, referral = "tblBoard1", "tblClient1", "tblReferr1"
+    fields = {
+        board: [
+            FieldInfo(
+                "fldClient",
+                schema.BOARD_CLIENT_LINK,
+                FIELD_TYPE_SINGLE_LINK,
+                "",
+                False,
+                {"table_id": client},
+            ),
+            FieldInfo("fldDate", schema.BOARD_ORDER_DATE, 5, "", False, {}),
+        ],
+        client: [
+            FieldInfo(
+                "fldLink",
+                schema.CLIENT_REFERRAL_LINK,
+                FIELD_TYPE_SINGLE_LINK,
+                "",
+                False,
+                {"table_id": referral},
+            )
+        ],
+        referral: [
+            FieldInfo("fldNo", schema.REFERRAL_NO, FIELD_TYPE_TEXT, "", False, {}),
+        ],
+    }
+    catalog = _formula_catalog(fields)
+    current = (
+        f'TEXT(bitable::$table[{board}].$field[fldDate],"yyyy-MM")'
+        f" + bitable::$table[{board}].$field[fldClient].$column[fldLink].$column[fldNo]"
+    )
+    wanted = (
+        f'TEXT([{schema.BOARD_ORDER_DATE}], "yyyy-MM")'
+        f" + [{schema.BOARD_CLIENT_LINK}].[{schema.CLIENT_REFERRAL_LINK}].[{schema.REFERRAL_NO}]"
+    )
+    assert _same_expression(current, wanted, catalog)
+
+
+def test_内部公式解析不了时不当成一样():
+    from crm_basebot.structure import _same_expression
+
+    assert not _same_expression("bitable::$table[tblX].$field[fldY]", "[客户]")
 
 
 def test_公式一样时什么都不做_空格不算差别():
@@ -699,3 +751,47 @@ def test_ECAS结算表在的话补状态列_不在就不建():
 
     result, endpoint = _ensure(_complete_fields({}), apply=True)  # 没有 ECAS 表
     assert endpoint.created == [] and not any("ECAS" in item for item in result.plan)
+
+
+def test_ECAS申请表在的话把旧佣金公式换掉_不在就不建():
+    from types import SimpleNamespace
+
+    from crm_basebot.domain import ecas
+    from crm_basebot.lark.bitable import FieldInfo, TableInfo
+    from crm_basebot.structure import ensure_structure
+
+    old_fee = 'IF(ISBLANK([分佣比例]), "", [ECAS金额] * [分佣比例] / 100)'
+    fields = _complete_fields({})
+    ecas_fields = []
+    for index, (name, type_code) in enumerate(ecas.ECAS_FIELDS.items()):
+        props = {}
+        if name in ecas.ECAS_FORMULAS:
+            expression = old_fee if name == ecas.ECAS_FEE else ecas.ECAS_FORMULAS[name][0]
+            props = {"formula_expression": expression}
+        ecas_fields.append(
+            FieldInfo(
+                field_id=f"fldE{index}",
+                name=name,
+                type=type_code,
+                ui_type="",
+                is_primary=index == 0,
+                props=props,
+            )
+        )
+
+    class WithApplications(_Base):
+        def list_tables(self):
+            return super().list_tables() + [
+                TableInfo(table_id=f"tbl_{ecas.TABLE_ECAS_NAME}", name=ecas.TABLE_ECAS_NAME)
+            ]
+
+    sdk = _Sdk()
+    result = ensure_structure(
+        settings=SimpleNamespace(base_app_token="bascn"),
+        bitable=WithApplications({**fields, ecas.TABLE_ECAS_NAME: ecas_fields}),
+        client=sdk,
+        apply=True,
+    )
+    assert result.plan == [f"「{ecas.TABLE_ECAS_NAME}」改公式 {ecas.ECAS_FEE}"]
+    assert sdk.app_table_field.updated[0][1] == ecas.ECAS_FORMULAS[ecas.ECAS_FEE][0]
+    assert not any("建表" in item and "ECAS" in item for item in result.plan)

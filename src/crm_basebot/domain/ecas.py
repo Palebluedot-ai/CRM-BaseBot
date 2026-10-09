@@ -96,11 +96,16 @@ ECAS_FORMULAS: dict[str, tuple[str, int]] = {
         f"[{ECAS_REFERRAL_LINK}].[{schema.REFERRAL_NO}]",
         schema.FORMULA_DATA_TYPE_TEXT,
     ),
-    # 带 ISBLANK 保护：没填比例的行（来源表里
-    # 六成的申请没有介绍人）留空才是对的。空值参与乘法会算出 0，而 0 在这一列等于宣称
-    # 「这笔没有返佣」，实际是「这笔没有介绍人」。
+    # 没挂上渠道，或没填比例：留空，不要算成 0。
+    # 0 等于宣称「这笔没有返佣」，实际是「渠道还没指定」或「比例还没填」。
+    # 「ECAS佣金」是公式，界面上删不掉，也不能跳过这一格。所属渠道被清掉之后，
+    # 它必须跟着变空（2026-10：只看比例的话，渠道删了 50% 还在，佣金就一直挂着）。
+    # 判据用「渠道编号」而不是直接 ISBLANK(关联)：编号是关联带出来的文本公式，
+    # 和看板上「分佣比例 → 本笔佣金」同一条已经用过的路。比例仍留在本行，
+    # 重新挂上渠道就回来。这里不读渠道表的比例。
     ECAS_FEE: (
-        f'IF(ISBLANK([{ECAS_RATE}]), "", [{ECAS_AMOUNT}] * [{ECAS_RATE}] / 100)',
+        f'IF(OR(ISBLANK([{ECAS_REFERRAL_NO}]), ISBLANK([{ECAS_RATE}])), "", '
+        f"[{ECAS_AMOUNT}] * [{ECAS_RATE}] / 100)",
         schema.FORMULA_DATA_TYPE_NUMBER,
     ),
     # 申请时间存的是业务时区的那一刻，平台时区实测 UTC+8，和 Asia/Singapore 同偏移，

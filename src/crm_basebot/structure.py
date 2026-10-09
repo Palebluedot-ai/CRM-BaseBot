@@ -24,6 +24,7 @@ Base 里已经有同事在用的表，所以安全边界很明确：
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -70,9 +71,12 @@ TARGET_TABLES: dict[str, dict[str, int]] = {
     schema.TABLE_SALES_NAME: schema.SALES_FIELDS,
 }
 
-# 不归我们建、但有的话要补列的表。ECAS 两张表由 scripts/import_ecas.py 建；
-# 2026-10-02 起结算表多了「状态」（进行中 / 已结算），老表靠这里补上。没有这张表就跳过。
+# 不归我们建、但有的话要补列、并跟上公式。ECAS 两张表由 scripts/import_ecas.py 建；
+# 没有这张表就跳过，不在这里新建。
+# 2026-10-02 起结算表多了「状态」。ECAS 申请表的公式（尤其「ECAS佣金」）也从这里换，
+# 不然 sync_base.py --apply 只动交易那边，渠道清掉后佣金列不会跟着变。
 OPTIONAL_TABLES: dict[str, dict[str, int]] = {
+    ecas.TABLE_ECAS_NAME: ecas.ECAS_FIELDS,
     ecas.TABLE_ECAS_COMMISSION_NAME: ecas.ECAS_COMMISSION_FIELDS,
 }
 
@@ -82,6 +86,7 @@ OPTIONAL_TABLES: dict[str, dict[str, int]] = {
 LINK_TARGETS: dict[tuple[str, str], str] = {
     (schema.TABLE_CLIENT_NAME, schema.CLIENT_REFERRAL_LINK): schema.TABLE_REFERRAL_NAME,
     (schema.TABLE_DAILY_BOARD_NAME, schema.BOARD_CLIENT_LINK): schema.TABLE_CLIENT_NAME,
+    (ecas.TABLE_ECAS_NAME, ecas.ECAS_REFERRAL_LINK): schema.TABLE_REFERRAL_NAME,
 }
 
 
@@ -318,6 +323,7 @@ FORMULAS: dict[tuple[str, str], tuple[str, int]] = {
         (schema.TABLE_CLIENT_NAME, name): formula
         for name, formula in schema.CLIENT_DERIVED_FORMULAS.items()
     },
+    **{(ecas.TABLE_ECAS_NAME, name): formula for name, formula in ecas.ECAS_FORMULAS.items()},
 }
 
 
@@ -326,8 +332,65 @@ def _formula_for(table_name: str, field_name: str) -> tuple[str, int] | None:
     return FORMULAS.get((table_name, field_name))
 
 
-def _same_expression(current: str, wanted: str) -> bool:
-    """空格不算差别：平台读回来的表达式可能改过空格。"""
+# 飞书把公式存成 bitable::$table[tbl…].$field[fld…].$column[fld…]。
+# 读回来和我们写进去的「[客户].[所属渠道].[渠道编号]」不是同一串字，意思一样。
+_BITABLE_REF = re.compile(
+    r"bitable::\$table\[(?P<table>tbl[A-Za-z0-9]+)\]"
+    r"\.\$field\[(?P<field>fld[A-Za-z0-9]+)\]"
+    r"(?P<cols>(?:\.\$column\[fld[A-Za-z0-9]+\])*)"
+)
+_COLUMN_ID = re.compile(r"fld[A-Za-z0-9]+")
+
+
+def _formula_catalog(
+    fields_by_table_id: dict[str, list[Any]],
+) -> dict[tuple[str, str], tuple[str, str | None]]:
+    """(table_id, field_id) -> (列名, 关联指向的 table_id)。用来把内部公式翻回列名。"""
+    catalog: dict[tuple[str, str], tuple[str, str | None]] = {}
+    for table_id, fields in fields_by_table_id.items():
+        for item in fields:
+            linked = (item.props or {}).get("table_id")
+            catalog[(table_id, item.field_id)] = (
+                item.name,
+                linked if isinstance(linked, str) and linked else None,
+            )
+    return catalog
+
+
+def humanize_formula(
+    expression: str, catalog: dict[tuple[str, str], tuple[str, str | None]]
+) -> str:
+    """把平台存的内部公式换成「[列名].[列名]」。解析不了的片段原样留下。"""
+
+    def repl(match: re.Match[str]) -> str:
+        table_id = match.group("table")
+        field_id = match.group("field")
+        found = catalog.get((table_id, field_id))
+        if found is None:
+            return match.group(0)
+        name, linked = found
+        parts = [name]
+        for column_id in _COLUMN_ID.findall(match.group("cols")):
+            if linked is None:
+                return match.group(0)
+            found = catalog.get((linked, column_id))
+            if found is None:
+                return match.group(0)
+            name, linked = found
+            parts.append(name)
+        return ".".join(f"[{part}]" for part in parts)
+
+    return _BITABLE_REF.sub(repl, expression)
+
+
+def _same_expression(
+    current: str,
+    wanted: str,
+    catalog: dict[tuple[str, str], tuple[str, str | None]] | None = None,
+) -> bool:
+    """空格不算差别。平台读回来的内部字段编号先翻成列名再比。"""
+    if catalog and "bitable::$table[" in current:
+        current = humanize_formula(current, catalog)
     return "".join(current.split()) == "".join(wanted.split())
 
 
@@ -371,6 +434,10 @@ def ensure_structure(
     """
     existing = {table.name: table.table_id for table in bitable.list_tables()}
     result = StructureResult(table_ids=dict(existing))
+    # 一次读完，后面比公式和补字段都用这份。平台把公式存成字段编号，
+    # 翻回列名要能顺着关联跳到别的表，所以不能只读当前这一张。
+    fields_by_table_id = {table_id: bitable.list_fields(table_id) for table_id in existing.values()}
+    catalog = _formula_catalog(fields_by_table_id)
 
     def link_target_id(table_name: str, field_name: str) -> str | None:
         target = LINK_TARGETS.get((table_name, field_name))
@@ -399,7 +466,7 @@ def ensure_structure(
                     )
             continue
 
-        current = {f.name: f for f in bitable.list_fields(table_id)}
+        current = {f.name: f for f in fields_by_table_id.get(table_id, [])}
 
         for field_name, type_code in target_fields.items():
             found = current.get(field_name)
@@ -422,7 +489,7 @@ def ensure_structure(
                 # 公式列的值是算出来的，换公式不会毁数据 —— 所以这一种「改」是允许的。
                 # 规则变了（例如 2026-09-26 本笔佣金加上 AI 规则）要靠这里把老表跟上。
                 expression_now = str((found.props or {}).get("formula_expression") or "")
-                if not _same_expression(expression_now, wanted[0]):
+                if not _same_expression(expression_now, wanted[0], catalog):
                     result.plan.append(f"「{table_name}」改公式 {field_name}")
                     if apply:
                         update_formula(

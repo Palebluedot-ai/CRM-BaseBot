@@ -242,10 +242,14 @@ def test_ECAS的代码里一次都没有引用渠道表的分佣比例():
         assert offenders == [], f"{module.__name__} 里读了渠道表的分佣比例"
 
 
-def test_佣金公式对没填比例的行留空而不是算成零():
+def test_佣金公式对没填比例或没挂渠道的行留空而不是算成零():
     expression, _ = ecas.ECAS_FORMULAS[ecas.ECAS_FEE]
-    # 0 在这一列等于宣称「这笔没有返佣」，实际是「这笔没有介绍人」，两码事
-    assert expression.startswith(f'IF(ISBLANK([{ecas.ECAS_RATE}]), ""')
+    # 0 在这一列等于宣称「这笔没有返佣」，实际是「没填比例」或「渠道被清掉了」。
+    # 渠道清掉之后公式必须跟着空：这一列在界面上删不掉，也不能跳过。
+    assert f"ISBLANK([{ecas.ECAS_RATE}])" in expression
+    assert f"ISBLANK([{ecas.ECAS_REFERRAL_NO}])" in expression
+    assert expression.startswith("IF(OR(")
+    assert ', ""' in expression
 
 
 def test_汇总表的比例说明是文本不是数字():
